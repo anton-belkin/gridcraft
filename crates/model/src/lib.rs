@@ -20,7 +20,7 @@ pub use cell::{Cell, CellPicture, Formula};
 pub use features::*;
 pub use password::PasswordHash;
 pub use preserved::{Preserved, PreservedPart, PreservedRel, PreservedSheet, PreservedXml};
-pub use query::{Query, QuerySource, QueryStep, StepOp};
+pub use query::{ExcelQuery, Query, QuerySource, QueryStep, StepOp};
 pub use sheet::{DEFAULT_COL_WIDTH, DEFAULT_ROW_HEIGHT, LineIndex, Sheet, SheetViewMode, Visibility, points_to_chars};
 pub use store::CellStore;
 pub use style::{

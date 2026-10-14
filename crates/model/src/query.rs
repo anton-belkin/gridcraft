@@ -636,6 +636,53 @@ pub struct QueryStatus {
     pub error: Option<String>,
 }
 
+/// Largest M formula text kept for one Excel query, in bytes.
+pub const MAX_M_TEXT: usize = 4 * 1024 * 1024;
+
+/// A Power Query query authored in Excel: its M formula as Excel stored it (the `DataMashup` part)
+/// and where it loads. GridCraft has no M interpreter, so these are listed and shown read-only and
+/// never refreshed; Excel's own parts are kept byte for byte when the workbook is saved. Read from
+/// the file, never written: not in JSON.
+#[derive(Clone, Debug, Default, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExcelQuery {
+    pub name: String,
+    /// The query's M expression (the text after `shared Name =` in `Section1.m`).
+    pub formula: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub description: String,
+    /// The connection (`xl/connections.xml`) that reads the query, if any.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub connection: Option<String>,
+    /// The table the query loads into, and its sheet.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub table: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sheet: Option<String>,
+    /// Also loaded to the Data Model.
+    pub data_model: bool,
+    /// Rows of the last load, and when it happened (as Excel recorded them).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rows: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_refreshed: Option<String>,
+    /// Excel's Refresh data when opening the file.
+    pub refresh_on_open: bool,
+}
+
+impl ExcelQuery {
+    /// `table`, `dataModel` or `connectionOnly`.
+    pub fn load_kind(&self) -> &'static str {
+        if self.table.is_some() {
+            "table"
+        } else if self.data_model {
+            "dataModel"
+        } else {
+            "connectionOnly"
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

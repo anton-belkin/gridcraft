@@ -341,6 +341,8 @@ pub fn read_xlsx(bytes: &[u8]) -> Result<(Workbook, ReadReport), IoError> {
     }
     let (queries, query_parts) = crate::queries::read(&mut cx, &wb_rels);
     wb.queries = queries;
+    // Excel's own queries are listed read-only; their parts stay in the kept content.
+    wb.excel_queries = crate::mashup::read(&mut cx, &wb_rels, &wb);
     wb.preserved = kept.workbook(&mut cx, &wb_part, &wb_xml, &file_to_model);
     crate::queries::unkeep(&mut wb.preserved, &query_parts);
     // Calls of LAMBDA names are spelled like the names (the parser upper-cases them).

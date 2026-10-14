@@ -571,6 +571,18 @@ pub(super) fn translate(text: &str) -> Option<&'static str> {
         "Connection only." => "Nur Verbindung.",
         "{n} rows loaded." => "{n} Zeilen geladen.",
         "Not loaded yet." => "Noch nicht geladen.",
+        "Loads to table {table} ({n} rows)." => "Lädt in Tabelle {table} ({n} Zeilen).",
+        "Loads to table {table}." => "Lädt in Tabelle {table}.",
+        "Loads to the Data Model." => "Lädt in das Datenmodell.",
+        "Made in Excel: refresh needs Power Query M, not supported yet." => {
+            "In Excel erstellt: Aktualisieren erfordert Power Query M, noch nicht unterstützt."
+        }
+        "GridCraft shows this query's M formula but can't run it. The data loaded last time stays in the workbook, and Excel refreshes the query as before." => {
+            "GridCraft zeigt die M-Formel dieser Abfrage, kann sie aber nicht ausführen. Die zuletzt geladenen Daten bleiben in der Arbeitsmappe, und Excel aktualisiert die Abfrage wie bisher."
+        }
+        "View M Formula" => "M-Formel anzeigen",
+        "Hide M Formula" => "M-Formel ausblenden",
+        "Copy M Formula" => "M-Formel kopieren",
         "Duplicate" => "Duplizieren",
         "Reference" => "Verweis",
         "Merge…" => "Zusammenführen…",

@@ -1142,12 +1142,14 @@ pub fn pane(app: &mut SheetApp, ui: &mut Ui) {
     });
     let connections = ui.ctx().data(|m| m.get_temp::<bool>(egui::Id::new("pq_pane_connections"))).unwrap_or(false);
     let list = queries.as_array().cloned().unwrap_or_default();
-    ui.label(RichText::new(format!("{} {}", list.len(), lang.tr(if list.len() == 1 { "query" } else { "queries" }))).small().color(t.text_dim));
+    let excel = app.session.run("query.listExcel", json!({})).ok().and_then(|v| v.as_array().cloned()).unwrap_or_default();
+    let count = list.len() + excel.len();
+    ui.label(RichText::new(format!("{count} {}", lang.tr(if count == 1 { "query" } else { "queries" }))).small().color(t.text_dim));
     if blocked {
         ui.colored_label(Color32::from_rgb(0xB0, 0x6A, 0x00), lang.tr("External data connections are disabled. Enable Content to refresh."));
     }
     ui.separator();
-    if list.is_empty() {
+    if count == 0 {
         ui.label(RichText::new(lang.tr("This workbook has no queries yet. Use Data › Get Data to add one.")).italics());
     }
     for q in &list {
@@ -1221,6 +1223,80 @@ pub fn pane(app: &mut SheetApp, ui: &mut Ui) {
         });
         ui.separator();
     }
+    for q in &excel {
+        excel_query_row(ui, &t, lang, q, connections);
+        ui.separator();
+    }
+}
+
+/// A Power Query query made in Excel: listed with where it loads, its M formula viewable
+/// read-only (View M Formula, or double-click). GridCraft can't run M, so there is no refresh.
+fn excel_query_row(ui: &mut Ui, t: &Tokens, lang: Language, q: &Json, connections: bool) {
+    let name = s(q, "name").to_string();
+    let title = match q.get("connection").and_then(Json::as_str) {
+        Some(c) if connections => c.to_string(),
+        _ if connections => format!("Query - {name}"),
+        _ => name.clone(),
+    };
+    let rows = q.get("rows").and_then(Json::as_u64);
+    let status = match (q.get("load").and_then(Json::as_str), q.get("table").and_then(Json::as_str)) {
+        (Some("table"), Some(table)) => match rows {
+            Some(n) => lang.tr("Loads to table {table} ({n} rows).").replace("{table}", table).replace("{n}", &n.to_string()),
+            None => lang.tr("Loads to table {table}.").replace("{table}", table),
+        },
+        (Some("dataModel"), _) => lang.tr("Loads to the Data Model.").to_string(),
+        _ => lang.tr("Connection only.").to_string(),
+    };
+    let open_id = egui::Id::new(("pq_excel_m", &name));
+    let mut open = ui.ctx().data(|m| m.get_temp::<bool>(open_id)).unwrap_or(false);
+    let mut toggle = false;
+    let r = egui::Frame::NONE
+        .inner_margin(egui::Margin::symmetric(4, 3))
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.horizontal(|ui| {
+                let (rect, _) = ui.allocate_exact_size(vec2(16.0, 16.0), egui::Sense::hover());
+                crate::icons::paint(ui.painter(), rect, crate::icons::Icon::Query, t.text_dim);
+                ui.vertical(|ui| {
+                    ui.label(RichText::new(&title).strong());
+                    ui.label(RichText::new(&status).small().color(t.text_dim));
+                    ui.label(RichText::new(lang.tr("Made in Excel: refresh needs Power Query M, not supported yet.")).small().color(t.text_dim))
+                        .on_hover_text(lang.tr(
+                            "GridCraft shows this query's M formula but can't run it. The data loaded last time stays in the workbook, and Excel refreshes the query as before.",
+                        ));
+                    if ui.link(RichText::new(lang.tr(if open { "Hide M Formula" } else { "View M Formula" })).small()).clicked() {
+                        toggle = true;
+                    }
+                });
+            });
+        })
+        .response
+        .interact(egui::Sense::click());
+    if r.double_clicked() || toggle {
+        open = !open;
+    }
+    let formula = s(q, "formula").to_string();
+    r.context_menu(|ui| {
+        if ui.button(lang.tr(if open { "Hide M Formula" } else { "View M Formula" })).clicked() {
+            open = !open;
+            ui.close();
+        }
+        if ui.button(lang.tr("Copy M Formula")).clicked() {
+            ui.ctx().copy_text(formula.clone());
+            ui.close();
+        }
+    });
+    if open {
+        if let Some(d) = q.get("description").and_then(Json::as_str) {
+            ui.label(RichText::new(d).small().italics());
+        }
+        let mut text = formula.as_str();
+        let lines = text.lines().count().clamp(3, 18);
+        egui::ScrollArea::vertical().id_salt(("pq_excel_m_scroll", &name)).max_height(280.0).show(ui, |ui| {
+            ui.add(egui::TextEdit::multiline(&mut text).code_editor().desired_rows(lines).desired_width(f32::INFINITY));
+        });
+    }
+    ui.ctx().data_mut(|m| m.insert_temp(open_id, open));
 }
 
 // ---------------------------------------------------------------- the Power Query Editor

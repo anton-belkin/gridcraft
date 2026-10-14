@@ -123,6 +123,10 @@ pub struct Workbook {
     /// Get & Transform queries (Data › Queries & Connections), in the order they were created.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub queries: Vec<crate::query::Query>,
+    /// Power Query queries authored in Excel, read from its `DataMashup` part (kept in `preserved`)
+    /// to be listed read-only. Not in JSON.
+    #[serde(skip)]
+    pub excel_queries: Vec<crate::query::ExcelQuery>,
 }
 
 impl Default for Workbook {
@@ -152,6 +156,7 @@ impl Workbook {
             preserved: None,
             source_dir: None,
             queries: vec![],
+            excel_queries: vec![],
         }
     }
     pub fn sheet(&self, i: usize) -> Option<&Sheet> {

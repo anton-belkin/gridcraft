@@ -346,7 +346,16 @@ pub fn specs() -> Vec<CommandSpec> {
         ),
         // ---- query primitives
         cmd!(query "query.list", "List Queries", [], None, "{} → [{name, source, steps, load, status}]", has_doc, list),
-        cmd!(query "query.get", "Get Query", [], None, "{name} → {query, steps: [names], m}", has_doc, get),
+        cmd!(query "query.get", "Get Query", [], None, "{name} → {query, steps: [names], m} (an Excel query: {query, m, excel: true, refreshable: false})", has_doc, get),
+        cmd!(
+            query "query.listExcel",
+            "List Excel Queries",
+            [],
+            None,
+            "{} → [{name, formula, description?, connection?, table?, sheet?, load: table|dataModel|connectionOnly, rows?, lastRefreshed?, refreshOnOpen}]: Power Query queries authored in Excel, read-only (M isn't evaluated)",
+            has_doc,
+            list_excel
+        ),
         cmd!(
             "query.set",
             "Edit Query",
@@ -445,7 +454,34 @@ fn active_query(s: &Session) -> Option<usize> {
 }
 
 fn query_index(s: &Session, name: &str) -> Result<usize> {
-    s.doc()?.wb.queries.iter().position(|q| q.name.eq_ignore_ascii_case(name)).ok_or_else(|| bad("query", format!("no query named `{name}`")))
+    let wb = &s.doc()?.wb;
+    if let Some(i) = wb.queries.iter().position(|q| q.name.eq_ignore_ascii_case(name)) {
+        return Ok(i);
+    }
+    match wb.excel_queries.iter().find(|q| q.name.eq_ignore_ascii_case(name)) {
+        Some(q) => Err(excel_query_error(&q.name)),
+        None => Err(bad("query", format!("no query named `{name}`"))),
+    }
+}
+
+/// Whether one of Excel's queries is called `name` (query names are shared with them).
+fn excel_named(wb: &gridcraft_model::Workbook, name: &str) -> bool {
+    wb.excel_queries.iter().any(|q| q.name.eq_ignore_ascii_case(name))
+}
+
+/// Why an Excel query can't be refreshed or edited.
+fn excel_query_error(name: &str) -> EngineError {
+    EngineError::Other(format!(
+        "\"{name}\" is a Power Query query made in Excel. GridCraft shows its M formula but can't refresh or edit it: Power Query M isn't supported yet. Excel refreshes it as before."
+    ))
+}
+
+/// The Excel query loading into the table at the active cell.
+fn active_excel_query(s: &Session) -> Option<String> {
+    let d = s.active()?;
+    let sh = d.wb.active()?;
+    let t = sh.tables.iter().find(|t| t.range.contains(d.selection.active))?;
+    d.wb.excel_queries.iter().find(|q| q.table.as_deref().is_some_and(|n| n.eq_ignore_ascii_case(&t.name))).map(|q| q.name.clone())
 }
 
 fn name_param<'a>(p: &'a Json, id: &str) -> Result<&'a str> {
@@ -468,7 +504,7 @@ fn check_name(name: &str) -> Result<()> {
 fn unique_query_name(wb: &gridcraft_model::Workbook, base: &str) -> String {
     let base: String = base.trim().chars().filter(|c| !c.is_control()).take(MAX_NAME - 6).collect();
     let base = if base.is_empty() { "Query1".to_string() } else { base };
-    let taken = |n: &str| wb.queries.iter().any(|q| q.name.eq_ignore_ascii_case(n));
+    let taken = |n: &str| wb.queries.iter().any(|q| q.name.eq_ignore_ascii_case(n)) || excel_named(wb, n);
     if !taken(&base) {
         return base;
     }
@@ -1163,7 +1199,15 @@ fn existing_connections(s: &mut Session, _: &Json) -> Result<Json> {
 fn refresh_all(s: &mut Session, p: &Json) -> Result<Json> {
     let replace = bool_param(p, "replace").unwrap_or(false);
     let idx: Vec<usize> = s.doc()?.wb.queries.iter().enumerate().filter(|(_, q)| q.refresh.in_refresh_all).map(|(i, _)| i).collect();
-    refresh_indices(s, idx, true, Some(replace))
+    let excel: Vec<String> = s.doc()?.wb.excel_queries.iter().map(|q| q.name.clone()).collect();
+    let mut r = refresh_indices(s, idx, true, Some(replace))?;
+    // Excel's queries are skipped (no M interpreter), and the result says so.
+    if !excel.is_empty()
+        && let Json::Object(m) = &mut r
+    {
+        m.insert("skippedExcelQueries".into(), json!(excel));
+    }
+    Ok(r)
 }
 
 fn refresh_one(s: &mut Session, p: &Json) -> Result<Json> {
@@ -1177,6 +1221,9 @@ fn refresh_one(s: &mut Session, p: &Json) -> Result<Json> {
                     d.wb.active().is_some_and(|sh| sh.pivots.iter().any(|pt| pt.last_range.is_some_and(|r| r.contains(d.selection.active))));
                 if in_pivot {
                     return s.execute("pivot.refresh", json!({}));
+                }
+                if let Some(name) = active_excel_query(s) {
+                    return Err(excel_query_error(&name));
                 }
                 return Err(EngineError::Other("Select a cell in a query's table or a PivotTable to refresh it.".into()));
             }
@@ -1329,9 +1376,28 @@ fn list(s: &mut Session, _: &Json) -> Result<Json> {
 }
 
 fn get(s: &mut Session, p: &Json) -> Result<Json> {
-    let qi = query_index(s, name_param(p, "query.get")?)?;
+    let name = name_param(p, "query.get")?;
+    let d = s.doc()?;
+    if !d.wb.queries.iter().any(|q| q.name.eq_ignore_ascii_case(name))
+        && let Some(q) = d.wb.excel_queries.iter().find(|q| q.name.eq_ignore_ascii_case(name))
+    {
+        return Ok(json!({"query": excel_json(q), "m": q.formula, "excel": true, "refreshable": false}));
+    }
+    let qi = query_index(s, name)?;
     let q = s.doc()?.wb.queries.get(qi).ok_or_else(|| bad("query", "gone"))?;
     Ok(json!({"query": q, "steps": mtext::step_names(q), "m": mtext::query(q)}))
+}
+
+fn excel_json(q: &gridcraft_model::ExcelQuery) -> Json {
+    let mut v = serde_json::to_value(q).unwrap_or(Json::Null);
+    if let Json::Object(m) = &mut v {
+        m.insert("load".into(), json!(q.load_kind()));
+    }
+    v
+}
+
+fn list_excel(s: &mut Session, _: &Json) -> Result<Json> {
+    Ok(Json::Array(s.doc()?.wb.excel_queries.iter().map(excel_json).collect()))
 }
 
 /// References to query `old` in other queries, renamed to `new`.
@@ -1367,7 +1433,7 @@ fn set(s: &mut Session, p: &Json) -> Result<Json> {
     };
     {
         let wb = &s.doc()?.wb;
-        if wb.queries.iter().enumerate().any(|(i, x)| Some(i) != existing && x.name.eq_ignore_ascii_case(&q.name)) {
+        if wb.queries.iter().enumerate().any(|(i, x)| Some(i) != existing && x.name.eq_ignore_ascii_case(&q.name)) || excel_named(wb, &q.name) {
             return Err(EngineError::Other(format!("A query named '{}' already exists.", q.name)));
         }
         if existing.is_none() && wb.queries.len() >= MAX_QUERIES {
@@ -1430,7 +1496,8 @@ fn rename(s: &mut Session, p: &Json) -> Result<Json> {
     let qi = query_index(s, name_param(p, "query.rename")?)?;
     let new = str_param(p, "newName").ok_or_else(|| bad("query.rename", "missing `newName`"))?.trim().to_string();
     check_name(&new)?;
-    if s.doc()?.wb.queries.iter().enumerate().any(|(i, q)| i != qi && q.name.eq_ignore_ascii_case(&new)) {
+    let wb = &s.doc()?.wb;
+    if wb.queries.iter().enumerate().any(|(i, q)| i != qi && q.name.eq_ignore_ascii_case(&new)) || excel_named(wb, &new) {
         return Err(EngineError::Other(format!("A query named '{new}' already exists.")));
     }
     edit(s, |cx| {

@@ -751,3 +751,43 @@ fn hostile_params_and_sources_never_panic() {
         assert!(!matches!(r, Err(crate::EngineError::Internal(..))), "{id} {p}: {r:?}");
     }
 }
+
+#[test]
+fn excel_queries_are_listed_read_only() {
+    let fake = Arc::new(Fake::default());
+    let mut s = session(&fake);
+    s.execute("range.setValues", json!({"range": "A1:B2", "values": [["Region", "Amount"], ["North", 5]]})).unwrap();
+    s.execute("insert.table", json!({"range": "A1:B2", "header": true})).unwrap();
+    let table = s.doc().unwrap().wb.active().unwrap().tables[0].name.clone();
+    let wb = Arc::make_mut(&mut s.doc_mut().unwrap().wb);
+    wb.excel_queries = vec![gridcraft_model::ExcelQuery {
+        name: "Sales".into(),
+        formula: "let\n    Source = 1\nin\n    Source".into(),
+        table: Some(table),
+        sheet: Some("Sheet1".into()),
+        rows: Some(1),
+        ..Default::default()
+    }];
+    let list = s.execute("query.listExcel", json!({})).unwrap();
+    assert_eq!(list[0]["name"], "Sales");
+    assert_eq!(list[0]["load"], "table");
+    assert!(list[0]["formula"].as_str().unwrap().contains("Source = 1"));
+    // GridCraft's own query list is unchanged; query.get shows the M text.
+    assert_eq!(s.execute("query.list", json!({})).unwrap(), json!([]));
+    let got = s.execute("query.get", json!({"name": "sales"})).unwrap();
+    assert_eq!((got["excel"].as_bool(), got["refreshable"].as_bool()), (Some(true), Some(false)));
+    assert_eq!(got["m"], list[0]["formula"]);
+    // Refreshing or editing one says why it can't, by name or from a cell of its table.
+    let e = s.execute("data.refresh", json!({"query": "Sales"})).unwrap_err().to_string();
+    assert!(e.contains("Power Query M isn't supported"), "{e}");
+    s.execute("selection.set", json!({"cell": "A2"})).unwrap();
+    let e = s.execute("data.refresh", json!({})).unwrap_err().to_string();
+    assert!(e.contains("\"Sales\" is a Power Query query made in Excel"), "{e}");
+    assert!(s.execute("query.delete", json!({"name": "Sales"})).is_err());
+    assert_eq!(s.doc().unwrap().wb.excel_queries.len(), 1);
+    // Refresh All skips it and says so; a new query can't take its name.
+    let r = s.execute("data.refreshAll", json!({})).unwrap();
+    assert_eq!(r["skippedExcelQueries"], json!(["Sales"]));
+    let q = json!({"query": {"name": "Sales", "source": {"kind": "text", "text": "a\n1"}, "load": {"to": "connectionOnly"}}});
+    assert!(s.execute("query.set", q).is_err());
+}
