@@ -1224,14 +1224,15 @@ pub fn pane(app: &mut SheetApp, ui: &mut Ui) {
         ui.separator();
     }
     for q in &excel {
-        excel_query_row(ui, &t, lang, q, connections);
+        excel_query_row(app, ui, &t, lang, q, connections);
         ui.separator();
     }
 }
 
-/// A Power Query query made in Excel: listed with where it loads, its M formula viewable
-/// read-only (View M Formula, or double-click). GridCraft can't run M, so there is no refresh.
-fn excel_query_row(ui: &mut Ui, t: &Tokens, lang: Language, q: &Json, connections: bool) {
+/// A Power Query query made in Excel: listed with where it loads, refreshed from its M formula,
+/// which is viewable read-only (View M Formula, or double-click). What GridCraft can't run yet
+/// is named.
+fn excel_query_row(app: &mut SheetApp, ui: &mut Ui, t: &Tokens, lang: Language, q: &Json, connections: bool) {
     let name = s(q, "name").to_string();
     let title = match q.get("connection").and_then(Json::as_str) {
         Some(c) if connections => c.to_string(),
@@ -1260,12 +1261,25 @@ fn excel_query_row(ui: &mut Ui, t: &Tokens, lang: Language, q: &Json, connection
                 ui.vertical(|ui| {
                     ui.label(RichText::new(&title).strong());
                     ui.label(RichText::new(&status).small().color(t.text_dim));
-                    ui.label(RichText::new(lang.tr("Made in Excel: refresh needs Power Query M, not supported yet.")).small().color(t.text_dim))
-                        .on_hover_text(lang.tr(
-                            "GridCraft shows this query's M formula but can't run it. The data loaded last time stays in the workbook, and Excel refreshes the query as before.",
-                        ));
+                    let missing: Vec<&str> = q.get("unsupported").and_then(Json::as_array).map(|a| a.iter().filter_map(Json::as_str).collect()).unwrap_or_default();
+                    if let Some(e) = q.get("error").and_then(Json::as_str) {
+                        ui.label(RichText::new(lang.tr("Load error.")).small().color(Color32::from_rgb(0xC0, 0x30, 0x30))).on_hover_text(e);
+                    } else if q.get("syntaxError").is_some_and(Json::is_string) {
+                        ui.label(RichText::new(lang.tr("Made in Excel: its M formula can't be read.")).small().color(t.text_dim))
+                            .on_hover_text(s(q, "syntaxError"));
+                    } else if !missing.is_empty() {
+                        ui.label(RichText::new(lang.tr("Made in Excel: needs {names}, not supported yet.").replace("{names}", &missing.join(", "))).small().color(t.text_dim))
+                            .on_hover_text(lang.tr("GridCraft runs this query's M formula, but not these functions yet. The data loaded last time stays in the workbook, and Excel refreshes the query as before."));
+                    } else {
+                        ui.label(RichText::new(lang.tr("Made in Excel: refreshed from its M formula.")).small().color(t.text_dim));
+                    }
                     if ui.link(RichText::new(lang.tr(if open { "Hide M Formula" } else { "View M Formula" })).small()).clicked() {
                         toggle = true;
+                    }
+                });
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if crate::widgets::icon_button(ui, crate::icons::Icon::Refresh, t.text, "Refresh", vec2(20.0, 20.0)).clicked() {
+                        app.run_or_alert("data.refresh", json!({"query": name}));
                     }
                 });
             });
@@ -1277,6 +1291,10 @@ fn excel_query_row(ui: &mut Ui, t: &Tokens, lang: Language, q: &Json, connection
     }
     let formula = s(q, "formula").to_string();
     r.context_menu(|ui| {
+        if ui.button(lang.tr("Refresh")).clicked() {
+            app.run_or_alert("data.refresh", json!({"query": name}));
+            ui.close();
+        }
         if ui.button(lang.tr(if open { "Hide M Formula" } else { "View M Formula" })).clicked() {
             open = !open;
             ui.close();

@@ -5,6 +5,7 @@ use std::collections::HashMap;
 use std::io::Read;
 
 use super::{make_zip, minimal};
+use crate::testing::{mashup_part, mashup_stream as stream};
 use crate::{read_xlsx, write_xlsx};
 
 const NS_MAIN: &str = "http://schemas.openxmlformats.org/spreadsheetml/2006/main";
@@ -13,56 +14,6 @@ const REL: &str = "http://schemas.openxmlformats.org/officeDocument/2006/relatio
 const SECTION: &str = "section Section1;\r\n\r\nshared Sales = let\r\n    Source = Excel.CurrentWorkbook(){[Name=\"Raw\"]}[Content],\r\n    Typed = Table.TransformColumnTypes(Source, {{\"Amount\", type number}})\r\nin\r\n    Typed;\r\n\r\n[ Description = \"Sum per region\" ]\r\nshared #\"Region Totals\" = let\r\n    Grouped = Table.Group(Sales, {\"Region\"}, {{\"Total\", each List.Sum([Amount]), type number}})\r\nin\r\n    Grouped;\r\n";
 
 const METADATA: &str = r#"<?xml version="1.0" encoding="utf-8"?><LocalPackageMetadataFile><Items><Item><ItemLocation><ItemType>AllFormulas</ItemType><ItemPath /></ItemLocation><StableEntries /></Item><Item><ItemLocation><ItemType>Formula</ItemType><ItemPath>Section1/Sales</ItemPath></ItemLocation><StableEntries><Entry Type="FillEnabled" Value="l1" /><Entry Type="FillTarget" Value="sSales" /><Entry Type="FillCount" Value="l2" /><Entry Type="FillLastUpdated" Value="d2026-10-01T08:30:00.0000000Z" /></StableEntries></Item><Item><ItemLocation><ItemType>Formula</ItemType><ItemPath>Section1/Region%20Totals</ItemPath></ItemLocation><StableEntries><Entry Type="FillEnabled" Value="l0" /><Entry Type="FillToDataModelEnabled" Value="l1" /></StableEntries></Item><Item><ItemLocation><ItemType>Formula</ItemType><ItemPath>Section1/Sales/Source</ItemPath></ItemLocation><StableEntries /></Item></Items></LocalPackageMetadataFile>"#;
-
-fn b64(data: &[u8]) -> String {
-    const A: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut s = String::new();
-    for c in data.chunks(3) {
-        let n = (c[0] as u32) << 16 | (*c.get(1).unwrap_or(&0) as u32) << 8 | *c.get(2).unwrap_or(&0) as u32;
-        for i in 0..4 {
-            if i <= c.len() {
-                s.push(A[(n >> (18 - 6 * i) & 63) as usize] as char);
-            } else {
-                s.push('=');
-            }
-        }
-    }
-    s
-}
-
-fn block(out: &mut Vec<u8>, data: &[u8]) {
-    out.extend_from_slice(&(data.len() as u32).to_le_bytes());
-    out.extend_from_slice(data);
-}
-
-/// The binary stream: version, package parts, permissions, metadata, permission bindings.
-fn stream(section: &str, metadata: &str) -> Vec<u8> {
-    let package = make_zip(&[
-        ("[Content_Types].xml", br#"<?xml version="1.0"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="xml" ContentType="text/xml"/><Default Extension="m" ContentType="application/x-ms-m"/></Types>"#),
-        ("Config/Package.xml", br#"<?xml version="1.0"?><Package xmlns="http://schemas.microsoft.com/DataMashup"><Version>1.0.0</Version></Package>"#),
-        ("Formulas/Section1.m", section.as_bytes()),
-    ]);
-    let mut meta = vec![];
-    meta.extend_from_slice(&0u32.to_le_bytes());
-    block(&mut meta, metadata.as_bytes());
-    block(&mut meta, &[]);
-    let mut out = vec![];
-    out.extend_from_slice(&0u32.to_le_bytes());
-    block(&mut out, &package);
-    block(&mut out, br#"<?xml version="1.0"?><PermissionList/>"#);
-    block(&mut out, &meta);
-    block(&mut out, &[]);
-    out
-}
-
-/// The custom XML part as Excel writes it: UTF-16 with a byte order mark.
-fn mashup_part(bin: &[u8]) -> Vec<u8> {
-    let text =
-        format!(r#"<?xml version="1.0" encoding="utf-16"?><DataMashup xmlns="http://schemas.microsoft.com/DataMashup">{}</DataMashup>"#, b64(bin));
-    let mut out = vec![0xFF, 0xFE];
-    out.extend(text.encode_utf16().flat_map(u16::to_le_bytes));
-    out
-}
 
 fn connections() -> String {
     format!(

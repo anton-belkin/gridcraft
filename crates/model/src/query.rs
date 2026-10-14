@@ -668,6 +668,9 @@ pub struct ExcelQuery {
     pub last_refreshed: Option<String>,
     /// Excel's Refresh data when opening the file.
     pub refresh_on_open: bool,
+    /// Why the last refresh in GridCraft failed, if it did.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
 }
 
 impl ExcelQuery {

@@ -1,6 +1,6 @@
 # File-format parity
 
-> **Last reviewed:** 2026-10-11 · **Last updated:** 2026-10-14 · **Change:** minor (Excel's Power Query queries listed read-only from the DataMashup part) · **Target:** Microsoft Excel (Microsoft 365), Excel for Mac 16.113.4
+> **Last reviewed:** 2026-10-11 · **Last updated:** 2026-10-15 · **Change:** minor (Excel's Power Query queries refresh from their M formulas) · **Target:** Microsoft Excel (Microsoft 365), Excel for Mac 16.113.4
 
 Every format Excel opens or saves, with GridCraft's read and write support, fidelity and tests.
 Part of [target-app-parity.md](target-app-parity.md). **File formats: ~50% ready, 80–120 h**
@@ -73,7 +73,8 @@ online services, Analysis Services and OLE DB are listed and disabled. Query def
 in GridCraft's own custom XML part (`customXml/gridcraftQueries.xml`), which Excel keeps; Excel's
 own Power Query parts (DataMashup, connections) are passed through unchanged; their queries are
 read from the DataMashup part ([MS-QDEFF]: M formulas, load settings, linked connections and
-tables) and listed read-only, never run. A query table hanging off a loaded table is dropped on
+tables), listed, and refreshed by GridCraft's M interpreter (the M the Power Query Editor writes;
+functions it lacks are named per query). A query table hanging off a loaded table is dropped on
 save, because the table part is rewritten. Loaded results are ordinary tables. Counted under features (Get & Transform, ~45% ready).
 
 ## Work (76–114 h)
@@ -93,6 +94,7 @@ save, because the table part is rewritten. Loaded results are ordinary tables. C
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-15 | minor | Excel's Power Query queries refresh from their M formulas (DataMashup kept byte for byte) |
 | 2026-10-14 | minor | Excel's Power Query queries are read from the DataMashup part and listed read-only; the part stays byte for byte |
 | 2026-10-14 | minor | Get & Transform sources listed; query definitions round-trip in a GridCraft custom XML part beside Excel's kept DataMashup |
 | 2026-10-12 | trivial | XLSX chart sheets are kept on save (#727) |

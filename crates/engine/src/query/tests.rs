@@ -753,41 +753,117 @@ fn hostile_params_and_sources_never_panic() {
 }
 
 #[test]
-fn excel_queries_are_listed_read_only() {
+fn excel_queries_refresh_from_their_m() {
     let fake = Arc::new(Fake::default());
     let mut s = session(&fake);
     s.execute("range.setValues", json!({"range": "A1:B2", "values": [["Region", "Amount"], ["North", 5]]})).unwrap();
     s.execute("insert.table", json!({"range": "A1:B2", "header": true})).unwrap();
+    s.execute("range.setValues", json!({"range": "D1:E4", "values": [["Region", "Amount"], ["North", 10], ["South", 20], ["North", 1]]})).unwrap();
+    s.execute("insert.table", json!({"range": "D1:E4", "name": "Raw"})).unwrap();
     let table = s.doc().unwrap().wb.active().unwrap().tables[0].name.clone();
     let wb = Arc::make_mut(&mut s.doc_mut().unwrap().wb);
-    wb.excel_queries = vec![gridcraft_model::ExcelQuery {
-        name: "Sales".into(),
-        formula: "let\n    Source = 1\nin\n    Source".into(),
-        table: Some(table),
-        sheet: Some("Sheet1".into()),
+    let excel = |name: &str, formula: &str, table: Option<String>| gridcraft_model::ExcelQuery {
+        name: name.into(),
+        formula: formula.into(),
+        sheet: table.as_ref().map(|_| "Sheet1".into()),
+        table,
         rows: Some(1),
         ..Default::default()
-    }];
+    };
+    wb.excel_queries = vec![
+        excel(
+            "Sales",
+            "let\n    Source = Excel.CurrentWorkbook(){[Name=\"Raw\"]}[Content],\n    Grouped = Table.Group(Source, {\"Region\"}, {{\"Amount\", each List.Sum([Amount]), type number}})\nin\n    Grouped",
+            Some(table.clone()),
+        ),
+        excel("Padded", "Table.AddColumn(Sales, \"P\", each Text.PadStart([Region], 9))", None),
+        excel("Remote", "Sql.Database(\"srv\", \"db\")", None),
+    ];
     let list = s.execute("query.listExcel", json!({})).unwrap();
-    assert_eq!(list[0]["name"], "Sales");
-    assert_eq!(list[0]["load"], "table");
-    assert!(list[0]["formula"].as_str().unwrap().contains("Source = 1"));
+    assert_eq!((list[0]["name"].as_str(), list[0]["load"].as_str(), list[0]["refreshable"].as_bool()), (Some("Sales"), Some("table"), Some(true)));
+    // What GridCraft can't run yet is named, without running anything.
+    assert_eq!((list[1]["refreshable"].as_bool(), &list[1]["unsupported"]), (Some(false), &json!(["Text.PadStart"])));
     // GridCraft's own query list is unchanged; query.get shows the M text.
     assert_eq!(s.execute("query.list", json!({})).unwrap(), json!([]));
     let got = s.execute("query.get", json!({"name": "sales"})).unwrap();
-    assert_eq!((got["excel"].as_bool(), got["refreshable"].as_bool()), (Some(true), Some(false)));
+    assert_eq!((got["excel"].as_bool(), got["refreshable"].as_bool()), (Some(true), Some(true)));
     assert_eq!(got["m"], list[0]["formula"]);
-    // Refreshing or editing one says why it can't, by name or from a cell of its table.
-    let e = s.execute("data.refresh", json!({"query": "Sales"})).unwrap_err().to_string();
-    assert!(e.contains("Power Query M isn't supported"), "{e}");
+    // Refresh by name runs the M and rewrites the query's table in place.
+    let r = s.execute("data.refresh", json!({"query": "Sales"})).unwrap();
+    assert_eq!(r["excelQueries"][0]["rows"], 2, "{r}");
+    assert_eq!(
+        (cell(&s, "Sheet1", "A3"), cell(&s, "Sheet1", "B2"), cell(&s, "Sheet1", "B3")),
+        (Value::text("South"), Value::number(11.0), Value::number(20.0))
+    );
+    assert!(s.doc().unwrap().wb.active().unwrap().tables.iter().any(|t| t.name == table && t.range.a1() == "A1:B3"));
+    assert_eq!(s.doc().unwrap().wb.excel_queries[0].rows, Some(2));
+    // One undo puts the old values back.
+    s.execute("edit.undo", json!({})).unwrap();
+    assert_eq!((cell(&s, "Sheet1", "B2"), cell(&s, "Sheet1", "A3")), (Value::number(5.0), Value::Empty));
+    // From a cell of its table, and in Refresh All (an unsupported function is that query's error).
     s.execute("selection.set", json!({"cell": "A2"})).unwrap();
-    let e = s.execute("data.refresh", json!({})).unwrap_err().to_string();
-    assert!(e.contains("\"Sales\" is a Power Query query made in Excel"), "{e}");
-    assert!(s.execute("query.delete", json!({"name": "Sales"})).is_err());
-    assert_eq!(s.doc().unwrap().wb.excel_queries.len(), 1);
-    // Refresh All skips it and says so; a new query can't take its name.
+    s.execute("data.refresh", json!({})).unwrap();
+    assert_eq!(cell(&s, "Sheet1", "B2"), Value::number(11.0));
     let r = s.execute("data.refreshAll", json!({})).unwrap();
-    assert_eq!(r["skippedExcelQueries"], json!(["Sales"]));
+    // As in M, a function that fails inside `each` leaves errors in its cells; at the top it fails
+    // the query.
+    assert_eq!((r["excelQueries"][1]["rows"].as_u64(), r["excelQueries"][1]["errors"].as_u64()), (Some(2), Some(2)), "{r}");
+    let e = r["excelQueries"][2]["error"].as_str().unwrap();
+    assert!(e.contains("Sql.Database") && e.contains("isn't supported"), "{e}");
+    assert_eq!(s.doc().unwrap().wb.excel_queries[2].error.as_deref(), Some(e));
+    // Editing or deleting one says why it can't; a new query can't take its name.
+    assert!(s.execute("query.delete", json!({"name": "Sales"})).unwrap_err().to_string().contains("editing M isn't supported"));
+    assert_eq!(s.doc().unwrap().wb.excel_queries.len(), 3);
     let q = json!({"query": {"name": "Sales", "source": {"kind": "text", "text": "a\n1"}, "load": {"to": "connectionOnly"}}});
     assert!(s.execute("query.set", q).is_err());
+}
+
+#[test]
+fn an_excel_workbook_refreshes_and_keeps_its_power_query_parts() {
+    use std::io::Read;
+    let fake = Arc::new(Fake::default());
+    let mut s = session(&fake);
+    let formula = "let\r\n    Source = Excel.CurrentWorkbook(){[Name=\"Raw\"]}[Content],\r\n    #\"Changed Type\" = Table.TransformColumnTypes(Source,{{\"Region\", type text}, {\"Amount\", Int64.Type}}),\r\n    #\"Sorted Rows\" = Table.Sort(#\"Changed Type\",{{\"Amount\", Order.Descending}})\r\nin\r\n    #\"Sorted Rows\"";
+    let bytes = gridcraft_xlsx::testing::power_query_workbook(formula);
+    let (wb, _) = crate::io::open_bytes("pq.xlsx", &bytes).unwrap();
+    assert_eq!(wb.excel_queries[0].table.as_deref(), Some("Sales"));
+    *Arc::make_mut(&mut s.doc_mut().unwrap().wb) = wb;
+    let r = s.execute("data.refreshAll", json!({})).unwrap();
+    assert_eq!(r["excelQueries"][0]["rows"], 3, "{r}");
+    assert_eq!(
+        (cell(&s, "Data", "A2"), cell(&s, "Data", "B2"), cell(&s, "Data", "A4")),
+        (Value::text("East"), Value::number(30.0), Value::text("North"))
+    );
+    let t = s.doc().unwrap().wb.sheet(0).unwrap().tables.iter().find(|t| t.name == "Sales").unwrap().clone();
+    assert_eq!(t.range.a1(), "A1:B4");
+    assert_eq!(t.columns.iter().map(|c| c.unique_name.as_deref()).collect::<Vec<_>>(), vec![Some("1"), Some("2")]);
+    // Saved: Excel's query definitions and connection are kept unchanged.
+    let out = crate::io::save_bytes(&s.doc().unwrap().wb, "pq.xlsx").unwrap();
+    let mut z = zip::ZipArchive::new(std::io::Cursor::new(out.clone())).unwrap();
+    let mut part = |name: &str| {
+        let mut f = z.by_name(name).unwrap_or_else(|_| panic!("no {name}"));
+        let mut v = Vec::new();
+        f.read_to_end(&mut v).unwrap();
+        v
+    };
+    let original = zip::ZipArchive::new(std::io::Cursor::new(bytes))
+        .unwrap()
+        .by_name("customXml/item1.xml")
+        .map(|mut f| {
+            let mut v = Vec::new();
+            f.read_to_end(&mut v).unwrap();
+            v
+        })
+        .ok();
+    let names: Vec<String> = zip::ZipArchive::new(std::io::Cursor::new(out.clone())).unwrap().file_names().map(str::to_string).collect();
+    let mashup =
+        names.iter().filter(|n| n.starts_with("customXml/item") && !n.contains("Props")).map(|n| part(n)).find(|v| Some(v) == original.as_ref());
+    assert!(mashup.is_some(), "the DataMashup part is kept byte for byte: {names:?}");
+    assert!(String::from_utf8_lossy(&part("xl/connections.xml")).contains("Location=Sales"));
+    let tables: Vec<String> =
+        names.iter().filter(|n| n.starts_with("xl/tables/table")).map(|n| String::from_utf8_lossy(&part(n)).to_string()).collect();
+    assert!(tables.iter().any(|t| t.contains(r#"name="Sales""#) && t.contains(r#"ref="A1:B4""#)), "{tables:?}");
+    let (again, _) = crate::io::open_bytes("pq.xlsx", &out).unwrap();
+    assert_eq!(again.excel_queries.len(), 1);
+    assert_eq!(again.excel_queries[0].table.as_deref(), Some("Sales"));
 }

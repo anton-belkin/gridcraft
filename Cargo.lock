@@ -1645,6 +1645,7 @@ dependencies = [
  "gridcraft-xlsx",
  "image",
  "log",
+ "miniz_oxide 0.8.9",
  "serde",
  "serde_json",
  "thiserror 2.0.21",

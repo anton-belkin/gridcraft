@@ -10,6 +10,7 @@ pub mod access;
 pub mod formats;
 pub mod html;
 pub mod load;
+pub mod m;
 pub mod mtext;
 pub mod ojson;
 pub mod sources;

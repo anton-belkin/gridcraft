@@ -1,6 +1,6 @@
 # Architecture
 
-> **Last reviewed:** 2026-10-10 · **Last updated:** 2026-10-14 · **Change:** minor (Get & Transform: the engine's `DataAccess` trait and the native `external` crate) · **Target:** Microsoft Excel (Microsoft 365)
+> **Last reviewed:** 2026-10-10 · **Last updated:** 2026-10-15 · **Change:** minor (the M interpreter for Excel's Power Query queries) · **Target:** Microsoft Excel (Microsoft 365)
 
 How GridCraft is built today. Rules for contributors are in [`AGENTS.md`](../AGENTS.md).
 
@@ -47,7 +47,10 @@ including tests, 2026-10-10.
    queries (`model::query`: a source and typed steps) through the `DataAccess` trait the engine
    owns. Hosts inject an implementation (`Session::set_data_access`, the `external` crate);
    without one, files go through `std::fs` and web/ODBC are disabled with a reason. A document
-   opened with external content stays blocked until `data.enableContent`.
+   opened with external content stays blocked until `data.enableContent`. Excel's own queries
+   (M formulas from the DataMashup part, `model::ExcelQuery`) run in `engine/query/m`: a lexer,
+   parser and lazy evaluator for Power Query M over the same sources, data access and loading,
+   with recursion depth and total work bounded.
 
 ## Agent control
 
@@ -74,5 +77,6 @@ rpm, tarball), FreeBSD, and web (WASM; WebGPU or WebGL2). Release workflows in
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-15 | minor | The M interpreter (`engine/query/m`) for Excel's Power Query queries |
 | 2026-10-14 | minor | Get & Transform data flow; the `external` crate (L6) |
 | 2026-10-10 | major | Created from the code on main: crates, layers, data flow, agent control, known gaps |

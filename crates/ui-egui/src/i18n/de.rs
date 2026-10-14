@@ -574,11 +574,11 @@ pub(super) fn translate(text: &str) -> Option<&'static str> {
         "Loads to table {table} ({n} rows)." => "Lädt in Tabelle {table} ({n} Zeilen).",
         "Loads to table {table}." => "Lädt in Tabelle {table}.",
         "Loads to the Data Model." => "Lädt in das Datenmodell.",
-        "Made in Excel: refresh needs Power Query M, not supported yet." => {
-            "In Excel erstellt: Aktualisieren erfordert Power Query M, noch nicht unterstützt."
-        }
-        "GridCraft shows this query's M formula but can't run it. The data loaded last time stays in the workbook, and Excel refreshes the query as before." => {
-            "GridCraft zeigt die M-Formel dieser Abfrage, kann sie aber nicht ausführen. Die zuletzt geladenen Daten bleiben in der Arbeitsmappe, und Excel aktualisiert die Abfrage wie bisher."
+        "Made in Excel: refreshed from its M formula." => "In Excel erstellt: wird aus der M-Formel aktualisiert.",
+        "Made in Excel: needs {names}, not supported yet." => "In Excel erstellt: benötigt {names}, noch nicht unterstützt.",
+        "Made in Excel: its M formula can't be read." => "In Excel erstellt: Die M-Formel kann nicht gelesen werden.",
+        "GridCraft runs this query's M formula, but not these functions yet. The data loaded last time stays in the workbook, and Excel refreshes the query as before." => {
+            "GridCraft führt die M-Formel dieser Abfrage aus, diese Funktionen aber noch nicht. Die zuletzt geladenen Daten bleiben in der Arbeitsmappe, und Excel aktualisiert die Abfrage wie bisher."
         }
         "View M Formula" => "M-Formel anzeigen",
         "Hide M Formula" => "M-Formel ausblenden",

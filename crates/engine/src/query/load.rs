@@ -4,7 +4,7 @@
 use std::sync::Arc;
 
 use gridcraft_core::{CellRef, MAX_COLS as SHEET_COLS, MAX_ROWS as SHEET_ROWS, RangeRef, Value};
-use gridcraft_model::query::{ColType, LoadTo};
+use gridcraft_model::query::{ColType, LoadTo, QueryLoad};
 use gridcraft_model::{Cell, NumFmt, Sheet, StyleId, Table, TableColumn, TotalsFn};
 
 use super::{QResult, QTable};
@@ -110,19 +110,30 @@ fn clear_values(sh: &mut Sheet, r: RangeRef) {
 /// name and style), else at its Load To target (an existing sheet's cell, or a new worksheet).
 pub fn write(cx: &mut Ctx<'_>, qi: usize, t: &QTable) -> QResult<Loaded> {
     let q = cx.wb.queries.get(qi).cloned().ok_or("The query is missing.")?;
-    if q.load.to == LoadTo::ConnectionOnly {
+    let l = write_load(cx, &q.name, &q.load, t)?;
+    if let Some(q) = cx.wb.queries.get_mut(qi) {
+        q.load.table = Some(l.table.clone());
+    }
+    Ok(l)
+}
+
+/// Writes the result `t` of the query `query` to the Load To target `load`: over the table
+/// `load.table` when it exists (same place, name, style and column ids), else at `load.sheet`'s
+/// cell or on a new worksheet.
+pub fn write_load(cx: &mut Ctx<'_>, query: &str, load: &QueryLoad, t: &QTable) -> QResult<Loaded> {
+    if load.to == LoadTo::ConnectionOnly {
         return Err("The query only creates a connection.".into());
     }
-    let previous = match q.load.table.as_deref() {
+    let previous = match load.table.as_deref() {
         Some(name) => remove_table(cx, name)?,
         None => None,
     };
     let mut new_sheet = None;
     let (si, anchor) = match &previous {
         Some((si, range, _)) => (*si, range.start),
-        None => match q.load.sheet.as_deref().and_then(|n| cx.wb.sheet_index(n)) {
+        None => match load.sheet.as_deref().and_then(|n| cx.wb.sheet_index(n)) {
             Some(si) => {
-                let at = match q.load.cell.as_deref() {
+                let at = match load.cell.as_deref() {
                     Some(c) => CellRef::parse(&c.replace('$', "")).ok_or_else(|| format!("'{c}' isn't a cell reference."))?,
                     None => CellRef::new(0, 0),
                 };
@@ -132,7 +143,7 @@ pub fn write(cx: &mut Ctx<'_>, qi: usize, t: &QTable) -> QResult<Loaded> {
                 if cx.wb.protected_structure {
                     return Err("The workbook is protected and cannot be changed.".into());
                 }
-                let name = sheet_name_for(&cx.wb, &q.name);
+                let name = sheet_name_for(&cx.wb, query);
                 let at = (cx.wb.active_sheet + 1).min(cx.wb.sheets.len());
                 cx.wb.sheets.insert(at, Arc::new(Sheet::new(name)));
                 for n in cx.wb.names.iter_mut() {
@@ -205,15 +216,24 @@ pub fn write(cx: &mut Ctx<'_>, qi: usize, t: &QTable) -> QResult<Loaded> {
             sh.set_cell(c, Cell { value: v, formula: None, style });
         }
     }
+    // Columns that stay keep the ids the file knows them by.
+    let kept: Vec<TableColumn> = previous.as_ref().map(|(_, _, old)| old.columns.clone()).unwrap_or_default();
     let (name, style, flags) = match previous {
         Some((_, _, old)) => (old.name.clone(), old.style.clone(), Some(old)),
-        None => (q.load.table.clone().filter(|n| crate::cmd::insert::valid_table_name(n)).unwrap_or_default(), "TableStyleMedium2".to_string(), None),
+        None => (load.table.clone().filter(|n| crate::cmd::insert::valid_table_name(n)).unwrap_or_default(), "TableStyleMedium2".to_string(), None),
     };
-    let name = if name.is_empty() || cx.wb.table(&name).is_some() { table_name_for(&cx.wb, &q.name) } else { name };
+    let name = if name.is_empty() || cx.wb.table(&name).is_some() { table_name_for(&cx.wb, query) } else { name };
     let sh = cx.wb.sheet_mut(si).ok_or("The sheet is missing.")?;
     let columns = headers
         .iter()
-        .map(|n| TableColumn { name: n.clone(), totals: TotalsFn::None, totals_label: None, formula: None, unique_name: None, xml: None })
+        .map(|n| TableColumn {
+            name: n.clone(),
+            totals: TotalsFn::None,
+            totals_label: None,
+            formula: None,
+            unique_name: kept.iter().find(|c| c.name == *n).and_then(|c| c.unique_name.clone()),
+            xml: None,
+        })
         .collect();
     let table = match flags {
         Some(old) => Table { id: old.id, name: name.clone(), range, columns, style, totals_row: false, filter: vec![], ..old },
@@ -257,9 +277,6 @@ pub fn write(cx: &mut Ctx<'_>, qi: usize, t: &QTable) -> QResult<Loaded> {
         }
     }
     cx.structural = true;
-    if let Some(q) = cx.wb.queries.get_mut(qi) {
-        q.load.table = Some(name.clone());
-    }
     Ok(Loaded { sheet: si, table: name, range, new_sheet })
 }
 

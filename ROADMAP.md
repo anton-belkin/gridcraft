@@ -2,7 +2,7 @@
 
 **Stage: alpha** · next: beta, ~25 points of "ready for real work" and ~160–240 h away
 
-> **Last reviewed:** 2026-10-11 · **Last updated:** 2026-10-14 · **Change:** minor (Get & Transform: queries, Power Query Editor, web/file/ODBC sources, refresh; WEBSERVICE and FILTERXML) · **Target:** Microsoft Excel (Microsoft 365)
+> **Last reviewed:** 2026-10-11 · **Last updated:** 2026-10-15 · **Change:** minor (Excel's Power Query queries refresh through an M interpreter) · **Target:** Microsoft Excel (Microsoft 365)
 
 GridCraft aims at full Microsoft Excel parity, and at being better in places: faster, open (XLSX
 is the native format), fully scriptable by agents (MCP, control channel, CLI), and on the web.
@@ -82,7 +82,7 @@ collaboration, mobile, AI).
 | Charts and sparklines | ~50% | ~30% | 40–60 | [chart-parity.md](docs/chart-parity.md) |
 | Page layout, print, PDF | ~80% | ~55% | 12–20 | [target-app-parity.md](docs/target-app-parity.md#feature-areas) |
 | What-if and analysis (Goal Seek, Solver, ToolPak, Forecast) | ~50% | ~40% | 22–35 | [target-app-parity.md](docs/target-app-parity.md#feature-areas) |
-| Get & Transform, external data, data model | ~60% | ~45% | 30–60 | [target-app-parity.md](docs/target-app-parity.md#feature-areas) |
+| Get & Transform, external data, data model | ~65% | ~50% | 30–60 (+150–250 M library) | [target-app-parity.md](docs/target-app-parity.md#feature-areas) |
 | Insert objects (pictures, shapes, ink, SmartArt, equations) | ~55% | ~45% | 25–40 | [target-app-parity.md](docs/target-app-parity.md#feature-areas) |
 | Review, comments, protection, collaboration | ~55% | ~40% | 35–55 | [target-app-parity.md](docs/target-app-parity.md#feature-areas) |
 | Automation (recorded scripts; no VBA) | ~30% | ~20% | 12–20 | [target-app-parity.md](docs/target-app-parity.md#feature-areas) |
@@ -132,6 +132,7 @@ Ranked; estimates in Opus 5.5 agent-hours. Detail and the full beta-gate list in
 
 | Date | What landed |
 |---|---|
+| 2026-10-15 | Power Query M: Excel's own queries refresh in GridCraft (Refresh, Refresh All, from a cell of their table) through an M interpreter that runs the M the Power Query Editor writes; Queries & Connections names what a query needs that isn't supported yet |
 | 2026-10-14 | Get & Transform Data: Data › Get Data with Excel's menu (From File, Database, Azure, Power Platform, Online Services, Other Sources, Combine Queries, Power Query Editor, Data Source Settings, Query Options), queries with typed applied steps and an M-like Advanced Editor view, the Power Query Editor, Navigator, Text/CSV, Excel workbook, XML, JSON, folder, web, OData and (Windows) ODBC/SQL Server/Access sources, Load To, Refresh All (queries, then PivotTables), Queries & Connections pane, Connection Properties (refresh on open, every N minutes), the Security Warning with Enable Content and a Trust Center setting; WEBSERVICE and FILTERXML work |
 | 2026-10-12 | Rows auto-fit oversized fonts: opening a file and whole-row/column formatting grow non-custom rows to their tallest font (#833) |
 | 2026-10-12 | Number formats: parsing a format code is linear in its length (long runs of `[`, `,` or `/` no longer take quadratic time), and an unclosed `[` is a literal when splitting sections as well as when tokenizing (#810) |
@@ -194,6 +195,7 @@ Ranked; estimates in Opus 5.5 agent-hours. Detail and the full beta-gate list in
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-15 | minor | Get & Transform ~65% breadth / ~50% ready: Excel's Power Query queries refresh through an M interpreter; progress log row |
 | 2026-10-12 | minor | Rows auto-fit oversized fonts on open and whole-row/column formatting (#833); progress log row |
 | 2026-10-12 | minor | Progress log: multi-area row/column delete (#758) |
 | 2026-10-12 | trivial | Progress log: XLSX chart sheets kept on save (#727) |

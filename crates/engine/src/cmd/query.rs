@@ -12,7 +12,7 @@ use gridcraft_model::query::{LoadTo, MAX_NAME, MAX_QUERIES, MAX_STEPS, Query, Qu
 use serde_json::{Value as Json, json};
 
 use super::*;
-use crate::query::{self as q, EvalCx, QTable, access, load, mtext, sources};
+use crate::query::{self as q, EvalCx, QTable, access, load, m, mtext, sources};
 
 /// Rows a preview returns unless asked for fewer.
 const PREVIEW_ROWS: usize = 1_000;
@@ -464,15 +464,27 @@ fn query_index(s: &Session, name: &str) -> Result<usize> {
     }
 }
 
+/// The Excel query called `name` when no GridCraft query is (its name as Excel spells it).
+fn excel_only(wb: &gridcraft_model::Workbook, name: &str) -> Option<String> {
+    if wb.queries.iter().any(|q| q.name.eq_ignore_ascii_case(name)) {
+        return None;
+    }
+    wb.excel_queries
+        .iter()
+        .find(|q| q.name == name)
+        .or_else(|| wb.excel_queries.iter().find(|q| q.name.eq_ignore_ascii_case(name)))
+        .map(|q| q.name.clone())
+}
+
 /// Whether one of Excel's queries is called `name` (query names are shared with them).
 fn excel_named(wb: &gridcraft_model::Workbook, name: &str) -> bool {
     wb.excel_queries.iter().any(|q| q.name.eq_ignore_ascii_case(name))
 }
 
-/// Why an Excel query can't be refreshed or edited.
+/// Why an Excel query can't be edited.
 fn excel_query_error(name: &str) -> EngineError {
     EngineError::Other(format!(
-        "\"{name}\" is a Power Query query made in Excel. GridCraft shows its M formula but can't refresh or edit it: Power Query M isn't supported yet. Excel refreshes it as before."
+        "\"{name}\" is a Power Query query made in Excel. GridCraft refreshes it from its M formula, but editing M isn't supported yet: edit it in Excel."
     ))
 }
 
@@ -646,8 +658,14 @@ fn value_json(v: &gridcraft_core::Value) -> Json {
 }
 
 /// Writes evaluated results into the workbook in one edit: tables for queries loaded as tables,
-/// the status of each. Returns a summary per query.
-fn store(s: &mut Session, results: Vec<(usize, q::QResult<QTable>)>, pivots: Option<bool>) -> Result<Json> {
+/// the status of each (Excel's queries too, into the tables they load). Returns a summary per
+/// query.
+fn store(
+    s: &mut Session,
+    results: Vec<(usize, q::QResult<QTable>)>,
+    excel: Vec<(String, q::QResult<m::Refreshed>)>,
+    pivots: Option<bool>,
+) -> Result<Json> {
     let mut new_sheets: Vec<usize> = Vec::new();
     let out = edit(s, |cx| {
         let mut summary = Vec::new();
@@ -709,6 +727,9 @@ fn store(s: &mut Session, results: Vec<(usize, q::QResult<QTable>)>, pivots: Opt
             summary.push(status.1);
         }
         let mut res = json!({"queries": summary});
+        if !excel.is_empty() {
+            res["excelQueries"] = Json::Array(excel.into_iter().map(|(name, r)| store_excel(cx, &name, r, &mut new_sheets)).collect());
+        }
         if let Some(replace) = pivots {
             let (n, errors) = super::pivot::refresh_pivots(cx, replace);
             res["refreshed"] = json!(n);
@@ -723,8 +744,61 @@ fn store(s: &mut Session, results: Vec<(usize, q::QResult<QTable>)>, pivots: Opt
     Ok(out)
 }
 
-/// Evaluates the queries at `idx` (fresh reads when `fresh`) and stores their results.
-fn refresh_indices(s: &mut Session, idx: Vec<usize>, fresh: bool, pivots: Option<bool>) -> Result<Json> {
+/// Loads an Excel query's result into the table it loads (a query loading only to a
+/// connection or the Data Model keeps just its status); returns its summary.
+fn store_excel(cx: &mut super::Ctx<'_>, name: &str, r: q::QResult<m::Refreshed>, new_sheets: &mut Vec<usize>) -> Json {
+    let Some(ei) = cx.wb.excel_queries.iter().position(|q| q.name == name) else { return json!({"query": name, "error": "The query is gone."}) };
+    let target = cx.wb.excel_queries.get(ei).map(|q| (q.table.clone(), q.sheet.clone())).unwrap_or_default();
+    let r = r.and_then(|rf| {
+        let loaded = match target {
+            (Some(table), sheet) => {
+                // A load that fails leaves the workbook as it was, the old table included.
+                let before = cx.wb.clone();
+                let load = gridcraft_model::query::QueryLoad { to: LoadTo::Table, sheet, cell: None, table: Some(table) };
+                match load::write_load(cx, name, &load, &rf.table) {
+                    Ok(l) => Some(l),
+                    Err(e) => {
+                        cx.wb = before;
+                        return Err(e);
+                    }
+                }
+            }
+            (None, _) => None,
+        };
+        Ok((rf, loaded))
+    });
+    match r {
+        Ok((rf, loaded)) => {
+            let mut j = json!({"query": name, "rows": rf.table.rows.len(), "cols": rf.table.columns.len(), "errors": rf.errors});
+            let sheet = loaded.as_ref().and_then(|l| cx.wb.sheet(l.sheet).map(|sh| sh.name.clone()));
+            if let Some(q) = cx.wb.excel_queries.get_mut(ei) {
+                q.rows = Some(rf.table.rows.len() as u64);
+                q.error = None;
+                if let Some(l) = &loaded {
+                    q.table = Some(l.table.clone());
+                    q.sheet = sheet.clone();
+                }
+            }
+            if let Some(l) = loaded {
+                new_sheets.extend(l.new_sheet);
+                j["table"] = json!(l.table);
+                j["range"] = json!(l.range.a1());
+                j["sheet"] = json!(sheet);
+            }
+            j
+        }
+        Err(e) => {
+            if let Some(q) = cx.wb.excel_queries.get_mut(ei) {
+                q.error = Some(e.clone());
+            }
+            json!({"query": name, "error": e})
+        }
+    }
+}
+
+/// Evaluates the queries at `idx` and Excel's queries `excel` (fresh reads when `fresh`) and
+/// stores their results in one edit.
+fn refresh_indices(s: &mut Session, idx: Vec<usize>, excel: Vec<String>, fresh: bool, pivots: Option<bool>) -> Result<Json> {
     let d = s.doc()?;
     let prefs = s.prefs.clone();
     if let Err(why) = d.external_allowed(&prefs)
@@ -733,10 +807,14 @@ fn refresh_indices(s: &mut Session, idx: Vec<usize>, fresh: bool, pivots: Option
         return Err(EngineError::Other(why));
     }
     let wb = d.wb.clone();
-    let results: Vec<(usize, q::QResult<QTable>)> =
-        with_eval(s, fresh, &[], |cx| idx.iter().filter_map(|&i| wb.queries.get(i).map(|q| (i, cx.evaluate(q, None)))).collect())?;
-    let names: Vec<String> = idx.iter().filter_map(|&i| wb.queries.get(i).map(|q| q.name.clone())).collect();
-    let r = store(s, results, pivots)?;
+    let (results, excel_results) = with_eval(s, fresh, &[], |cx| {
+        let r: Vec<(usize, q::QResult<QTable>)> = idx.iter().filter_map(|&i| wb.queries.get(i).map(|q| (i, cx.evaluate(q, None)))).collect();
+        let e: Vec<(String, q::QResult<m::Refreshed>)> = excel.iter().cloned().zip(m::evaluate_excel_queries(cx, &excel)).collect();
+        (r, e)
+    })?;
+    let mut names: Vec<String> = idx.iter().filter_map(|&i| wb.queries.get(i).map(|q| q.name.clone())).collect();
+    names.extend(excel);
+    let r = store(s, results, excel_results, pivots)?;
     let now = now_ms();
     let d = s.doc_mut()?;
     for n in names {
@@ -1199,18 +1277,17 @@ fn existing_connections(s: &mut Session, _: &Json) -> Result<Json> {
 fn refresh_all(s: &mut Session, p: &Json) -> Result<Json> {
     let replace = bool_param(p, "replace").unwrap_or(false);
     let idx: Vec<usize> = s.doc()?.wb.queries.iter().enumerate().filter(|(_, q)| q.refresh.in_refresh_all).map(|(i, _)| i).collect();
+    // Excel's queries refresh too (their M formulas run).
     let excel: Vec<String> = s.doc()?.wb.excel_queries.iter().map(|q| q.name.clone()).collect();
-    let mut r = refresh_indices(s, idx, true, Some(replace))?;
-    // Excel's queries are skipped (no M interpreter), and the result says so.
-    if !excel.is_empty()
-        && let Json::Object(m) = &mut r
-    {
-        m.insert("skippedExcelQueries".into(), json!(excel));
-    }
-    Ok(r)
+    refresh_indices(s, idx, excel, true, Some(replace))
 }
 
 fn refresh_one(s: &mut Session, p: &Json) -> Result<Json> {
+    if let Some(n) = str_param(p, "query").or_else(|| str_param(p, "name"))
+        && let Some(name) = excel_only(&s.doc()?.wb, n)
+    {
+        return refresh_indices(s, vec![], vec![name], true, None);
+    }
     let qi = match str_param(p, "query").or_else(|| str_param(p, "name")) {
         Some(n) => query_index(s, n)?,
         None => match active_query(s) {
@@ -1223,13 +1300,13 @@ fn refresh_one(s: &mut Session, p: &Json) -> Result<Json> {
                     return s.execute("pivot.refresh", json!({}));
                 }
                 if let Some(name) = active_excel_query(s) {
-                    return Err(excel_query_error(&name));
+                    return refresh_indices(s, vec![], vec![name], true, None);
                 }
                 return Err(EngineError::Other("Select a cell in a query's table or a PivotTable to refresh it.".into()));
             }
         },
     };
-    refresh_indices(s, vec![qi], true, None)
+    refresh_indices(s, vec![qi], vec![], true, None)
 }
 
 fn refresh_status(s: &mut Session, _: &Json) -> Result<Json> {
@@ -1334,7 +1411,7 @@ fn enable_content(s: &mut Session, _: &Json) -> Result<Json> {
         d.wb = std::sync::Arc::new(wb);
     }
     let idx: Vec<usize> = s.doc()?.wb.queries.iter().enumerate().filter(|(_, q)| q.refresh.on_open).map(|(i, _)| i).collect();
-    let refreshed = if idx.is_empty() { json!(null) } else { refresh_indices(s, idx, true, None)? };
+    let refreshed = if idx.is_empty() { json!(null) } else { refresh_indices(s, idx, vec![], true, None)? };
     Ok(json!({"enabled": true, "refreshed": refreshed}))
 }
 
@@ -1381,23 +1458,38 @@ fn get(s: &mut Session, p: &Json) -> Result<Json> {
     if !d.wb.queries.iter().any(|q| q.name.eq_ignore_ascii_case(name))
         && let Some(q) = d.wb.excel_queries.iter().find(|q| q.name.eq_ignore_ascii_case(name))
     {
-        return Ok(json!({"query": excel_json(q), "m": q.formula, "excel": true, "refreshable": false}));
+        let j = excel_json(&d.wb, q);
+        let refreshable = j["refreshable"].clone();
+        return Ok(json!({"query": j, "m": q.formula, "excel": true, "refreshable": refreshable}));
     }
     let qi = query_index(s, name)?;
     let q = s.doc()?.wb.queries.get(qi).ok_or_else(|| bad("query", "gone"))?;
     Ok(json!({"query": q, "steps": mtext::step_names(q), "m": mtext::query(q)}))
 }
 
-fn excel_json(q: &gridcraft_model::ExcelQuery) -> Json {
+/// An Excel query as JSON, with what GridCraft can't run in its M formula (`unsupported`: M
+/// functions it lacks and unknown names; `syntaxError` when the formula doesn't parse).
+fn excel_json(wb: &gridcraft_model::Workbook, q: &gridcraft_model::ExcelQuery) -> Json {
     let mut v = serde_json::to_value(q).unwrap_or(Json::Null);
-    if let Json::Object(m) = &mut v {
-        m.insert("load".into(), json!(q.load_kind()));
+    let is_query = |n: &str| wb.excel_queries.iter().any(|x| x.name == n) || wb.queries.iter().any(|x| x.name.eq_ignore_ascii_case(n));
+    let (unsupported, syntax) = match m::unsupported(&q.formula, &is_query) {
+        Ok(u) => (u, None),
+        Err(e) => (vec![], Some(e.to_string())),
+    };
+    if let Json::Object(o) = &mut v {
+        o.insert("load".into(), json!(q.load_kind()));
+        o.insert("refreshable".into(), json!(unsupported.is_empty() && syntax.is_none()));
+        o.insert("unsupported".into(), json!(unsupported));
+        if let Some(e) = syntax {
+            o.insert("syntaxError".into(), json!(e));
+        }
     }
     v
 }
 
 fn list_excel(s: &mut Session, _: &Json) -> Result<Json> {
-    Ok(Json::Array(s.doc()?.wb.excel_queries.iter().map(excel_json).collect()))
+    let wb = &s.doc()?.wb;
+    Ok(Json::Array(wb.excel_queries.iter().map(|q| excel_json(wb, q)).collect()))
 }
 
 /// References to query `old` in other queries, renamed to `new`.
@@ -1472,7 +1564,7 @@ fn set(s: &mut Session, p: &Json) -> Result<Json> {
     })?;
     let mut r = json!({"query": name, "index": qi});
     if bool_param(p, "refresh").unwrap_or(false) {
-        r["refresh"] = refresh_indices(s, vec![qi], false, None)?;
+        r["refresh"] = refresh_indices(s, vec![qi], vec![], false, None)?;
     }
     Ok(r)
 }
@@ -1686,7 +1778,7 @@ fn load_to(s: &mut Session, p: &Json) -> Result<Json> {
         }
         Ok(())
     })?;
-    refresh_indices(s, vec![qi], false, None)
+    refresh_indices(s, vec![qi], vec![], false, None)
 }
 
 fn m_text(s: &mut Session, p: &Json) -> Result<Json> {
@@ -1733,7 +1825,7 @@ pub fn after_open(s: &mut Session) -> Result<bool> {
             let idx: Vec<usize> = s.doc()?.wb.queries.iter().enumerate().filter(|(_, q)| q.refresh.on_open).map(|(i, _)| i).collect();
             if !idx.is_empty() {
                 // A failed refresh shows in the queries' status, not as a failed open.
-                let _ = refresh_indices(s, idx, true, None);
+                let _ = refresh_indices(s, idx, vec![], true, None);
             }
             Ok(false)
         }

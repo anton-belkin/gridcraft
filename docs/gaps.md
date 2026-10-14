@@ -1,6 +1,6 @@
 # Gaps
 
-> **Last reviewed:** 2026-10-11 · **Last updated:** 2026-10-14 · **Change:** minor (§12: Excel's Power Query queries listed read-only) · **Target:** Microsoft Excel (Microsoft 365)
+> **Last reviewed:** 2026-10-11 · **Last updated:** 2026-10-15 · **Change:** minor (§12: Excel's Power Query queries refresh through an M interpreter) · **Target:** Microsoft Excel (Microsoft 365)
 
 Every known shortfall against Excel, one entry each, ranked by user impact (what blocks someone
 using GridCraft for real work first). This is the work list: pick from the top, check the open
@@ -106,15 +106,25 @@ No alpha blockers: every core workflow passes the [alpha gate](roadmap.md#alpha-
   workbook, XML, JSON, folder, web, OData and (Windows) ODBC/SQL Server/Access sources, Merge and
   Append, Load To, Refresh All with refresh on open and every N minutes, the Security Warning and
   Trust Center setting, WEBSERVICE and FILTERXML.
-- Landed: Excel's own Power Query queries (the DataMashup part, [MS-QDEFF]) are listed read-only
-  in Queries & Connections with their M formula, load target and connection (`query.listExcel`);
-  their parts are kept byte for byte on save.
+- Landed: Excel's own Power Query queries (the DataMashup part, [MS-QDEFF]) are listed in
+  Queries & Connections with their M formula, load target and connection (`query.listExcel`), and
+  refresh in GridCraft (Refresh, Refresh All, from a cell of their table): an M interpreter
+  (`engine/query/m`: lexer, parser, lazy evaluator) runs the M the Power Query Editor writes,
+  about 60 `Table.*` functions (Change Type with locale, filters, sort, group, merge and expand,
+  pivot and unpivot, split, add column…), the sources (current workbook, Excel workbooks,
+  Text/CSV, web pages, JSON, folders, OData, ODBC, Enter Data) and the scalar functions those
+  steps use. Errors stay in their cells, as in Power Query. What a query needs that isn't
+  supported yet is named (`unsupported`); their parts are kept byte for byte on save.
 - Missing: the data model and relationships (`data.relationships`); Excel's queries can't be
-  refreshed or edited (there is no M language: custom columns, custom functions, editing M), and
-  a table an Excel query loads into loses its query table link on save (the table is rewritten); PDF, SharePoint, Azure, Power Platform,
+  edited, and most of the M library written by hand isn't there yet (scalar functions such as
+  `Text.PadStart`, most of `Date.*`/`Duration.*`/`Number.*`, then `List.Accumulate`/`Generate`,
+  comparer functions in sort, `#shared`, `Sql.Database` and other connectors, privacy levels and
+  query folding); the default culture is en-US; a table an Excel query loads into loses its
+  query table link on save (the table is rewritten); PDF, SharePoint, Azure, Power Platform,
   online-service, Analysis Services and OLE DB sources are listed and disabled; no credentials or
   privacy levels; background refresh runs in the foreground; ODBC only on Windows; the editor's
-  column filter lists values of the preview rows only. **Estimate:** 30–60 h.
+  column filter lists values of the preview rows only. **Estimate:** 30–60 h, and 150–250 h for
+  the rest of the M library (hand-written scalar functions first).
 
 ### 13. Analysis tools: Solver, Analysis ToolPak, Forecast Sheet (F)
 - `data.solver`, `data.analysisToolPak` missing. Forecast Sheet (`data.forecastSheet`) and the
@@ -179,6 +189,7 @@ No alpha blockers: every core workflow passes the [alpha gate](roadmap.md#alpha-
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-15 | minor | §12: Excel's Power Query queries refresh through an M interpreter (the M the Power Query Editor writes); the rest of the M library, editing M and the query table link on save remain |
 | 2026-10-14 | minor | §12: Excel's Power Query queries (DataMashup) are listed read-only with their M formula; refresh and the query table link on save remain |
 | 2026-10-14 | minor | §12: Get & Transform landed (queries, editor, sources, refresh, trust; WEBSERVICE and FILTERXML); remaining is the data model, Excel's M queries and cloud sources (30–60 h) |
 | 2026-10-12 | minor | rows auto-fit oversized fonts on open and whole-row/column formatting (#833) |
