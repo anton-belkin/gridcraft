@@ -80,7 +80,7 @@ Seams, so work splits without touching the same files:
 | Area | Where | Unit of work |
 |---|---|---|
 | M language | `query/m/{lexer,parser,eval}.rs` | a language feature + tests |
-| M library | `query/m/library/*`, one file per M module (`scalar.rs` still holds Text, Number, Date and List: split it first) | one function: an entry in `FUNCTIONS`, its code, a test |
+| M library | `query/m/library/*`, one file per M module (`text`, `number`, `date`, `list`, `record`, `convert`, `splitter`, `table`, `source`) | one function: an entry in `FUNCTIONS`, its code, a test |
 | Sources | `query/m/library/source.rs` over `query::DataAccess` | one connector |
 | Step codec | per step, beside `query/mtext.rs` | one `StepOp` both ways + a round-trip test |
 | Editor UI | `ui-egui/src/power_query.rs` | one dialog over its step codec |

@@ -1,9 +1,15 @@
 //! The M standard library GridCraft supports: names of functions and constants, argument
-//! checking, and dispatch to the `Table.*`, scalar and source functions.
+//! checking, and dispatch to the modules (`table`, `source`, `convert`, `text`, `number`, `date`, `list`, `record`, `splitter`).
 
-pub mod scalar;
+pub mod convert;
+pub mod date;
+pub mod list;
+pub mod number;
+pub mod record;
 pub mod source;
+pub mod splitter;
 pub mod table;
+pub mod text;
 
 use std::rc::Rc;
 
@@ -373,8 +379,10 @@ pub fn call(ev: &mut Ev<'_, '_>, name: &str, bound: &[MValue], args: Vec<MValue>
     if let Some(r) = source::call(ev, name, &a)? {
         return Ok(r);
     }
-    if let Some(r) = scalar::call(ev, name, &a)? {
-        return Ok(r);
+    for module in [convert::call, text::call, number::call, date::call, list::call, record::call, splitter::call] {
+        if let Some(r) = module(ev, name, &a)? {
+            return Ok(r);
+        }
     }
     Err(MError::expr(format!("The M function '{name}' isn't supported by GridCraft yet.")))
 }
@@ -497,7 +505,7 @@ pub fn show(v: &MValue) -> String {
     match v {
         MValue::Null => "null".into(),
         MValue::Logical(b) => b.to_string(),
-        MValue::Number(n) => scalar::number_text(*n),
+        MValue::Number(n) => convert::number_text(*n),
         MValue::Text(t) => {
             let short: String = t.chars().take(60).collect();
             format!("\"{short}{}\"", if t.chars().count() > 60 { "…" } else { "" })
@@ -522,6 +530,39 @@ pub fn show(v: &MValue) -> String {
         MValue::Error(e) => format!("[Error {}]", e.message),
         MValue::Lazy(_) => "[Value]".into(),
     }
+}
+
+// ---------------------------------------------------------------- helpers the modules share
+
+pub fn long_text(s: String) -> MResult<MValue> {
+    if s.len() > super::MAX_TEXT {
+        return Err(super::eval::limit("The text is too long."));
+    }
+    Ok(MValue::text(s))
+}
+
+pub fn is_ignore_case(v: &MValue) -> bool {
+    matches!(v, MValue::Function(f) if matches!(&**f, MFunc::Builtin { name, .. } if &**name == "Comparer.OrdinalIgnoreCase"))
+}
+
+pub fn folded(v: &MValue, fold: bool) -> MValue {
+    match v {
+        MValue::Text(t) if fold => MValue::text(t.to_lowercase()),
+        v => v.clone(),
+    }
+}
+
+pub fn folded_key(v: &MValue, fold: bool) -> super::value::Key {
+    super::value::key(&folded(v, fold))
+}
+
+/// A list's items worked out (a held error is raised).
+pub fn forced(ev: &mut Ev<'_, '_>, l: &[MValue]) -> MResult<Vec<MValue>> {
+    let mut out = Vec::with_capacity(l.len());
+    for v in l {
+        out.push(ev.force(v.clone())?);
+    }
+    Ok(out)
 }
 
 #[cfg(test)]

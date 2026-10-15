@@ -9,7 +9,7 @@ use gridcraft_model::query::ColType;
 
 use super::super::eval::{Ev, is_limit};
 use super::super::value::{Key, MError, MFunc, MRecord, MResult, MTable, MType, MValue, key, sort_order};
-use super::{Args, cant, names_of, scalar, show};
+use super::{Args, cant, convert, names_of, show, text};
 use crate::query::MAX_COLUMNS;
 
 pub fn call(ev: &mut Ev<'_, '_>, name: &str, a: &Args<'_>) -> MResult<Option<MValue>> {
@@ -519,9 +519,9 @@ fn promote_headers(ev: &mut Ev<'_, '_>, a: &Args<'_>) -> MResult<MValue> {
         let v = ev.force(v.clone()).unwrap_or(MValue::Null);
         let name = match &v {
             MValue::Text(s) if !s.is_empty() => Some(s.to_string()),
-            MValue::Number(n) => Some(scalar::number_text(*n)),
+            MValue::Number(n) => Some(convert::number_text(*n)),
             MValue::Null | MValue::Text(_) => None,
-            other if all => scalar::text_of(other, None),
+            other if all => convert::text_of(other, None),
             _ => None,
         };
         names.push(name.unwrap_or_else(|| t.names.get(i).map(|n| n.to_string()).unwrap_or_default()));
@@ -592,7 +592,7 @@ fn transform_column_types(ev: &mut Ev<'_, '_>, a: &Args<'_>) -> MResult<MValue> 
             if let Some(cell) = row.get_mut(c) {
                 let v = std::mem::replace(cell, MValue::Null);
                 *cell = match ev.force(v) {
-                    Ok(v) => scalar::convert(&v, &ty, culture.as_deref(), ev.sys),
+                    Ok(v) => convert::convert(&v, &ty, culture.as_deref(), ev.sys),
                     Err(e) if is_limit(&e) => return Err(e),
                     Err(e) => MValue::error(e),
                 };
@@ -838,7 +838,7 @@ fn replace_value(ev: &mut Ev<'_, '_>, a: &Args<'_>) -> MResult<MValue> {
             let v = std::mem::replace(cell, MValue::Null);
             *cell = match builtin_name(&replacer) {
                 Some("Replacer.ReplaceValue") => held(ev.force(v).map(|v| if super::super::value::equal(&v, &o) { n.clone() } else { v }))?,
-                Some("Replacer.ReplaceText") => held(ev.force(v).and_then(|v| scalar::replace_text(&v, &o, &n)))?,
+                Some("Replacer.ReplaceText") => held(ev.force(v).and_then(|v| text::replace_text(&v, &o, &n)))?,
                 _ => {
                     let v = ev.force(v)?;
                     held(ev.call(&replacer, vec![v, o.clone(), n.clone()]))?
@@ -1105,7 +1105,7 @@ fn pivot(ev: &mut Ev<'_, '_>, a: &Args<'_>) -> MResult<MValue> {
     for v in values.iter() {
         let v = ev.force(v.clone())?;
         pv_keys.push(key(&v));
-        names.push(Rc::from(scalar::text_of(&v, None).unwrap_or_default()));
+        names.push(Rc::from(convert::text_of(&v, None).unwrap_or_default()));
     }
     check_unique(&names)?;
     let mut types: Vec<ColType> = others.iter().map(|i| t.types.get(*i).copied().unwrap_or_default()).collect();
