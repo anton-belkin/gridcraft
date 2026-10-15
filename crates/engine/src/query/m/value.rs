@@ -358,7 +358,8 @@ pub fn date_text(d: i64, dmy: bool) -> String {
 }
 
 pub fn time_text(t: f64) -> String {
-    let total = (t.rem_euclid(1.0) * 86_400.0).round() as i64;
+    // Seconds are cut, not rounded (as .NET shows them); a hair is added for float error.
+    let total = ((t.rem_euclid(1.0) * 86_400.0) + 1.0e-6).floor() as i64;
     let (h, mi, s) = (total / 3600 % 24, total / 60 % 60, total % 60);
     let (h12, ap) = match h {
         0 => (12, "AM"),

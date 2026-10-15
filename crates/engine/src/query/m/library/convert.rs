@@ -4,10 +4,10 @@
 use gridcraft_core::DateSystem;
 
 use super::super::eval::Ev;
-use super::super::value::{MError, MResult, MType, MValue, date_text, duration_text, time_text};
+use super::super::value::{MError, MResult, MType, MValue, duration_text};
 use super::number::round;
 use super::{Args, cant};
-use crate::query::types::{Culture, DateOrder, parse_datetime, parse_number, parse_time};
+use crate::query::types::{Culture, parse_datetime, parse_number, parse_time};
 
 /// Days from 1899-12-30 (OLE Automation dates, which `Number.From(date)` gives) to 1970-01-01.
 const OLE_1970: f64 = 25_569.0;
@@ -27,6 +27,48 @@ pub fn call(ev: &mut Ev<'_, '_>, name: &str, a: &Args<'_>) -> MResult<Option<MVa
         "Date.From" => raise(convert(a.at(0), &MType::prim("date"), a.opt_text(1)?.as_deref(), ev.sys))?,
         "DateTime.From" => raise(convert(a.at(0), &MType::prim("datetime"), a.opt_text(1)?.as_deref(), ev.sys))?,
         "Logical.From" => raise(convert(a.at(0), &MType::prim("logical"), None, ev.sys))?,
+        "Int64.From" | "Int32.From" | "Int16.From" | "Int8.From" | "Byte.From" | "Currency.From" | "Double.From" | "Single.From" | "Decimal.From"
+        | "Percentage.From" => {
+            let facet = match name {
+                "Int64.From" => Some("Int64.Type"),
+                "Int32.From" => Some("Int32.Type"),
+                "Int16.From" => Some("Int16.Type"),
+                "Int8.From" => Some("Int8.Type"),
+                "Byte.From" => Some("Byte.Type"),
+                "Currency.From" => Some("Currency.Type"),
+                _ => None,
+            };
+            let ty = MType { kind: "number", nullable: false, facet, fields: vec![] };
+            let culture = a.opt_text(1)?;
+            let mode = if a.has(2) { Some(a.int(2, 4)?) } else { None };
+            match (facet, mode) {
+                // An explicit rounding mode (RoundingMode.*) for the whole-number types.
+                (Some(f), Some(m)) if f != "Currency.Type" => match raise(convert(a.at(0), &MType::prim("number"), culture.as_deref(), ev.sys))? {
+                    MValue::Number(x) => MValue::Number(round(x, 0, m)),
+                    v => v,
+                },
+                _ => raise(convert(a.at(0), &ty, culture.as_deref(), ev.sys))?,
+            }
+        }
+        "Logical.ToText" => match a.at(0) {
+            MValue::Null => MValue::Null,
+            MValue::Logical(b) => MValue::text(if *b { "true" } else { "false" }),
+            other => return Err(cant(other, "Logical")),
+        },
+        "Logical.FromText" => match a.at(0) {
+            MValue::Null => MValue::Null,
+            MValue::Text(_) => raise(convert(a.at(0), &MType::prim("logical"), None, ev.sys))?,
+            other => return Err(cant(other, "Text")),
+        },
+        "Value.Is" => match a.at(1) {
+            MValue::Type(t) => MValue::Logical(super::super::eval::conforms(a.at(0), t)),
+            other => return Err(cant(other, "Type")),
+        },
+        "Value.Type" => MValue::Type(std::rc::Rc::new(MType::prim(match a.at(0) {
+            MValue::Error(_) | MValue::Lazy(_) => "any",
+            v => v.kind(),
+        }))),
+        "Value.Equals" => MValue::Logical(super::super::value::equal(a.at(0), a.at(1))),
         _ => return Ok(None),
     };
     Ok(Some(r))
@@ -50,13 +92,9 @@ pub fn number_text(n: f64) -> String {
     }
 }
 
-pub fn is_dmy(culture: Option<&str>) -> bool {
-    Culture::of(culture).order == DateOrder::Dmy
-}
-
 /// Text for a value as `Text.From` gives it (`None` for values that have no text form).
 pub fn text_of(v: &MValue, culture: Option<&str>) -> Option<String> {
-    let dmy = is_dmy(culture);
+    let pat = super::date::patterns(culture);
     Some(match v {
         MValue::Text(t) => t.to_string(),
         MValue::Number(n) => {
@@ -64,19 +102,16 @@ pub fn text_of(v: &MValue, culture: Option<&str>) -> Option<String> {
             if Culture::of(culture).decimal == ',' { s.replace('.', ",") } else { s }
         }
         MValue::Logical(b) => if *b { "true" } else { "false" }.to_string(),
-        MValue::Date(d) => date_text(*d, dmy),
-        MValue::DateTime(d) => format!("{} {}", date_text(d.floor() as i64, dmy), time_text(d.rem_euclid(1.0))),
-        MValue::DateTimeZone(d, o) => {
-            format!(
-                "{} {} {}{:02}:{:02}",
-                date_text(d.floor() as i64, dmy),
-                time_text(d.rem_euclid(1.0)),
-                if *o < 0 { '-' } else { '+' },
-                o.abs() / 60,
-                o.abs() % 60
-            )
-        }
-        MValue::Time(t) => time_text(*t),
+        MValue::Date(d) => super::date::format_date(*d as f64, pat.short_date, culture),
+        MValue::DateTime(d) => super::date::format_date(*d, &format!("{} {}", pat.short_date, pat.long_time), culture),
+        MValue::DateTimeZone(d, o) => format!(
+            "{} {}{:02}:{:02}",
+            super::date::format_date(*d, &format!("{} {}", pat.short_date, pat.long_time), culture),
+            if *o < 0 { '-' } else { '+' },
+            o.abs() / 60,
+            o.abs() % 60
+        ),
+        MValue::Time(t) => super::date::format_date(*t, pat.long_time, culture),
         MValue::Duration(d) => duration_text(*d),
         _ => return None,
     })

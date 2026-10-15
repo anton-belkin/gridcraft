@@ -166,6 +166,28 @@ impl<'e, 'a> Ev<'e, 'a> {
                         ListItem::One(x) => out.push(self.held(x, env)?),
                         ListItem::Range(a, b) => {
                             let (a, b) = (self.eval(a, env)?, self.eval(b, env)?);
+                            // A range of characters: {"a".."z"}.
+                            if let (MValue::Text(x), MValue::Text(y)) = (&a, &b) {
+                                let one = |t: &str| {
+                                    let mut cs = t.chars();
+                                    match (cs.next(), cs.next()) {
+                                        (Some(c), None) => Some(u32::from(c)),
+                                        _ => None,
+                                    }
+                                };
+                                let (Some(x), Some(y)) = (one(x), one(y)) else {
+                                    return Err(MError::expr("A range of characters needs single characters at both ends."));
+                                };
+                                if y >= x {
+                                    let count = (y - x + 1) as usize;
+                                    if count > MAX_LIST.saturating_sub(out.len()) {
+                                        return Err(limit(format!("A list can hold at most {MAX_LIST} items here.")));
+                                    }
+                                    self.tick(count as u64)?;
+                                    out.extend((x..=y).filter_map(char::from_u32).map(|c| MValue::text(c.to_string())));
+                                }
+                                continue;
+                            }
                             let (MValue::Number(a), MValue::Number(b)) = (&a, &b) else {
                                 return Err(MError::expr(format!("A list range needs numbers, not {} and {}.", a.kind(), b.kind())));
                             };

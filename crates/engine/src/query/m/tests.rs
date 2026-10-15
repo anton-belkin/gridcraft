@@ -350,7 +350,7 @@ fn the_language() {
     assert_eq!(show("1 is number and \"a\" is text and null is nullable text and not (null is text)"), "true");
     assert!(show("\"a\" as number").starts_with("ERROR"));
     assert_eq!(show("#date(2026, 1, 31) + #duration(1, 0, 0, 0)"), "#date(2026, 2, 1)");
-    assert_eq!(show("Duration.Days"), "ERROR Expression.Error: The M function 'Duration.Days' isn't supported by GridCraft yet.");
+    assert_eq!(show("Table.Profile"), "ERROR Expression.Error: The M function 'Table.Profile' isn't supported by GridCraft yet.");
     assert_eq!(show("#date(2026, 3, 1) - #date(2026, 2, 1)"), "28.00:00:00");
     assert_eq!(show("Date.Year(#datetime(2026, 5, 6, 7, 8, 9))"), "2026");
     assert_eq!(show("Text.From(#date(2026, 1, 31))"), "\"1/31/2026\"");
@@ -363,6 +363,182 @@ fn the_language() {
     assert_eq!(show("Record.FieldNames([A=1] & [B=2, A=3]){1}"), "\"B\"");
     assert_eq!(show("([A=1] & [B=2, A=3])[A]"), "3");
     assert_eq!(show("Table.RowCount(#table({\"A\"}, {{1}}) & #table({\"A\"}, {{2}}))"), "2");
+}
+
+/// A list as text (`1,2,null`), to compare list results.
+fn lst(list: &str) -> String {
+    show(&format!(
+        "Text.Combine(List.Transform({list}, each if _ = null then \"null\" else if _ is list then \"[\" & Text.Combine(List.Transform(_, each if _ = null then \"null\" else Text.From(_)), \",\") & \"]\" else Text.From(_)), \",\")"
+    ))
+}
+
+#[test]
+fn hand_written_text_functions() {
+    let cases = [
+        ("Text.PadStart(\"Name\", 10)", "\"      Name\""),
+        ("Text.PadStart(\"Name\", 10, \"|\")", "\"||||||Name\""),
+        ("Text.PadEnd(\"Name\", 10, \"|\")", "\"Name||||||\""),
+        ("Text.PadStart(\"Long name\", 4)", "\"Long name\""),
+        ("Text.Range(\"Hello World\", 6)", "\"World\""),
+        ("Text.Range(\"Hello World Hello\", 6, 5)", "\"World\""),
+        ("Text.Remove(\"a,b;c\", {\",\", \";\"})", "\"abc\""),
+        ("Text.Select(\"a1b2c3\", {\"0\"..\"9\"})", "\"123\""),
+        ("Text.PositionOf(\"Hello, World! Hello, World!\", \"World\")", "7"),
+        ("Text.PositionOf(\"Hello, World! Hello, World!\", \"World\", Occurrence.Last)", "21"),
+        ("Text.PositionOf(\"Hello\", \"x\")", "-1"),
+        ("Text.PositionOf(\"Hello\", \"L\", Occurrence.First, Comparer.OrdinalIgnoreCase)", "2"),
+        ("Text.PositionOfAny(\"Hello, World!\", {\"W\", \"!\"})", "7"),
+        ("Text.Insert(\"ABD\", 2, \"C\")", "\"ABCD\""),
+        ("Text.RemoveRange(\"ABEFC\", 2)", "\"ABFC\""),
+        ("Text.ReplaceRange(\"ABGF\", 2, 1, \"CDE\")", "\"ABCDEF\""),
+        ("Text.Repeat(\"ab\", 3)", "\"ababab\""),
+        ("Text.Reverse(\"123\")", "\"321\""),
+        ("Text.At(\"Hello\", 4)", "\"o\""),
+        ("Text.TrimStart(\"  a  \")", "\"a  \""),
+        ("Text.TrimEnd(\"xxaxx\", \"x\")", "\"xxa\""),
+        ("Text.Format(\"#{0}, #{1}!\", {\"a\", 2})", "\"a, 2!\""),
+        ("Text.Format(\"Hi #[name]\", [name = \"Ann\"])", "\"Hi Ann\""),
+        ("Character.FromNumber(65) & Text.From(Character.ToNumber(\"B\"))", "\"A66\""),
+    ];
+    for (f, want) in cases {
+        assert_eq!(show(f), want, "{f}");
+    }
+    assert_eq!(lst("Text.PositionOf(\"abab\", \"b\", Occurrence.All)"), "\"1,3\"");
+    assert_eq!(lst("Text.SplitAny(\"a,b;c\", \",;\")"), "\"a,b,c\"");
+    assert_eq!(lst("Text.ToList(\"ab\")"), "\"a,b\"");
+    assert_eq!(lst("{\"a\"..\"c\"}"), "\"a,b,c\"");
+    for bad in [
+        "Text.Range(\"abc\", 4)",
+        "Text.Range(\"abc\", 1, 5)",
+        "Text.At(\"abc\", 3)",
+        "Text.Insert(\"abc\", 9, \"x\")",
+        "Text.PadStart(\"a\", 3, \"xy\")",
+        "Text.Format(\"#{3}\", {1})",
+    ] {
+        assert!(show(bad).starts_with("ERROR"), "{bad}");
+    }
+}
+
+#[test]
+fn hand_written_date_functions() {
+    let cases = [
+        ("Date.AddMonths(#date(2026, 1, 31), 1)", "#date(2026, 2, 28)"),
+        ("Date.AddYears(#date(2024, 2, 29), 1)", "#date(2025, 2, 28)"),
+        ("Date.AddQuarters(#date(2026, 11, 30), 1)", "#date(2027, 2, 28)"),
+        ("Date.AddWeeks(#date(2026, 5, 17), -2)", "#date(2026, 5, 3)"),
+        ("Date.StartOfMonth(#date(2026, 5, 17))", "#date(2026, 5, 1)"),
+        ("Date.EndOfMonth(#date(2026, 5, 17))", "#date(2026, 5, 31)"),
+        ("Date.StartOfQuarter(#date(2026, 5, 17))", "#date(2026, 4, 1)"),
+        ("Date.EndOfQuarter(#date(2026, 5, 17))", "#date(2026, 6, 30)"),
+        ("Date.EndOfYear(#date(2026, 5, 17))", "#date(2026, 12, 31)"),
+        ("Date.StartOfWeek(#date(2026, 5, 17))", "#date(2026, 5, 17)"),
+        ("Date.StartOfWeek(#date(2026, 5, 17), Day.Monday)", "#date(2026, 5, 11)"),
+        ("Date.EndOfWeek(#date(2026, 5, 13), Day.Monday)", "#date(2026, 5, 17)"),
+        ("Date.EndOfMonth(#datetime(2026, 5, 17, 10, 0, 0))", "5/31/2026 11:59:59 PM"),
+        ("Date.DayOfWeek(#date(2026, 5, 17))", "0"),
+        ("Date.DayOfWeek(#date(2026, 5, 17), Day.Monday)", "6"),
+        ("Date.DayOfWeekName(#date(2026, 5, 17))", "\"Sunday\""),
+        ("Date.DayOfWeekName(#date(2026, 5, 17), \"nl-NL\")", "\"zondag\""),
+        ("Date.MonthName(#date(2026, 5, 17), \"de-DE\")", "\"Mai\""),
+        ("Date.QuarterOfYear(#date(2026, 5, 17))", "2"),
+        ("Date.DayOfYear(#date(2026, 5, 17))", "137"),
+        ("Date.DaysInMonth(#date(2024, 2, 1))", "29"),
+        ("Date.IsLeapYear(2024) and not Date.IsLeapYear(#date(2026, 1, 1))", "true"),
+        ("Date.WeekOfYear(#date(2026, 1, 3))", "1"),
+        ("Date.WeekOfYear(#date(2026, 1, 4))", "2"),
+        ("Date.ToText(#date(2026, 5, 17), \"yyyy-MM-dd\")", "\"2026-05-17\""),
+        ("Date.ToText(#date(2026, 5, 17), [Format = \"dd MMM yyyy\", Culture = \"en-US\"])", "\"17 May 2026\""),
+        ("Date.ToText(#date(2026, 5, 17))", "\"5/17/2026\""),
+        ("Date.ToText(#date(2026, 5, 17), null, \"de-DE\")", "\"17.05.2026\""),
+        ("Date.ToText(#date(2026, 5, 17), \"dddd, d MMMM\", \"nl-NL\")", "\"zondag, 17 mei\""),
+        ("DateTime.ToText(#datetime(2026, 5, 17, 13, 5, 9), \"h:mm tt\")", "\"1:05 PM\""),
+        ("DateTime.ToText(#datetime(2026, 5, 17, 13, 5, 9), \"s\")", "\"2026-05-17T13:05:09\""),
+        ("Text.From(#date(2026, 5, 17), \"de-DE\")", "\"17.05.2026\""),
+        ("Date.FromText(\"2026-05-17\")", "#date(2026, 5, 17)"),
+        ("Time.Hour(#time(13, 5, 9)) * 10000 + Time.Minute(#time(13, 5, 9)) * 100 + Time.Second(#time(13, 5, 9))", "130509"),
+        (
+            "Duration.Days(#duration(2, 3, 4, 5)) * 1000 + Duration.Hours(#duration(2, 3, 4, 5)) * 100 + Duration.Minutes(#duration(2, 3, 4, 5)) * 10",
+            "2340",
+        ),
+        ("Duration.TotalHours(#duration(1, 12, 0, 0))", "36"),
+        ("Date.IsInCurrentYear(DateTime.LocalNow())", "true"),
+        ("Date.IsInPreviousNDays(Date.AddDays(DateTime.Date(DateTime.LocalNow()), -1), 2)", "true"),
+        ("Date.IsInPreviousNDays(DateTime.Date(DateTime.LocalNow()), 2)", "false"),
+        ("Date.IsInNextYear(Date.AddYears(DateTime.Date(DateTime.LocalNow()), 1))", "true"),
+    ];
+    for (f, want) in cases {
+        assert_eq!(show(f), want, "{f}");
+    }
+    assert_eq!(lst("List.Dates(#date(2026, 1, 30), 3, #duration(1, 0, 0, 0))"), "\"1/30/2026,1/31/2026,2/1/2026\"");
+}
+
+#[test]
+fn hand_written_number_list_and_value_functions() {
+    let cases = [
+        ("Number.ToText(1234.567, \"N2\")", "\"1,234.57\""),
+        ("Number.ToText(1234.567, \"F1\")", "\"1234.6\""),
+        ("Number.ToText(0.1234, \"P1\")", "\"12.3 %\""),
+        ("Number.ToText(5, \"D3\")", "\"005\""),
+        ("Number.ToText(1234.5, \"#,##0.00\")", "\"1,234.50\""),
+        ("Number.ToText(1234.5, \"N2\", \"de-DE\")", "\"1.234,50\""),
+        ("Number.ToText(-3, \"0;(0)\")", "\"(3)\""),
+        ("Number.ToText(0.5, \"0%\")", "\"50%\""),
+        ("Number.ToText(7, \"000\")", "\"007\""),
+        ("Number.ToText(0.25, \"#.##\")", "\".25\""),
+        ("Number.ToText(255, \"X\")", "\"FF\""),
+        ("Number.ToText(1.5)", "\"1.5\""),
+        ("Number.IsEven(4) and Number.IsOdd(3) and not Number.IsEven(2.5)", "true"),
+        ("Number.Sign(-3)", "-1"),
+        ("Number.Log(8, 2)", "3"),
+        ("Number.Factorial(5)", "120"),
+        ("Number.RoundAwayFromZero(-2.5)", "-3"),
+        ("Number.RoundTowardZero(2.79, 1)", "2.7"),
+        ("Int64.From(\"12.5\")", "12"),
+        ("Int64.From(12.5, null, RoundingMode.AwayFromZero)", "13"),
+        ("Currency.From(1.23456)", "1.2346"),
+        ("Logical.ToText(true) & Logical.ToText(Logical.FromText(\"False\"))", "\"truefalse\""),
+        ("Value.Is(1, type number) and not Value.Is(\"a\", type number)", "true"),
+        ("Value.Type(\"a\") = type text", "true"),
+        ("Number.Round(Number.PI, 4)", "3.1416"),
+        ("List.Product({2, 3, 4})", "24"),
+        ("Number.Round(List.StandardDeviation({1, 2, 3, 4}), 6)", "1.290994"),
+        ("List.Mode({1, 2, 2, 3})", "2"),
+        ("List.ContainsAny({1, 2}, {3, 2}) and not List.ContainsAll({1, 2}, {1, 3})", "true"),
+        ("List.Single({7})", "7"),
+        ("List.Accumulate({1, 2, 3}, 0, (state, current) => state + current)", "6"),
+    ];
+    for (f, want) in cases {
+        assert_eq!(show(f), want, "{f}");
+    }
+    let lists = [
+        ("List.FirstN({1, 2, 3}, 2)", "1,2"),
+        ("List.FirstN({1, 2, 5, 1}, each _ < 3)", "1,2"),
+        ("List.LastN({1, 2, 3}, 2)", "2,3"),
+        ("List.Skip({1, 2, 3})", "2,3"),
+        ("List.RemoveLastN({1, 2, 3})", "1,2"),
+        ("List.Range({1..5}, 1, 2)", "2,3"),
+        ("List.RemoveItems({1, 2, 3, 2}, {2})", "1,3"),
+        ("List.Union({{1, 2}, {2, 3}})", "1,2,3"),
+        ("List.Intersect({{1, 2, 2}, {2, 2, 3}})", "2,2"),
+        ("List.Difference({1, 2, 2, 3}, {2})", "1,2,3"),
+        ("List.Zip({{1, 2}, {\"a\"}})", "[1,a],[2,null]"),
+        ("List.Repeat({1, 2}, 2)", "1,2,1,2"),
+        ("List.Split({1..5}, 2)", "[1,2],[3,4],[5]"),
+        ("List.Positions({\"a\", \"b\"})", "0,1"),
+        ("List.Generate(() => 1, each _ <= 3, each _ + 1)", "1,2,3"),
+        ("List.Generate(() => 1, each _ <= 3, each _ + 1, each _ * 10)", "10,20,30"),
+        ("List.ReplaceValue({1, 2, 1}, 1, 9, Replacer.ReplaceValue)", "9,2,9"),
+    ];
+    for (f, want) in lists {
+        assert_eq!(lst(f), format!("\"{want}\""), "{f}");
+    }
+    for bad in ["Number.ToText(1.5, \"D\")", "Number.Factorial(171)", "List.Single({1, 2})", "List.Range({1}, 3)", "List.StandardDeviation({1})"] {
+        assert!(show(bad).starts_with("ERROR"), "{bad}");
+    }
+    // Runaway generators and repeats end in errors, not hangs.
+    assert!(run("List.Generate(() => 0, each true, each _ + 1)").is_err());
+    assert!(run("List.Repeat({1..1000}, 100000000)").is_err());
+    assert!(run("Text.Repeat(\"x\", 1e15)").is_err());
 }
 
 #[test]
@@ -410,14 +586,14 @@ fn queries_refer_to_each_other() {
 fn unsupported_names_are_listed_without_running() {
     let f = r#"let
     Source = Excel.CurrentWorkbook(){[Name="Sales"]}[Content],
-    a = Table.AddColumn(Source, "P", each Text.PadStart([Region], 5, "0") & Text.Upper([Region])),
+    a = Table.AddColumn(Source, "P", each Table.Profile([Region]) & Text.Upper([Region])),
     b = Table.Buffer(Other),
     c = (x) => x + y,
     d = Sql.Database("srv", "db")
 in
     d"#;
     let found = unsupported(f, &|n| n == "Other").unwrap();
-    assert_eq!(found, vec!["Sql.Database", "Text.PadStart", "y"]);
+    assert_eq!(found, vec!["Sql.Database", "Table.Profile", "y"]);
     assert!(unsupported("let a = in a", &|_| false).is_err());
 }
 

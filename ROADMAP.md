@@ -82,7 +82,7 @@ collaboration, mobile, AI).
 | Charts and sparklines | ~50% | ~30% | 40–60 | [chart-parity.md](docs/chart-parity.md) |
 | Page layout, print, PDF | ~80% | ~55% | 12–20 | [target-app-parity.md](docs/target-app-parity.md#feature-areas) |
 | What-if and analysis (Goal Seek, Solver, ToolPak, Forecast) | ~50% | ~40% | 22–35 | [target-app-parity.md](docs/target-app-parity.md#feature-areas) |
-| Get & Transform, external data, data model | ~65% | ~50% | 30–60 (+150–250 M library) | [target-app-parity.md](docs/target-app-parity.md#feature-areas) |
+| Get & Transform, external data, data model | ~65% | ~50% | 30–60 (+100–170 M library) | [target-app-parity.md](docs/target-app-parity.md#feature-areas) |
 | Insert objects (pictures, shapes, ink, SmartArt, equations) | ~55% | ~45% | 25–40 | [target-app-parity.md](docs/target-app-parity.md#feature-areas) |
 | Review, comments, protection, collaboration | ~55% | ~40% | 35–55 | [target-app-parity.md](docs/target-app-parity.md#feature-areas) |
 | Automation (recorded scripts; no VBA) | ~30% | ~20% | 12–20 | [target-app-parity.md](docs/target-app-parity.md#feature-areas) |
@@ -132,6 +132,7 @@ Ranked; estimates in Opus 5.5 agent-hours. Detail and the full beta-gate list in
 
 | Date | What landed |
 |---|---|
+| 2026-10-15 | Power Query M library: the functions written by hand in custom columns (Text, Date, Time, Duration, Number formats, conversions, more of List), about 300 library functions in all |
 | 2026-10-15 | Power Query M: Excel's own queries refresh in GridCraft (Refresh, Refresh All, from a cell of their table) through an M interpreter that runs the M the Power Query Editor writes; Queries & Connections names what a query needs that isn't supported yet |
 | 2026-10-14 | Get & Transform Data: Data › Get Data with Excel's menu (From File, Database, Azure, Power Platform, Online Services, Other Sources, Combine Queries, Power Query Editor, Data Source Settings, Query Options), queries with typed applied steps and an M-like Advanced Editor view, the Power Query Editor, Navigator, Text/CSV, Excel workbook, XML, JSON, folder, web, OData and (Windows) ODBC/SQL Server/Access sources, Load To, Refresh All (queries, then PivotTables), Queries & Connections pane, Connection Properties (refresh on open, every N minutes), the Security Warning with Enable Content and a Trust Center setting; WEBSERVICE and FILTERXML work |
 | 2026-10-12 | Rows auto-fit oversized fonts: opening a file and whole-row/column formatting grow non-custom rows to their tallest font (#833) |

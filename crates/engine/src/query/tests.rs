@@ -776,13 +776,13 @@ fn excel_queries_refresh_from_their_m() {
             "let\n    Source = Excel.CurrentWorkbook(){[Name=\"Raw\"]}[Content],\n    Grouped = Table.Group(Source, {\"Region\"}, {{\"Amount\", each List.Sum([Amount]), type number}})\nin\n    Grouped",
             Some(table.clone()),
         ),
-        excel("Padded", "Table.AddColumn(Sales, \"P\", each Text.PadStart([Region], 9))", None),
+        excel("Padded", "Table.AddColumn(Sales, \"P\", each Table.Profile([Region]))", None),
         excel("Remote", "Sql.Database(\"srv\", \"db\")", None),
     ];
     let list = s.execute("query.listExcel", json!({})).unwrap();
     assert_eq!((list[0]["name"].as_str(), list[0]["load"].as_str(), list[0]["refreshable"].as_bool()), (Some("Sales"), Some("table"), Some(true)));
     // What GridCraft can't run yet is named, without running anything.
-    assert_eq!((list[1]["refreshable"].as_bool(), &list[1]["unsupported"]), (Some(false), &json!(["Text.PadStart"])));
+    assert_eq!((list[1]["refreshable"].as_bool(), &list[1]["unsupported"]), (Some(false), &json!(["Table.Profile"])));
     // GridCraft's own query list is unchanged; query.get shows the M text.
     assert_eq!(s.execute("query.list", json!({})).unwrap(), json!([]));
     let got = s.execute("query.get", json!({"name": "sales"})).unwrap();
