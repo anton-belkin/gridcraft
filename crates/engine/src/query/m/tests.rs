@@ -242,6 +242,16 @@ fn reshaping_steps() {
 }
 
 #[test]
+fn power_query_naming_and_ordering() {
+    // Repeated headers are numbered with one counter over all repeats, skipping taken names.
+    let p = table(r#"Table.PromoteHeaders(#table(6, {{"A", "B", "A", "B", "A_1", "A"}, {1, 2, 3, 4, 5, 6}}))"#);
+    assert_eq!(p.columns, vec!["A", "B", "A_2", "B_3", "A_1", "A_4"]);
+    // Pivoted rows come out in the order of the other columns' values.
+    let v = table(r#"Table.Pivot(#table({"K", "Att", "V"}, {{"b", "x", 1}, {"a", "x", 2}, {"b", "y", 3}}), {"x", "y"}, "Att", "V")"#);
+    assert_eq!(v.rows, vec![vec![t("a"), n(2.0), Value::Empty], vec![t("b"), n(1.0), n(3.0)]]);
+}
+
+#[test]
 fn enter_data_tables_decompress() {
     let json = br#"[["x","1"],["y","2"]]"#;
     let b64 = crate::io::base64_encode(&miniz_oxide::deflate::compress_to_vec(json, 6));

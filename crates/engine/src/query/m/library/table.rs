@@ -10,7 +10,7 @@ use gridcraft_model::query::ColType;
 use super::super::eval::{Ev, is_limit};
 use super::super::value::{Key, MError, MFunc, MRecord, MResult, MTable, MType, MValue, key, sort_order};
 use super::{Args, cant, names_of, scalar, show};
-use crate::query::{MAX_COLUMNS, unique_names};
+use crate::query::MAX_COLUMNS;
 
 pub fn call(ev: &mut Ev<'_, '_>, name: &str, a: &Args<'_>) -> MResult<Option<MValue>> {
     let r = match name {
@@ -526,10 +526,31 @@ fn promote_headers(ev: &mut Ev<'_, '_>, a: &Args<'_>) -> MResult<MValue> {
         };
         names.push(name.unwrap_or_else(|| t.names.get(i).map(|n| n.to_string()).unwrap_or_default()));
     }
-    unique_names(&mut names);
+    header_names(&mut names);
     let names: Vec<Rc<str>> = names.into_iter().map(Rc::from).collect();
     let n = names.len();
     Ok(MValue::table(MTable { names: names.into(), types: vec![ColType::Any; n], rows: t.rows.iter().skip(1).cloned().collect() }))
+}
+
+/// Makes promoted header names unique as Power Query does: one counter over all repeats, left to
+/// right (`Total`, `Total_1`, `Name`, `Name_2`), skipping names already taken.
+fn header_names(names: &mut [String]) {
+    let taken: std::collections::HashSet<String> = names.iter().cloned().collect();
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut k = 0usize;
+    for n in names.iter_mut() {
+        if seen.contains(n.as_str()) {
+            loop {
+                k += 1;
+                let candidate = format!("{n}_{k}");
+                if !taken.contains(&candidate) && !seen.contains(&candidate) {
+                    *n = candidate;
+                    break;
+                }
+            }
+        }
+        seen.insert(n.clone());
+    }
 }
 
 fn demote_headers(a: &Args<'_>) -> MResult<MValue> {
@@ -1109,6 +1130,8 @@ fn pivot(ev: &mut Ev<'_, '_>, a: &Args<'_>) -> MResult<MValue> {
             cell.push(r.get(vc).cloned().unwrap_or(MValue::Null));
         }
     }
+    // Rows come out in the order of the other columns' values, as Power Query's pivot gives them.
+    groups.sort_by(|(a, _), (b, _)| a.iter().zip(b.iter()).map(|(x, y)| sort_order(x, y)).find(|o| o.is_ne()).unwrap_or(std::cmp::Ordering::Equal));
     let mut out = MTable { names: names.into(), types, rows: Vec::with_capacity(groups.len()) };
     for (mut row, cells) in groups {
         for c in cells {

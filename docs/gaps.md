@@ -119,8 +119,9 @@ No alpha blockers: every core workflow passes the [alpha gate](roadmap.md#alpha-
   edited, and most of the M library written by hand isn't there yet (scalar functions such as
   `Text.PadStart`, most of `Date.*`/`Duration.*`/`Number.*`, then `List.Accumulate`/`Generate`,
   comparer functions in sort, `#shared`, `Sql.Database` and other connectors, privacy levels and
-  query folding); the default culture is en-US; a table an Excel query loads into loses its
-  query table link on save (the table is rewritten); PDF, SharePoint, Azure, Power Platform,
+  query folding); the default culture is en-US; a table's saved sort isn't reapplied after a
+  refresh (its filter and calculated columns are kept); a table an Excel query loads into loses
+  its query table link on save (the table is rewritten); PDF, SharePoint, Azure, Power Platform,
   online-service, Analysis Services and OLE DB sources are listed and disabled; no credentials or
   privacy levels; background refresh runs in the foreground; ODBC only on Windows; the editor's
   column filter lists values of the preview rows only. **Estimate:** 30–60 h, and 150–250 h for

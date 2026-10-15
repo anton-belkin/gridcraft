@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use gridcraft_core::{CellRef, MAX_COLS as SHEET_COLS, MAX_ROWS as SHEET_ROWS, RangeRef, Value};
 use gridcraft_model::query::{ColType, LoadTo, QueryLoad};
-use gridcraft_model::{Cell, NumFmt, Sheet, StyleId, Table, TableColumn, TotalsFn};
+use gridcraft_model::{Cell, Formula, NumFmt, Sheet, StyleId, Table, TableColumn, TotalsFn};
 
 use super::{QResult, QTable};
 use crate::cmd::Ctx;
@@ -124,6 +124,35 @@ pub fn write_load(cx: &mut Ctx<'_>, query: &str, load: &QueryLoad, t: &QTable) -
     if load.to == LoadTo::ConnectionOnly {
         return Err("The query only creates a connection.".into());
     }
+    let headers = if t.columns.is_empty() { vec!["Column1".to_string()] } else { table_headers(&t.columns) };
+    // Calculated columns added to the old table stay, right of the result's columns, their formula
+    // in every row (as Excel keeps them on refresh): the column and its first data cell.
+    let calc: Vec<(TableColumn, Option<(CellRef, Cell)>)> = match load.table.as_deref().and_then(|n| cx.wb.table(n)) {
+        Some((si, ti)) => match cx.wb.sheet(si).and_then(|sh| sh.tables.get(ti).map(|t| (sh, t))) {
+            Some((sh, old)) => old
+                .columns
+                .iter()
+                .enumerate()
+                .filter(|(_, c)| c.formula.is_some() && !headers.contains(&c.name))
+                .map(|(j, c)| {
+                    let first = old.data_range().map(|d| CellRef::new(d.start.row, old.range.start.col + j as u32));
+                    (c.clone(), first.and_then(|f| sh.cell(f).cloned().map(|cell| (f, cell))))
+                })
+                .collect(),
+            None => vec![],
+        },
+        None => vec![],
+    };
+    // The old table's filter, by column name (a refresh keeps it and filters the new rows).
+    let old_filter: Vec<(String, gridcraft_model::FilterCriterion)> = match load.table.as_deref().and_then(|n| cx.wb.table(n)) {
+        Some((si, ti)) => cx
+            .wb
+            .sheet(si)
+            .and_then(|sh| sh.tables.get(ti))
+            .map(|t| t.filter.iter().filter_map(|(off, c)| t.columns.get(*off as usize).map(|col| (col.name.clone(), c.clone()))).collect())
+            .unwrap_or_default(),
+        None => vec![],
+    };
     let previous = match load.table.as_deref() {
         Some(name) => remove_table(cx, name)?,
         None => None,
@@ -160,8 +189,7 @@ pub fn write_load(cx: &mut Ctx<'_>, query: &str, load: &QueryLoad, t: &QTable) -
             }
         },
     };
-    let headers = if t.columns.is_empty() { vec!["Column1".to_string()] } else { table_headers(&t.columns) };
-    let width = headers.len() as u32;
+    let width = (headers.len() + calc.len()) as u32;
     let data_rows = t.rows.len().max(1) as u32;
     let end_row = anchor.row.checked_add(data_rows).filter(|r| *r < SHEET_ROWS);
     let end_col = anchor.col.checked_add(width - 1).filter(|c| *c < SHEET_COLS);
@@ -216,6 +244,27 @@ pub fn write_load(cx: &mut Ctx<'_>, query: &str, load: &QueryLoad, t: &QTable) -
             sh.set_cell(c, Cell { value: v, formula: None, style });
         }
     }
+    for (k, (col, first)) in calc.iter().enumerate() {
+        let c = anchor.col + (headers.len() + k) as u32;
+        sh.set_value(CellRef::new(anchor.row, c), Value::text(col.name.as_str()));
+        for i in 0..t.rows.len() {
+            let at = CellRef::new(anchor.row + 1 + i as u32, c);
+            let cell = match first {
+                Some((from, cell)) => {
+                    let formula = cell.formula.as_ref().and_then(|f| f.expr()).map(|e| {
+                        Arc::new(Formula::from_expr(gridcraft_formula::adjust::shift_relative(e, i64::from(at.row) - i64::from(from.row), 0)))
+                    });
+                    Cell { value: Value::Empty, formula, style: cell.style }
+                }
+                None => Cell {
+                    value: Value::Empty,
+                    formula: col.formula.as_ref().map(|f| Arc::new(Formula::new(&format!("={f}")))),
+                    style: StyleId::DEFAULT,
+                },
+            };
+            sh.set_cell(at, cell);
+        }
+    }
     // Columns that stay keep the ids the file knows them by.
     let kept: Vec<TableColumn> = previous.as_ref().map(|(_, _, old)| old.columns.clone()).unwrap_or_default();
     let (name, style, flags) = match previous {
@@ -224,7 +273,7 @@ pub fn write_load(cx: &mut Ctx<'_>, query: &str, load: &QueryLoad, t: &QTable) -
     };
     let name = if name.is_empty() || cx.wb.table(&name).is_some() { table_name_for(&cx.wb, query) } else { name };
     let sh = cx.wb.sheet_mut(si).ok_or("The sheet is missing.")?;
-    let columns = headers
+    let columns: Vec<TableColumn> = headers
         .iter()
         .map(|n| TableColumn {
             name: n.clone(),
@@ -234,9 +283,16 @@ pub fn write_load(cx: &mut Ctx<'_>, query: &str, load: &QueryLoad, t: &QTable) -
             unique_name: kept.iter().find(|c| c.name == *n).and_then(|c| c.unique_name.clone()),
             xml: None,
         })
+        .chain(calc.iter().map(|(c, _)| c.clone()))
         .collect();
     let table = match flags {
-        Some(old) => Table { id: old.id, name: name.clone(), range, columns, style, totals_row: false, filter: vec![], ..old },
+        Some(old) => {
+            let filter = old_filter
+                .iter()
+                .filter_map(|(n, c)| columns.iter().position(|x: &TableColumn| x.name == *n).map(|i| (i as u32, c.clone())))
+                .collect();
+            Table { id: old.id, name: name.clone(), range, columns, style, totals_row: false, filter, ..old }
+        }
         None => Table {
             id,
             name: name.clone(),
@@ -255,7 +311,20 @@ pub fn write_load(cx: &mut Ctx<'_>, query: &str, load: &QueryLoad, t: &QTable) -
             connection_id: None,
         },
     };
+    let filter = table.filter.clone();
     sh.tables.push(table);
+    // Rows the old table's filter hid are shown again; the filter then applies to the new rows.
+    if let Some(o) = old {
+        for row in o.start.row..=o.end.row.max(range.end.row) {
+            if let Some(e) = sh.rows.get_mut(&row) {
+                e.hidden = false;
+            }
+        }
+    }
+    if !filter.is_empty() {
+        crate::cmd::data::apply_criteria(&mut cx.wb, si, range, &filter);
+    }
+    let Some(sh) = cx.wb.sheet_mut(si) else { return Err("The sheet is missing.".into()) };
     // Fit new columns to their content (a refresh keeps the widths the user set).
     if new_sheet.is_some() || old.is_none() {
         for (j, h) in headers.iter().enumerate() {

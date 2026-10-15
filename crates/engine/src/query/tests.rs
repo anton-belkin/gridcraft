@@ -819,6 +819,67 @@ fn excel_queries_refresh_from_their_m() {
 }
 
 #[test]
+fn refresh_keeps_calculated_columns_and_the_tables_filter() {
+    use gridcraft_model::{Cell, FilterCriterion, Formula, TableColumn, TotalsFn};
+    let fake = Arc::new(Fake::default());
+    let mut s = session(&fake);
+    s.execute("range.setValues", json!({"range": "A1:B3", "values": [["Region", "Amount"], ["North", 5], ["South", 7]]})).unwrap();
+    s.execute("insert.table", json!({"range": "A1:B3", "name": "Sales"})).unwrap();
+    s.execute(
+        "range.setValues",
+        json!({"range": "E1:F5", "values": [["Region", "Amount"], ["North", 10], ["South", 20], ["North", 1], ["East", 2]]}),
+    )
+    .unwrap();
+    s.execute("insert.table", json!({"range": "E1:F5", "name": "Raw"})).unwrap();
+    // A calculated column added in Excel beside the query's columns, and a filter on Region.
+    let wb = Arc::make_mut(&mut s.doc_mut().unwrap().wb);
+    let sh = Arc::make_mut(&mut wb.sheets[0]);
+    sh.set_value(CellRef::parse("C1").unwrap(), Value::text("Twice"));
+    for r in [2u32, 3] {
+        sh.set_cell(
+            CellRef::new(r - 1, 2),
+            Cell { value: Value::Empty, formula: Some(Arc::new(Formula::new("=Sales[[#This Row],[Amount]]*2"))), style: Default::default() },
+        );
+    }
+    let t = sh.tables.iter_mut().find(|t| t.name == "Sales").unwrap();
+    t.range = gridcraft_core::RangeRef::parse("A1:C3").unwrap();
+    t.columns.push(TableColumn {
+        name: "Twice".into(),
+        totals: TotalsFn::None,
+        totals_label: None,
+        formula: Some("Sales[[#This Row],[Amount]]*2".into()),
+        unique_name: None,
+        xml: None,
+    });
+    t.filter = vec![(0, FilterCriterion::Values { values: vec!["North".into()], blanks: false })];
+    sh.rows.entry(2).or_default().hidden = true;
+    wb.excel_queries = vec![gridcraft_model::ExcelQuery {
+        name: "Sales".into(),
+        formula: "Table.Sort(Excel.CurrentWorkbook(){[Name=\"Raw\"]}[Content], {{\"Amount\", Order.Descending}})".into(),
+        table: Some("Sales".into()),
+        sheet: Some("Sheet1".into()),
+        ..Default::default()
+    }];
+    s.execute("data.refresh", json!({"query": "Sales"})).unwrap();
+    let d = s.doc().unwrap();
+    let sh = d.wb.sheet(0).unwrap();
+    let t = sh.tables.iter().find(|t| t.name == "Sales").unwrap();
+    assert_eq!(t.range.a1(), "A1:C5");
+    assert_eq!(t.columns.iter().map(|c| c.name.as_str()).collect::<Vec<_>>(), vec!["Region", "Amount", "Twice"]);
+    assert!(t.columns[2].formula.is_some());
+    // The formula fills every new row and calculates.
+    assert_eq!(
+        (cell(&s, "Sheet1", "B2"), cell(&s, "Sheet1", "C2"), cell(&s, "Sheet1", "C5")),
+        (Value::number(20.0), Value::number(40.0), Value::number(2.0))
+    );
+    assert!(sh.cell(CellRef::parse("C5").unwrap()).is_some_and(|c| c.formula.is_some()));
+    // The filter is kept and filters the new rows: South (row 2) and East (row 4) are hidden.
+    assert_eq!(t.filter.len(), 1);
+    let hidden: Vec<u32> = (1..=4).filter(|r| sh.is_row_hidden(*r)).collect();
+    assert_eq!(hidden, vec![1, 3]);
+}
+
+#[test]
 fn an_excel_workbook_refreshes_and_keeps_its_power_query_parts() {
     use std::io::Read;
     let fake = Arc::new(Fake::default());
