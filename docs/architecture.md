@@ -1,6 +1,6 @@
 # Architecture
 
-> **Last reviewed:** 2026-10-10 · **Last updated:** 2026-10-15 · **Change:** minor (the M interpreter for Excel's Power Query queries) · **Target:** Microsoft Excel (Microsoft 365)
+> **Last reviewed:** 2026-10-10 · **Last updated:** 2026-10-15 · **Change:** minor (Power Query direction: one model, M) · **Target:** Microsoft Excel (Microsoft 365)
 
 How GridCraft is built today. Rules for contributors are in [`AGENTS.md`](../AGENTS.md).
 
@@ -52,6 +52,44 @@ including tests, 2026-10-10.
    parser and lazy evaluator for Power Query M over the same sources, data access and loading,
    with recursion depth and total work bounded.
 
+## Power Query: one model, M
+
+**Decision** (proposed 2026-10-15, to agree with the Get & Transform contributors): a query is
+its M formula, as in Excel. Everything else is a view of it or a way to run and store it.
+
+- **Model.** A query is a name, an M expression (normally a `let` whose bindings are the
+  Applied Steps), its load target and refresh options. Excel's queries and GridCraft's are the
+  same type (today: `model::ExcelQuery` beside `model::query::Query` with typed steps).
+- **One engine.** Every query runs through `engine/query/m`. A transform is implemented once,
+  as the `Table.*` (or other) library function the M calls; the typed-step code becomes those
+  functions' implementation where it is the better one.
+- **Steps are a codec.** Each Power Query Editor step is a pair: `StepOp → M` (the M Excel's editor
+  writes for it) and `M → StepOp` (recognising that pattern in a binding). A recognised step opens
+  its dialog; any other binding is edited as M (formula bar, Advanced Editor).
+- **Storage is Excel's.** Queries are saved in the DataMashup part ([MS-QDEFF]) with
+  `connections.xml` and query tables, so Excel lists and refreshes queries made in GridCraft;
+  Excel's own parts are written back unchanged when nothing changed. GridCraft's JSON part
+  (`customXml/gridcraftQueries.xml`) is read only to migrate older files.
+- **The oracle is Excel's cache.** A workbook saved by Excel holds the values its last refresh
+  loaded. Refreshing in GridCraft and comparing (values, row order, filtered rows, calculated
+  columns) is the conformance test; Excel-authored Power Query workbooks live in the corpus repo
+  (craftrules `standards/test-corpora.md`), never here.
+
+Seams, so work splits without touching the same files:
+
+| Area | Where | Unit of work |
+|---|---|---|
+| M language | `query/m/{lexer,parser,eval}.rs` | a language feature + tests |
+| M library | `query/m/library/*`, one file per M module (`scalar.rs` still holds Text, Number, Date and List: split it first) | one function: an entry in `FUNCTIONS`, its code, a test |
+| Sources | `query/m/library/source.rs` over `query::DataAccess` | one connector |
+| Step codec | per step, beside `query/mtext.rs` | one `StepOp` both ways + a round-trip test |
+| Editor UI | `ui-egui/src/power_query.rs` | one dialog over its step codec |
+| Storage | `xlsx` (DataMashup, connections, query tables) | one part, round trip + damaged input |
+
+Adding an M function: add `(name, min, max)` to `library::FUNCTIONS`, implement it in its module's
+`call`, add a test with M as the Power Query Editor writes it and a hostile case;
+`every_library_function_dispatches` and the random-formula test cover dispatch and panics.
+
 ## Agent control
 
 - Desktop control channel: `gridcraft --control 7979`, JSON lines on localhost
@@ -72,11 +110,14 @@ rpm, tarball), FreeBSD, and web (WASM; WebGPU or WebGL2). Release workflows in
 - No string catalog or text shaping (see [localization-parity.md](localization-parity.md)).
 - XLSX reader builds the whole workbook in memory; no streaming (#175).
 - Unmodelled XLSX parts are not carried through a save.
+- Two query models until the Power Query decision above is carried out: GridCraft's typed steps
+  (saved in its own JSON part, which Excel doesn't read) and Excel's M.
 
 ## Revision history
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-15 | minor | Power Query direction: M is the one query model (steps as a codec, Excel's storage, Excel's cache as the oracle); seams for parallel work |
 | 2026-10-15 | minor | The M interpreter (`engine/query/m`) for Excel's Power Query queries |
 | 2026-10-14 | minor | Get & Transform data flow; the `external` crate (L6) |
 | 2026-10-10 | major | Created from the code on main: crates, layers, data flow, agent control, known gaps |
