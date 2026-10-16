@@ -73,7 +73,7 @@ pub(crate) fn show(st: &mut AgentUi, app: &mut SheetApp, ui: &mut Ui) {
                 Tab::Variants => variants_tab(st, app, ui, &l, &t, &p, &mut acts),
                 Tab::Risk => risk_tab(st, app, ui, &l, &t, &p, &mut acts),
                 Tab::History => history_tab(app, ui, &l, &t, &p, &mut acts),
-                Tab::Connect => connect_tab(ui, &t),
+                Tab::Connect => connect_tab(app, ui, &t, &p, &mut acts),
             });
         },
     );
@@ -852,6 +852,109 @@ fn safe_file(ui: &mut Ui, d: &gridcraft_engine::DocState, l: &Layer, t: &Tokens,
     }
 }
 
+/// How the app brings the agent in: off, into the user's own session, or as a background agent.
+#[cfg(not(target_arch = "wasm32"))]
+fn agent_mode(app: &SheetApp, ui: &mut Ui, t: &Tokens, p: &Palette, acts: &mut Vec<Act>) {
+    use gridcraft_agent::runner::{self, Mode};
+    let Some(d) = app.session.active() else { return };
+    let l = layer::get(d);
+    let mode = runner::mode();
+    ui.label(RichText::new("When you ask a question").strong());
+    ui.horizontal_wrapped(|ui| {
+        for (m, name, tip) in [
+            (Mode::Off, "I connect my agent", "Your agent watches /events or calls wait_for_questions"),
+            (Mode::Channel, "Send to my session", "Questions arrive in your open Claude Code session (Channels, research preview)"),
+            (Mode::Background, "Background agent", "GridCraft runs Claude Code for this workbook and answers in the background"),
+        ] {
+            if ui.selectable_label(mode == m, name).on_hover_text(tip).clicked() && mode != m {
+                acts.push(Act::Run("agent.agentMode", json!({"mode": m.id()})));
+            }
+        }
+    });
+    let copy_row = |ui: &mut Ui, title: &str, value: String| {
+        ui.label(RichText::new(title).small().strong());
+        ui.horizontal(|ui| {
+            ui.add(egui::TextEdit::singleline(&mut value.clone()).desired_width(ui.available_width() - 60.0).font(egui::TextStyle::Monospace));
+            if ui.small_button("Copy").clicked() {
+                ui.ctx().copy_text(value.clone());
+            }
+        });
+    };
+    match mode {
+        Mode::Off => {}
+        Mode::Channel => {
+            let exe = std::env::current_exe().map(|x| x.display().to_string()).unwrap_or_else(|_| "gridcraft".into());
+            ui.label(RichText::new("Each question arrives as a new turn in your interactive Claude Code session. Once:").small());
+            copy_row(ui, "Add GridCraft as a channel server", format!("claude mcp add gridcraft-channel -- '{exe}' --agent-stdio"));
+            copy_row(ui, "Then start your session with", "claude --dangerously-load-development-channels server:gridcraft-channel".into());
+            ui.label(RichText::new("Channels are a research preview: interactive sessions only, and Claude Code asks you to confirm the development channel at start.").small().color(t.text_dim));
+        }
+        Mode::Background => {
+            let st = runner::status(d.uid).unwrap_or_default();
+            card(ui, t, if st.running { p.answered } else { p.seen }, |ui| {
+                let state = if st.running {
+                    if st.in_flight > 0 { format!("Working · {} in progress", st.in_flight) } else { "Running · waiting for questions".to_string() }
+                } else {
+                    "Not running · starts with your next question".to_string()
+                };
+                ui.label(RichText::new(state).small().strong());
+                let session = if st.session_id.is_empty() { l.agent_session.clone() } else { st.session_id.clone() };
+                if !session.is_empty() {
+                    ui.label(RichText::new(format!("Session {session}")).small().monospace().color(t.text_dim));
+                }
+                if !st.cwd.is_empty() {
+                    ui.label(RichText::new(format!("In {} · also listed in Claude Desktop's Code tab", st.cwd)).small().color(t.text_dim));
+                }
+                if st.turns > 0 {
+                    ui.label(RichText::new(format!("{} turns · ${:.2}", st.turns, st.cost_usd)).small().color(t.text_dim));
+                }
+                for line in st.recent.iter().rev().take(4).rev() {
+                    ui.label(RichText::new(clip(line, 120)).small());
+                }
+                if !st.last_error.is_empty() {
+                    ui.label(RichText::new(clip(&st.last_error, 240)).small().color(p.material));
+                }
+                ui.horizontal_wrapped(|ui| {
+                    if st.running {
+                        if ui.small_button("Stop").clicked() {
+                            acts.push(Act::Run("agent.agentStop", json!({})));
+                        }
+                    } else if ui.small_button("Start").clicked() {
+                        acts.push(Act::Run("agent.agentStart", json!({})));
+                    }
+                    if ui.small_button("New session").on_hover_text("Start over from a summary of this workbook's history").clicked() {
+                        acts.push(Act::Run("agent.agentReset", json!({})));
+                    }
+                });
+                if !session.is_empty() {
+                    let cmd = runner::resume_command(&runner::Status { session_id: session.clone(), ..st.clone() });
+                    ui.horizontal(|ui| {
+                        if ui
+                            .small_button("Copy resume command")
+                            .on_hover_text("Continue this conversation yourself: stop the background agent first (one writer per session)")
+                            .clicked()
+                        {
+                            ui.ctx().copy_text(cmd.clone());
+                        }
+                    });
+                }
+            });
+            ui.label(
+                RichText::new(format!(
+                    "Runs `{}` with only GridCraft's tools, at most {} turns and ${:.2} per question.",
+                    runner::config().command,
+                    runner::config().max_turns,
+                    runner::config().max_budget_usd
+                ))
+                .small()
+                .color(t.text_dim),
+            );
+        }
+    }
+    ui.add_space(6.0);
+    ui.separator();
+}
+
 fn history_tab(app: &SheetApp, ui: &mut Ui, l: &Layer, t: &Tokens, p: &Palette, acts: &mut Vec<Act>) {
     if l.log.is_empty() {
         ui.label(RichText::new("No history yet: decisions and changes by you and the agent are recorded here.").italics());
@@ -886,7 +989,11 @@ fn history_tab(app: &SheetApp, ui: &mut Ui, l: &Layer, t: &Tokens, p: &Palette, 
     }
 }
 
-fn connect_tab(ui: &mut Ui, t: &Tokens) {
+fn connect_tab(app: &SheetApp, ui: &mut Ui, t: &Tokens, p: &Palette, acts: &mut Vec<Act>) {
+    #[cfg(not(target_arch = "wasm32"))]
+    agent_mode(app, ui, t, p, acts);
+    #[cfg(target_arch = "wasm32")]
+    let _ = (app, p, acts);
     let Some(url) = crate::server_url() else {
         ui.label("The agent server isn't running. Start GridCraft with --agent-port <port>.");
         return;

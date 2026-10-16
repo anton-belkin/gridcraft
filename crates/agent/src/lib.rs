@@ -18,11 +18,15 @@
 
 pub mod analysis;
 pub mod anchor;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod channel;
 pub mod commands;
 pub mod layer;
 pub mod links;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod mcp;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod runner;
 pub mod safe;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod server;

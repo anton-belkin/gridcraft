@@ -115,9 +115,9 @@ fn html_escape(s: &str) -> String {
     s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;")
 }
 
-/// A random-looking UUID (v4 layout): from the secure source where there is one, else from the
+/// A random UUID (v4 layout): from the secure source where there is one, else from the
 /// clock and the document.
-fn new_uuid(salt: u64) -> String {
+pub fn new_uuid(salt: u64) -> String {
     #[cfg(not(target_arch = "wasm32"))]
     let mut b: [u8; 16] = {
         let mut b = [0u8; 16];

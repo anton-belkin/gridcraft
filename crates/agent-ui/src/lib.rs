@@ -223,6 +223,12 @@ impl UiExtension for AgentUi {
                 *g = None;
             }
         }
+        // The background agent: start it on a new question, feed it the questions.
+        #[cfg(not(target_arch = "wasm32"))]
+        if gridcraft_agent::runner::mode() == gridcraft_agent::runner::Mode::Background {
+            gridcraft_agent::runner::tick(&mut app.session);
+            ctx.request_repaint_after(std::time::Duration::from_millis(700));
+        }
         // A slide asked to see its cells: scroll there and come to the front.
         if gridcraft_agent::links::take_revealed() {
             app.grid.ensure_visible = true;

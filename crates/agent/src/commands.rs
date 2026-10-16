@@ -38,7 +38,15 @@ macro_rules! spec {
 pub(crate) use spec;
 
 /// Every command of the layer, by module.
-pub static ALL: &[&[CommandSpec]] = &[SPECS, crate::variants::SPECS, crate::stress::SPECS, crate::safe::SPECS, crate::links::SPECS];
+pub static ALL: &[&[CommandSpec]] = &[
+    SPECS,
+    crate::variants::SPECS,
+    crate::stress::SPECS,
+    crate::safe::SPECS,
+    crate::links::SPECS,
+    #[cfg(not(target_arch = "wasm32"))]
+    crate::runner::SPECS,
+];
 
 pub static SPECS: &[CommandSpec] = &[
     // the reader's side

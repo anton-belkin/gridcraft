@@ -20,7 +20,10 @@ worst_case and risk_matrix to find what to check first. \
 Change the workbook only with run_command, giving a reason and a source. PRIVACY: ranges listed in get_context.privateRanges \
 hold client data; you see stand-in values with the same sign and magnitude, and everything computed from them is computed \
 from the stand-ins. Never present those numbers as real; reason about the model's mechanics instead. You cannot write to \
-private cells.";
+private cells. \
+CHANNEL: when GridCraft sends questions to this session, each arrives as <channel source=\"gridcraft\" question_id=\"q3\" \
+range=\"Sheet1!B7\">question text</channel>: claim_question with that id, investigate, answer_question. Keep it short; \
+the user is waiting in the spreadsheet.";
 
 fn tool(name: &str, desc: &str, props: Value, required: &[&str], read_only: bool) -> Value {
     json!({
@@ -283,7 +286,8 @@ pub fn handle(b: &mut dyn Backend, msg: &Value) -> Option<Value> {
             let version = if SUPPORTED.contains(&asked) { asked } else { PROTOCOL_VERSION };
             ok(json!({
                 "protocolVersion": version,
-                "capabilities": {"tools": {"listChanged": false}},
+                // A channel too: in "my session" mode new questions arrive as channel events.
+                "capabilities": {"tools": {"listChanged": false}, "experimental": {"claude/channel": {}}},
                 "serverInfo": {"name": "gridcraft-agent", "title": "GridCraft agent layer", "version": env!("CARGO_PKG_VERSION")},
                 "instructions": INSTRUCTIONS,
             }))

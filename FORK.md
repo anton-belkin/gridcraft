@@ -95,6 +95,26 @@ upstream. Each one accepted upstream removes its lines from the patch.
   `link.addUses` and the registry file `ArtCraft/links.jsonl` (read when a workbook opens), and
   opens the source with `link.reveal` or `gridcraft <file> --goto <name>`. The uses are kept in the
   layer, so "▸ 2 slides" and Go to Slide travel with the workbook.
+- **The app can bring the agent in itself**, in a mode the app sets (never the file: a workbook
+  someone sends must not start an agent that spends the reader's money). Connect tab, or
+  `--agent-mode off|channel|background`.
+  - *Send to my session* (Claude Code Channels, research preview): the server declares
+    `experimental["claude/channel"]` and streams each new question on `GET /mcp` (SSE) as
+    `notifications/claude/channel`. Claude Code spawns channel servers over stdio, so
+    `gridcraft --agent-stdio` is a bridge: requests to the app's `POST /mcp`, events from its
+    `GET /mcp` to stdout. `claude mcp add gridcraft-channel -- <gridcraft> --agent-stdio`, then
+    `claude --dangerously-load-development-channels server:gridcraft-channel`. Interactive
+    sessions only (`-p` ignores the flag).
+  - *Background agent*: one `claude -p --input-format stream-json --output-format stream-json`
+    process per document, in the workbook's folder (its session sits with the deal's files in
+    Claude Desktop's Code tab), with `--strict-mcp-config` and only the GridCraft server (the
+    user's own MCP servers and plugins stay out of its context), `--allowedTools
+    "mcp__gridcraft__*"`, the skill as `--append-system-prompt-file`, `--max-turns`,
+    `--max-budget-usd`. It is named with `/rename GridCraft · <file>`, gets each new question
+    once as a stream-json user message, and its session id is kept in the layer: reopening the
+    workbook resumes it (`--resume`); a resume that fails here, or "New session", starts a fresh
+    one from a summary of the history. Stop is end of input, then SIGINT. Never `--bare` (it
+    needs an API key). The command is configurable (`GRIDCRAFT_AGENT_COMMAND`). Desktop only.
 - **Analysis is deterministic.** The trace and the sensitivity are computed by the engine (the
   dependency graph, recalculation of a scratch copy). The agent explains them; it doesn't make them up.
 - **Several inputs at once, bounded.** The worst and best combination moves 3–12 inputs inside
@@ -153,7 +173,9 @@ multi-dimensional analysis (the worst and best combination of an output's inputs
 single moves added up); the risk matrix (each input's impact on an output against the agent's
 confidence in it, Risk tab); safe file mode (client data saved as stand-ins, real values sealed
 under a key kept on this computer; export for standard Excel); GridCraft's side of Excel → slide
-links (copy as linked source, `link.read`, "used on slides" with Go to Slide, `--goto`). `agent-layer/demo/build-demo.sh`
+links (copy as linked source, `link.read`, "used on slides" with Go to Slide, `--goto`); the app
+starting the agent itself (into the user's own Claude Code session as channel events, or as a
+background agent per workbook). `agent-layer/demo/build-demo.sh`
 builds a demo workbook with all of it and renders each feature.
 
 Next: export to a self-contained web page (WASM, prepared answers only); WordCraft and DeckCraft

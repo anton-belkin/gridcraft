@@ -279,6 +279,9 @@ pub struct Layer {
     /// Ranges copied as linked sources: `_GcLink_` names (never cleaned up: other files use them).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub links: Vec<Anchor>,
+    /// The background agent's session (Claude Code session id), resumed when the workbook reopens.
+    #[serde(default, skip_serializing_if = "String::is_empty", rename = "agentSession")]
+    pub agent_session: String,
     /// Where those ranges are used (decks and slides).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub uses: Vec<LinkUse>,

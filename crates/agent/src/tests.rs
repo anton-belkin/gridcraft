@@ -176,7 +176,8 @@ fn audit_records_who_changed_what() {
 fn every_agent_command_survives_empty_params() {
     crate::install();
     test_keys();
-    for spec in crate::commands::ALL.iter().flat_map(|s| s.iter()) {
+    // Starting an agent process is not for a fuzz test (its own test drives a fake one).
+    for spec in crate::commands::ALL.iter().flat_map(|s| s.iter()).filter(|s| !matches!(s.id, "agent.agentStart" | "agent.agentReset")) {
         let mut s = Session::new();
         let _ = s.execute(spec.id, json!({}));
         let _ = s.execute(spec.id, Value::Null);
@@ -622,4 +623,119 @@ fn link_uses_and_reveal() {
     assert!(crate::links::take_revealed());
     crate::links::set_thread_registry(None);
     let _ = std::fs::remove_dir_all(path.parent().unwrap());
+}
+
+/// Waits (up to 5 s) for a condition another process brings about.
+fn wait_for(mut f: impl FnMut() -> bool) -> bool {
+    for _ in 0..100 {
+        if f() {
+            return true;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    false
+}
+
+#[cfg(unix)]
+#[test]
+fn background_agent_gets_questions_and_resumes_its_session() {
+    use crate::runner::{self, Config, Mode};
+    use std::os::unix::fs::PermissionsExt;
+    let (mut s, path) = saved_model("runner");
+    let dir = path.parent().unwrap().to_path_buf();
+    let rec = dir.join("rec");
+    std::fs::create_dir_all(&rec).unwrap();
+    // A fake agent CLI: records how it was started and what it was told; one result per message.
+    let script = dir.join("fake-claude");
+    std::fs::write(
+        &script,
+        format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$@\" >> '{r}/args.txt'\npwd -P > '{r}/cwd.txt'\nwhile IFS= read -r line; do printf '%s\\n' \"$line\" >> '{r}/stdin.txt'; echo '{{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"total_cost_usd\":0.02}}'; done\n",
+            r = rec.display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    runner::set_config(Config { command: script.display().to_string(), data_dir: Some(dir.join("data")), ..Config::default() });
+    runner::set_mode(Mode::Background);
+    let read = |f: &str| std::fs::read_to_string(rec.join(f)).unwrap_or_default();
+    // A question starts the agent in the workbook's folder and is sent to it once.
+    let q = s.execute("agent.ask", json!({"range": "B7", "text": "Why is profit 150k?"})).unwrap()["id"].as_str().unwrap().to_string();
+    runner::tick(&mut s);
+    runner::tick(&mut s);
+    assert!(wait_for(|| read("stdin.txt").lines().count() >= 2), "stdin: {}", read("stdin.txt"));
+    let lines: Vec<Value> = read("stdin.txt").lines().map(|l| serde_json::from_str(l).unwrap()).collect();
+    assert_eq!(lines.len(), 2, "{lines:?}");
+    assert_eq!(lines[0]["type"], json!("user"));
+    assert!(lines[0]["message"]["content"].as_str().unwrap().starts_with("/rename GridCraft · q3.xlsx"));
+    let text = lines[1]["message"]["content"].as_str().unwrap();
+    assert!(text.contains("Why is profit 150k?") && text.contains(&q) && text.contains("Sheet1!B7"), "{text}");
+    assert_eq!(lines[1]["parent_tool_use_id"], Value::Null);
+    let args = read("args.txt");
+    let a: Vec<&str> = args.lines().collect();
+    let session = layer::get(s.active().unwrap()).agent_session.clone();
+    assert_eq!(session.len(), 36);
+    for want in [
+        "-p",
+        "--input-format",
+        "stream-json",
+        "--verbose",
+        "--strict-mcp-config",
+        "mcp__gridcraft__*",
+        "--append-system-prompt-file",
+        "--max-turns",
+        "--max-budget-usd",
+    ] {
+        assert!(a.contains(&want), "{want} missing in {a:?}");
+    }
+    assert!(!a.contains(&"--bare"));
+    let at = |flag: &str| a.iter().position(|x| *x == flag).and_then(|i| a.get(i + 1)).copied().unwrap_or("");
+    assert_eq!(at("--session-id"), session);
+    let mcp: Value = serde_json::from_str(&std::fs::read_to_string(at("--mcp-config")).unwrap()).unwrap();
+    assert_eq!(mcp["mcpServers"].as_object().unwrap().len(), 1);
+    assert_eq!(mcp["mcpServers"]["gridcraft"]["type"], json!("http"));
+    assert_eq!(read("cwd.txt").trim(), std::fs::canonicalize(&dir).unwrap().display().to_string());
+    // Both messages were answered; the same question isn't sent twice.
+    assert!(wait_for(|| runner::status(s.active().unwrap().uid).is_some_and(|x| x.turns == 2 && x.in_flight == 0)));
+    runner::tick(&mut s);
+    std::thread::sleep(std::time::Duration::from_millis(200));
+    assert_eq!(read("stdin.txt").lines().count(), 2);
+    // Stopped and started again: the same session, resumed.
+    let st = s.execute("agent.agentStop", json!({})).unwrap();
+    assert_eq!(st["running"], json!(false));
+    assert!(s.execute("agent.agentMode", json!({"mode": "off", "actor": "agent"})).is_err());
+    std::fs::remove_file(rec.join("args.txt")).unwrap();
+    s.execute("agent.agentStart", json!({})).unwrap();
+    assert!(wait_for(|| read("args.txt").contains("--resume")));
+    assert!(read("args.txt").lines().any(|l| l == session));
+    // A new session starts from the document's history.
+    std::fs::remove_file(rec.join("stdin.txt")).unwrap();
+    s.execute("agent.agentReset", json!({})).unwrap();
+    assert!(wait_for(|| read("stdin.txt").contains("fresh session")));
+    assert_ne!(layer::get(s.active().unwrap()).agent_session, session);
+    runner::set_mode(Mode::Off);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn questions_become_channel_events() {
+    let n = crate::channel::notification(&json!({"id": "q3", "range": "Sheet1!B7", "label": "Profit", "text": "Why negative?"}));
+    assert_eq!(n["method"], json!("notifications/claude/channel"));
+    assert_eq!(n["params"]["content"], json!("Question on Sheet1!B7 (Profit): Why negative?"));
+    assert_eq!(n["params"]["meta"]["question_id"], json!("q3"));
+    assert!(n["params"]["meta"].as_object().unwrap().keys().all(|k| k.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')));
+    struct Nothing;
+    impl gridcraft_mcp::Backend for Nothing {
+        fn call(&mut self, _: &str, _: Value) -> Result<Value, String> {
+            Err("no".into())
+        }
+        fn has_ui(&self) -> bool {
+            false
+        }
+        fn describe(&self) -> String {
+            "test".into()
+        }
+    }
+    let init = crate::mcp::handle(&mut Nothing, &json!({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}})).unwrap();
+    assert_eq!(init["result"]["capabilities"]["experimental"]["claude/channel"], json!({}));
 }

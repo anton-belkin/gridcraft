@@ -53,3 +53,7 @@ anchor=$(python3 -c "import zipfile,re,sys; print(re.search(r'name=\"(_GcLink_l\
 use="{\"uses\":[{\"event\":\"use\",\"at\":1,\"app\":\"DeckCraft\",\"link\":\"l18f\",\"workbook\":\"$out/demo.xlsx\",\"anchor\":\"$anchor\",\"sheet\":\"Sheet1\",\"range\":\"A15:B18\",\"deck\":\"$out/board.pptx\",\"deckTitle\":\"Board update Q3\",\"slide\":3,\"slideTitle\":\"Revenue and EBITDA\",\"shapeKey\":\"k4f2a9\",\"mode\":\"table\"}]}"
 snap --in "$out/demo.xlsx" --cmd "link.addUses=$use" --cmd "$(sel B17)" --pane cell --hover B18 "$out/6-linked-slides.png"
 rm -f "$out/.links.png"
+# How the app brings the agent in (Connect tab). A dummy command: rendering never starts a real agent.
+export GRIDCRAFT_AGENT_COMMAND=/usr/bin/false
+snap --in "$out/demo.xlsx" --cmd 'agent.agentMode={"mode":"channel"}' --pane connect "$out/7-my-session.png"
+snap --in "$out/demo.xlsx" --cmd 'agent.agentMode={"mode":"background"}' --pane connect "$out/7-background.png"
