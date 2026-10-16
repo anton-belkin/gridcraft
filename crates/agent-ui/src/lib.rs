@@ -4,13 +4,16 @@
 //!   marked inputs; heat maps of the agent's confidence and of each input's impact;
 //! - hovering a number shows its sensitivity to its inputs (a small tornado chart);
 //! - the Agent pane: ask about the selected cell, read answers and notes with their links, follow
-//!   a number down to its inputs, see the history, connect an agent;
+//!   a number down to its inputs, alternatives, the risk matrix, the history;
+//! - the Agent tab on the ribbon: the pane and what waits, client data, the connection (modes,
+//!   Cowork), the heat maps, sharing;
 //! - context-menu items: Ask the Agent, Where Does This Come From, Mark as Client Data.
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 #![forbid(unsafe_code)]
 
 mod overlay;
 mod pane;
+mod ribbon;
 
 use std::sync::OnceLock;
 
@@ -30,7 +33,7 @@ pub fn install() {
     gridcraft_ui_egui::ext::register(Box::new(AgentUi::default()));
 }
 
-/// Tells the pane where the agent server listens (shown under Connect).
+/// Tells the UI where the agent server listens (shown on the Agent tab).
 pub fn set_server_url(url: String) {
     let _ = SERVER.set(url);
 }
@@ -45,8 +48,8 @@ pub fn set_goto(target: String) {
     }
 }
 
-/// Opens (or closes) the Agent pane on a tab (`cell`, `questions`, `notes`, `variants`, `risk`, `history`,
-/// `connect`) with a heat map (`off`, `confidence`, `impact`), from the next frame.
+/// Opens (or closes) the Agent pane on a tab (`cell`, `questions`, `notes`, `variants`, `risk`, `history`)
+/// with a heat map (`off`, `confidence`, `impact`), from the next frame.
 pub fn request_pane(open: bool, tab: &str, heat: &str) {
     if let Ok(mut r) = REQUEST.lock() {
         *r = Some((open, tab.to_string(), heat.to_string()));
@@ -66,7 +69,6 @@ pub(crate) enum Tab {
     Variants,
     Risk,
     History,
-    Connect,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -195,7 +197,6 @@ impl UiExtension for AgentUi {
                 "variants" => Tab::Variants,
                 "risk" => Tab::Risk,
                 "history" => Tab::History,
-                "connect" => Tab::Connect,
                 _ => Tab::Cell,
             };
             self.heat = match heat.as_str() {
@@ -244,6 +245,16 @@ impl UiExtension for AgentUi {
 
     fn paint_cells(&mut self, app: &SheetApp, ui: &Ui, painter: &egui::Painter, cells: &CellGeometry) {
         overlay::paint(self, app, ui, painter, cells);
+    }
+
+    fn ribbon_tabs(&self) -> Vec<&'static str> {
+        vec![ribbon::TAB]
+    }
+
+    fn ribbon_tab(&mut self, app: &mut SheetApp, ui: &mut Ui, tab: &str) {
+        if tab == ribbon::TAB {
+            ribbon::show(self, app, ui);
+        }
     }
 
     fn context_menu(&mut self, app: &mut SheetApp, ui: &mut Ui) -> bool {
@@ -301,7 +312,10 @@ impl AgentUi {
         } else {
             ("Agent".to_string(), t.accent)
         };
-        if self.open && ready == 0 && waiting == 0 {
+        // The Agent tab shows the status; the button is for when it isn't in view and something
+        // waits for the reader.
+        let tab_in_view = app.ui.ribbon_tab == ribbon::TAB && !app.ui.ribbon_collapsed;
+        if tab_in_view || (ready == 0 && waiting == 0) || (self.open && ready == 0) {
             return;
         }
         let pos = egui::pos2(cells.right() - 14.0, cells.bottom() - 14.0);

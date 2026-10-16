@@ -176,8 +176,13 @@ fn audit_records_who_changed_what() {
 fn every_agent_command_survives_empty_params() {
     crate::install();
     test_keys();
-    // Starting an agent process is not for a fuzz test (its own test drives a fake one).
-    for spec in crate::commands::ALL.iter().flat_map(|s| s.iter()).filter(|s| !matches!(s.id, "agent.agentStart" | "agent.agentReset")) {
+    // Starting an agent process or editing Claude Desktop's settings is not for a fuzz test (their
+    // own tests drive a fake agent and a temporary settings file).
+    for spec in crate::commands::ALL
+        .iter()
+        .flat_map(|s| s.iter())
+        .filter(|s| !matches!(s.id, "agent.agentStart" | "agent.agentReset" | "agent.connectCowork"))
+    {
         let mut s = Session::new();
         let _ = s.execute(spec.id, json!({}));
         let _ = s.execute(spec.id, Value::Null);
@@ -805,4 +810,57 @@ fn questions_become_channel_events() {
     }
     let init = crate::mcp::handle(&mut Nothing, &json!({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}})).unwrap();
     assert_eq!(init["result"]["capabilities"]["experimental"]["claude/channel"], json!({}));
+}
+
+#[test]
+fn stdio_server_answers_without_the_app() {
+    // Port 1: nothing listens there, as when GridCraft isn't running.
+    let init = json!({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}});
+    let r = crate::channel::answer(1, &init.to_string(), &init).unwrap();
+    assert_eq!(r["result"]["serverInfo"]["name"], json!("gridcraft-agent"));
+    let list = json!({"jsonrpc": "2.0", "id": 2, "method": "tools/list"});
+    let r = crate::channel::answer(1, &list.to_string(), &list).unwrap();
+    assert!(r["result"]["tools"].as_array().unwrap().iter().any(|t| t["name"] == json!("wait_for_questions")));
+    let call = json!({"jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": {"name": "get_context", "arguments": {}}});
+    let r = crate::channel::answer(1, &call.to_string(), &call).unwrap();
+    assert_eq!(r["result"]["isError"], json!(true));
+    assert!(r["result"]["content"][0]["text"].as_str().unwrap().contains("isn't running"));
+    let note = json!({"jsonrpc": "2.0", "method": "notifications/initialized"});
+    assert!(crate::channel::answer(1, &note.to_string(), &note).is_none());
+}
+
+#[test]
+fn connect_cowork_adds_one_entry_and_keeps_the_rest() {
+    use crate::cowork::{self, Outcome};
+    let dir = std::env::temp_dir().join(format!("gridcraft-cowork-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("claude_desktop_config.json");
+    let before = json!({"mcpServers": {"wordcraft": {"command": "/x/wordcraft", "args": ["--agent-stdio"]}}, "preferences": {"theme": "dark"}});
+    std::fs::write(&path, serde_json::to_string_pretty(&before).unwrap()).unwrap();
+    // Claude Desktop open: nothing is written (it would overwrite the edit when it quits).
+    cowork::set_thread_overrides(Some(path.clone()), Some(true));
+    assert_eq!(cowork::connect("/apps/gridcraft").unwrap(), Outcome::ClaudeRunning);
+    assert!(!cowork::connected());
+    // Closed: backed up, written, others kept.
+    cowork::set_thread_overrides(Some(path.clone()), Some(false));
+    let Outcome::Written { backup: Some(b), .. } = cowork::connect("/apps/gridcraft").unwrap() else { panic!("not written") };
+    assert_eq!(serde_json::from_str::<Value>(&std::fs::read_to_string(b).unwrap()).unwrap(), before);
+    let after: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    assert_eq!(after["mcpServers"]["gridcraft"], json!({"command": "/apps/gridcraft", "args": ["--agent-stdio"]}));
+    assert_eq!(after["mcpServers"]["wordcraft"], before["mcpServers"]["wordcraft"]);
+    assert_eq!(after["preferences"], before["preferences"]);
+    assert!(cowork::connected());
+    // Again: nothing to do, even with Claude open.
+    cowork::set_thread_overrides(Some(path.clone()), Some(true));
+    assert!(matches!(cowork::connect("/apps/gridcraft").unwrap(), Outcome::Unchanged { .. }));
+    // A broken file is left alone; the agent can't connect anything.
+    std::fs::write(&path, "{ not json").unwrap();
+    cowork::set_thread_overrides(Some(path.clone()), Some(false));
+    assert!(cowork::connect("/apps/gridcraft").is_err());
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), "{ not json");
+    let mut s = model();
+    assert!(s.execute("agent.connectCowork", json!({"actor": "agent"})).is_err());
+    cowork::set_thread_overrides(None, None);
+    let _ = std::fs::remove_dir_all(&dir);
 }

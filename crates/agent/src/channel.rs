@@ -1,14 +1,15 @@
-//! "My session" mode: questions asked in the workbook arrive in the user's own interactive Claude
-//! Code session as channel events (Claude Code Channels, research preview).
+//! GridCraft's MCP server over stdio: `gridcraft --agent-stdio`, for clients that run local
+//! servers as processes (Claude Desktop and Cowork from `claude_desktop_config.json`, Claude Code
+//! channels).
 //!
-//! Claude Code spawns channel servers itself and talks to them over stdio, so `gridcraft
-//! --agent-stdio` runs this bridge instead of the app: MCP requests from stdin are forwarded to the
-//! running app's server (`POST /mcp`), and the questions the app pushes on its `GET /mcp` stream go
-//! out on stdout as `notifications/claude/channel`. Set up once:
+//! It answers `initialize`, `ping` and `tools/list` itself, so the tools are there whether or not
+//! GridCraft is running; a tool call goes to the running app's server (`POST /mcp`), starting the
+//! app first when it isn't up. In "my session" mode the questions the app pushes on its `GET /mcp`
+//! stream go out on stdout as `notifications/claude/channel` (Claude Code Channels):
 //!
 //! ```text
-//! claude mcp add gridcraft -- /path/to/gridcraft --agent-stdio
-//! claude --dangerously-load-development-channels server:gridcraft
+//! claude mcp add gridcraft-channel -- /path/to/gridcraft --agent-stdio
+//! claude --dangerously-load-development-channels server:gridcraft-channel
 //! ```
 
 use std::io::{BufRead, BufReader, Read, Write};
@@ -108,7 +109,86 @@ fn follow(port: u16, out: Arc<Mutex<std::io::Stdout>>) {
     }
 }
 
-/// Runs the stdio bridge until stdin closes. Returns the process exit code.
+/// Answers that need no app: the handshake and the tool list.
+struct Offline;
+impl gridcraft_mcp::Backend for Offline {
+    fn call(&mut self, _: &str, _: Json) -> Result<Json, String> {
+        Err("GridCraft isn't running".into())
+    }
+    fn has_ui(&self) -> bool {
+        false
+    }
+    fn describe(&self) -> String {
+        "GridCraft (not running)".into()
+    }
+}
+
+fn local(method: &str) -> bool {
+    matches!(method, "initialize" | "ping" | "tools/list" | "resources/list" | "prompts/list" | "logging/setLevel")
+        || method.starts_with("notifications/")
+}
+
+/// The app is up (its agent server answers).
+fn app_up(port: u16) -> bool {
+    http(port, "GET", "/health", b"").is_ok_and(|(s, _)| s == 200)
+}
+
+/// Starts GridCraft (this same program, without arguments) and waits for its agent server.
+fn launch_app(port: u16) -> bool {
+    // A test binary is not the app.
+    if cfg!(test) {
+        return false;
+    }
+    let Ok(exe) = std::env::current_exe() else { return false };
+    let started = std::process::Command::new(exe)
+        .args(["--agent-port", &port.to_string()])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn();
+    if started.is_err() {
+        return false;
+    }
+    for _ in 0..60 {
+        std::thread::sleep(Duration::from_millis(500));
+        if app_up(port) {
+            return true;
+        }
+    }
+    false
+}
+
+/// One request: answered here, or by the app (started when needed).
+pub fn answer(port: u16, line: &str, msg: &Json) -> Option<Json> {
+    let method = msg.get("method").and_then(Json::as_str).unwrap_or("");
+    let id = msg.get("id").cloned();
+    if local(method) {
+        return crate::mcp::handle(&mut Offline, msg);
+    }
+    let mut tried_launch = false;
+    loop {
+        match http(port, "POST", "/mcp", line.as_bytes()) {
+            Ok((200, body)) => return serde_json::from_slice::<Json>(&body).ok(),
+            Ok(_) => return None,
+            Err(e) => {
+                if !tried_launch && !app_up(port) {
+                    tried_launch = true;
+                    if launch_app(port) {
+                        continue;
+                    }
+                }
+                let id = id?;
+                let m = format!(
+                    "GridCraft isn't running (agent server on 127.0.0.1:{port}: {e}) and couldn't be started. Open GridCraft, then try again."
+                );
+                // A tool error the model can read, rather than a protocol error.
+                return Some(json!({"jsonrpc": "2.0", "id": id, "result": {"content": [{"type": "text", "text": m}], "isError": true}}));
+            }
+        }
+    }
+}
+
+/// Runs the stdio server until stdin closes. Returns the process exit code.
 pub fn run_stdio(port: u16) -> i32 {
     let out = Arc::new(Mutex::new(std::io::stdout()));
     let follower = out.clone();
@@ -120,20 +200,8 @@ pub fn run_stdio(port: u16) -> i32 {
             continue;
         }
         let Ok(msg) = serde_json::from_str::<Json>(line) else { continue };
-        let id = msg.get("id").cloned();
-        match http(port, "POST", "/mcp", line.as_bytes()) {
-            Ok((200, body)) => {
-                if let Ok(v) = serde_json::from_slice::<Json>(&body) {
-                    emit(&out, &v);
-                }
-            }
-            Ok(_) => {}
-            Err(e) => {
-                if let Some(id) = id {
-                    let m = format!("GridCraft isn't running (agent server on 127.0.0.1:{port}): {e}. Start GridCraft, then /mcp reconnect.");
-                    emit(&out, &json!({"jsonrpc": "2.0", "id": id, "error": {"code": -32603, "message": m}}));
-                }
-            }
+        if let Some(v) = answer(port, line, &msg) {
+            emit(&out, &v);
         }
     }
     0

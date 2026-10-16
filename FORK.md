@@ -20,7 +20,7 @@ before changing anything outside the agent crates.
 | `crates/agent/src/export.rs`, `examples/export_html.rs` | `agent.exportHtml`: one HTML file with the web app and the workbook | fork only |
 | `agent-layer/` | The agent's skill, the rebase script, `export-web.sh` (builds the web app, exports a page), `demo/build-demo.sh` | fork only |
 | `crates/engine/src/ext.rs` | **Hook**: extension commands and command observers | new file in an upstream crate |
-| `crates/ui-egui/src/ext.rs` | **Hook**: UI extensions (side panel, cell painting, context menu, per-frame) | new file in an upstream crate |
+| `crates/ui-egui/src/ext.rs` | **Hook**: UI extensions (ribbon tabs, side panel, cell painting, context menu, per-frame) | new file in an upstream crate |
 | lines marked `fork:agent` | The only edits to upstream files | patch |
 
 ### The patch to upstream files
@@ -31,6 +31,8 @@ lists them; there are about twenty lines, almost all insertions:
 - `crates/engine/src/lib.rs`: `pub mod ext;`, observers called before and after each command in
   `Session::execute`, extension commands listed in `Session::commands`.
 - `crates/engine/src/cmd/mod.rs`: `find_command` also finds extension commands.
+- `crates/ui-egui/src/ribbon.rs`: extension tabs added to the tab row, an extension's tab drawn by
+  the extension, and a match arm so the built-in fallback doesn't draw under it (three lines).
 - `crates/ui-egui/src/lib.rs`: `pub mod ext;`, `ext::frame` and `ext::side_panels` in `SheetApp::ui`,
   and hidden defined names kept out of the Name Box (a fix Excel agrees with).
 - `crates/ui-egui/src/grid.rs`: `ext::paint_cells` after the built-in overlays, `ext::context_menu`
@@ -127,6 +129,19 @@ upstream. Each one accepted upstream removes its lines from the patch.
     workbook resumes it (`--resume`); a resume that fails here, or "New session", starts a fresh
     one from a summary of the history. Stop is end of input, then SIGINT. Never `--bare` (it
     needs an API key). The command is configurable (`GRIDCRAFT_AGENT_COMMAND`). Desktop only.
+- **The Agent tab on the ribbon holds what isn't about one cell**: the pane with what waits
+  (answers ready, questions with the agent), client data (mark, safe file, export for Excel), the
+  connection (server status, whether an agent is connected, the mode, New session, Copy MCP
+  command, Connect Cowork, Open Claude), the heat maps, sharing (link for a slide, web page). The
+  pane keeps only the content: the cell's questions and notes, the trace, sensitivity,
+  alternatives, risk, history. Group names match WordCraft and DeckCraft (Agent, Client data,
+  Connection, View, Share). The floating Agent button shows only when something waits and the tab
+  isn't in view.
+- **Cowork and Claude Desktop** run local servers over stdio: `gridcraft --agent-stdio` answers the
+  handshake and the tool list itself (tools are there before the app is), forwards calls to the
+  running app and starts it when it isn't up. **Connect Cowork** writes the `gridcraft` entry into
+  `claude_desktop_config.json`, backing the file up and touching nothing else, and only while
+  Claude Desktop is closed: it keeps the file in memory and writes it back when it quits.
 - **Analysis is deterministic.** The trace and the sensitivity are computed by the engine (the
   dependency graph, recalculation of a scratch copy). The agent explains them; it doesn't make them up.
 - **Several inputs at once, bounded.** The worst and best combination moves 3–12 inputs inside

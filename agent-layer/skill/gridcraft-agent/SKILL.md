@@ -16,6 +16,9 @@ GridCraft runs an MCP server itself: `http://127.0.0.1:7980/mcp`. If its tools (
 `claude mcp add --transport http gridcraft http://127.0.0.1:7980/mcp` (or check that GridCraft is
 open: `curl -s http://127.0.0.1:7980/health` prints `ok`).
 
+In Claude Desktop and Cowork, GridCraft is the local server `gridcraft` (the Agent tab's
+**Connect Cowork** adds it); its tools are the same.
+
 ## Watch for questions
 
 Start a background monitor on the event stream; each line is a new question:
@@ -24,8 +27,11 @@ Start a background monitor on the event stream; each line is a new question:
 curl -sN http://127.0.0.1:7980/events
 ```
 
-(With the Monitor tool: run that command as the monitored process.) Without a monitor, call
-`wait_for_questions` in a loop. On startup also call `list_questions` with status `open`: questions
+(With the Monitor tool: run that command as the monitored process.) Without a monitor, as in
+Cowork and Claude Desktop chats, call `wait_for_questions` in a loop: it returns as soon as a
+question is pending (or after its timeout, with none), so call it again after each answer. If
+GridCraft started you itself (background agent) or sends questions into your session (a
+`<channel source="gridcraft" question_id=…>` message), the questions come to you: just answer. On startup also call `list_questions` with status `open`: questions
 asked before you connected are waiting too.
 
 ## For each question

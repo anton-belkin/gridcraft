@@ -2,7 +2,7 @@
 //!
 //! `cargo run -p gridcraft-agent-ui --example agent_snapshot -- --in book.xlsx [--cmd id=json]…
 //!  [--pane cell|questions|notes|history|connect] [--heat off|confidence|impact] [--hover B23]
-//!  [--size 1440x900] [--dark] out.png`
+//!  [--size 1440x900] [--dark] [--tab Agent] out.png`
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use gridcraft_engine::Session;
@@ -15,6 +15,7 @@ fn main() {
     let (mut input, mut cmds, mut pane, mut heat, mut hover, mut dark) = (None, vec![], None, "off".to_string(), None, false);
     let mut size = (1440.0f32, 900.0f32);
     let mut out = "agent.png".to_string();
+    let mut tab: Option<String> = None;
     let mut it = args.into_iter();
     while let Some(a) = it.next() {
         match a.as_str() {
@@ -24,6 +25,7 @@ fn main() {
             "--heat" => heat = it.next().unwrap_or_default(),
             "--hover" => hover = it.next(),
             "--dark" => dark = true,
+            "--tab" => tab = it.next(),
             "--size" => {
                 if let Some((w, h)) = it.next().as_deref().and_then(|s| s.split_once('x').map(|(w, h)| (w.to_string(), h.to_string()))) {
                     size = (w.parse().unwrap_or(1440.0), h.parse().unwrap_or(900.0));
@@ -64,6 +66,9 @@ fn main() {
             {
                 let mut app = SheetApp::new(session, Default::default());
                 app.ui.dark = dark;
+                if let Some(t) = tab {
+                    app.ui.ribbon_tab = t;
+                }
                 app
             },
         );

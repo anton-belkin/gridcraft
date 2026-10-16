@@ -10,7 +10,8 @@ const SUPPORTED: &[&str] = &[PROTOCOL_VERSION, "2025-03-26", "2024-11-05"];
 
 const INSTRUCTIONS: &str = "You are connected to the GridCraft spreadsheet the user has open, through its agent layer. \
 The user reviews and signs off on this workbook; your job is to make that fast. They ask questions on cells: watch for them \
-(GET http://127.0.0.1:<port>/events streams one line per new question, or call wait_for_questions), claim_question, \
+(GET http://127.0.0.1:<port>/events streams one line per new question; without a background monitor, as in Cowork, \
+call wait_for_questions in a loop), claim_question, \
 investigate with get_context / read_range / trace_number / sensitivity, then answer_question with links to the cells and \
 sources you used (href \"cell:Sheet1!B5\", \"note:n3\" or https URLs). Leave prepared explanations with add_note, \
 mark inputs with reasoned ranges (set_input_range), say how sure you are (set_confidence) and log decisions (log_decision). \

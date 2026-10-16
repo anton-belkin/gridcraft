@@ -21,6 +21,8 @@ pub mod anchor;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod channel;
 pub mod commands;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod cowork;
 pub mod export;
 pub mod layer;
 pub mod links;

@@ -52,6 +52,8 @@ pub static ALL: &[&[CommandSpec]] = &[
     crate::links::SPECS,
     #[cfg(not(target_arch = "wasm32"))]
     crate::runner::SPECS,
+    #[cfg(not(target_arch = "wasm32"))]
+    crate::cowork::SPECS,
 ];
 
 pub static SPECS: &[CommandSpec] = &[

@@ -13,13 +13,11 @@ use gridcraft_ui_egui::theme::{self, Tokens};
 use serde_json::{Value as Json, json};
 
 use crate::overlay::{self, clip, kind_label};
-use crate::{AgentUi, Heat, Palette, Tab, fmt_at, fmt_num, follow, palette};
+use crate::{AgentUi, Palette, Tab, fmt_at, fmt_num, follow, palette};
 
 #[derive(Default)]
 pub(crate) struct State {
     pub trace_open: bool,
-    /// What the last Share as Web Page said (the file written, or why not).
-    shared: Option<String>,
     trace: Option<((u64, usize, u64), usize, CellRef, Json)>,
 }
 
@@ -27,9 +25,6 @@ pub(crate) struct State {
 enum Act {
     Follow(String),
     Run(&'static str, Json),
-    /// Export the workbook as a web page to this path.
-    Share(String),
-    CopyLink,
 }
 
 pub(crate) fn show(st: &mut AgentUi, app: &mut SheetApp, ui: &mut Ui) {
@@ -66,7 +61,6 @@ pub(crate) fn show(st: &mut AgentUi, app: &mut SheetApp, ui: &mut Ui) {
                     (Tab::Variants, if l.variants.is_empty() { "Variants".into() } else { format!("Variants ({})", l.variants.len()) }),
                     (Tab::Risk, "Risk".into()),
                     (Tab::History, "History".into()),
-                    (Tab::Connect, "Connect".into()),
                 ] {
                     if ui.selectable_label(st.tab == tab, name).clicked() {
                         st.tab = tab;
@@ -81,7 +75,6 @@ pub(crate) fn show(st: &mut AgentUi, app: &mut SheetApp, ui: &mut Ui) {
                 Tab::Variants => variants_tab(st, app, ui, &l, &t, &p, &mut acts),
                 Tab::Risk => risk_tab(st, app, ui, &l, &t, &p, &mut acts),
                 Tab::History => history_tab(app, ui, &l, &t, &p, &mut acts),
-                Tab::Connect => connect_tab(st, app, ui, &t, &p, &mut acts),
             });
         });
     if close {
@@ -92,13 +85,6 @@ pub(crate) fn show(st: &mut AgentUi, app: &mut SheetApp, ui: &mut Ui) {
         match a {
             Act::Follow(href) => follow(st, app, &ctx, &href),
             Act::Run(id, params) => app.run_or_alert(id, params),
-            Act::Share(path) => {
-                st.pane.shared = Some(match app.run("agent.exportHtml", json!({"path": path})) {
-                    Ok(_) => format!("Saved {path}"),
-                    Err(e) => e.to_string(),
-                });
-            }
-            Act::CopyLink => app.copy_to_clipboard(&ctx, "link.copy"),
         }
     }
 }
@@ -356,31 +342,6 @@ fn cell_tab(st: &mut AgentUi, app: &SheetApp, ui: &mut Ui, l: &Layer, t: &Tokens
             .default_open(true)
             .show(ui, |ui| stress_view(ui, d, &r, t, p, acts));
     }
-    ui.add_space(8.0);
-    ui.separator();
-    if !gridcraft_agent::read_only() {
-        ui.horizontal_wrapped(|ui| {
-            if ui.button(if is_private { "Unmark client data" } else { "Mark selection as client data" }).clicked() {
-                acts.push(Act::Run("agent.private", json!({"range": here.a1(), "on": !is_private})));
-            }
-        });
-        safe_file(ui, d, l, t, p, acts);
-        if ui
-            .button("Copy link to these cells for a slide")
-            .on_hover_text("⌘⌥C · paste it on a DeckCraft slide: the slide stays linked to these cells")
-            .clicked()
-        {
-            acts.push(Act::CopyLink);
-        }
-    }
-    ui.horizontal_wrapped(|ui| {
-        ui.label(RichText::new("Heat map").small());
-        for (h, name) in [(Heat::Off, "Off"), (Heat::Confidence, "Confidence"), (Heat::Impact, "Impact on this cell")] {
-            if ui.selectable_label(st.heat == h, name).clicked() {
-                st.heat = h;
-            }
-        }
-    });
 }
 
 fn ask_box(st: &mut AgentUi, ui: &mut Ui, t: &Tokens, here: &Place, acts: &mut Vec<Act>) {
@@ -847,156 +808,6 @@ fn risk_tab(st: &mut AgentUi, app: &SheetApp, ui: &mut Ui, l: &Layer, t: &Tokens
     });
 }
 
-/// Safe file mode: what a save writes, the export for standard Excel, unlocking.
-fn safe_file(ui: &mut Ui, d: &gridcraft_engine::DocState, l: &Layer, t: &Tokens, p: &Palette, acts: &mut Vec<Act>) {
-    let private = analysis::private_cells(&d.wb, l).len();
-    ui.add_space(4.0);
-    match &l.safe {
-        Some(s) if s.sealed.is_some() => {
-            card(ui, t, p.material, |ui| {
-                ui.label(RichText::new("Client data locked").color(p.material).small().strong());
-                ui.label(RichText::new(format!("This is a safe file: its {} client cells show stand-ins. Their real values are sealed under a key that isn't on this computer.", s.sealed.as_ref().map_or(0, |x| x.cells))).small());
-                if ui.small_button("Try to unlock").clicked() {
-                    acts.push(Act::Run("agent.unlock", json!({})));
-                }
-            });
-        }
-        Some(s) => {
-            card(ui, t, p.private, |ui| {
-                ui.label(RichText::new("Safe file · on").color(p.private).small().strong());
-                ui.label(RichText::new(format!("Saving writes the {private} client cells as stand-ins (everything computed from them too). The real values are sealed in the file; the key stays on this computer ({}).", s.key_id)).small());
-                ui.horizontal_wrapped(|ui| {
-                    if ui
-                        .small_button("Export for standard Excel")
-                        .on_hover_text("A copy beside the workbook with the real values and nothing sealed")
-                        .clicked()
-                    {
-                        acts.push(Act::Run("agent.exportExcel", json!({})));
-                    }
-                    if ui.small_button("Turn off").clicked() {
-                        acts.push(Act::Run("agent.safeMode", json!({"on": false})));
-                    }
-                });
-            });
-        }
-        None if private > 0 => {
-            ui.horizontal_wrapped(|ui| {
-                if ui
-                    .button("Safe file: save client data as stand-ins")
-                    .on_hover_text("The real values are sealed in the file under a key kept on this computer")
-                    .clicked()
-                {
-                    acts.push(Act::Run("agent.safeMode", json!({"on": true})));
-                }
-            });
-        }
-        None => {}
-    }
-}
-
-/// How the app brings the agent in: off, into the user's own session, or as a background agent.
-#[cfg(not(target_arch = "wasm32"))]
-fn agent_mode(app: &SheetApp, ui: &mut Ui, t: &Tokens, p: &Palette, acts: &mut Vec<Act>) {
-    use gridcraft_agent::runner::{self, Mode};
-    let Some(d) = app.session.active() else { return };
-    let l = layer::get(d);
-    let mode = runner::mode();
-    ui.label(RichText::new("When you ask a question").strong());
-    ui.horizontal_wrapped(|ui| {
-        for (m, name, tip) in [
-            (Mode::Off, "I connect my agent", "Your agent watches /events or calls wait_for_questions"),
-            (Mode::Channel, "Send to my session", "Questions arrive in your open Claude Code session (Channels, research preview)"),
-            (Mode::Background, "Background agent", "GridCraft runs Claude Code for this workbook and answers in the background"),
-        ] {
-            if ui.selectable_label(mode == m, name).on_hover_text(tip).clicked() && mode != m {
-                acts.push(Act::Run("agent.agentMode", json!({"mode": m.id()})));
-            }
-        }
-    });
-    let copy_row = |ui: &mut Ui, title: &str, value: String| {
-        ui.label(RichText::new(title).small().strong());
-        ui.horizontal(|ui| {
-            ui.add(egui::TextEdit::singleline(&mut value.clone()).desired_width(ui.available_width() - 60.0).font(egui::TextStyle::Monospace));
-            if ui.small_button("Copy").clicked() {
-                ui.ctx().copy_text(value.clone());
-            }
-        });
-    };
-    match mode {
-        Mode::Off => {}
-        Mode::Channel => {
-            let exe = std::env::current_exe().map(|x| x.display().to_string()).unwrap_or_else(|_| "gridcraft".into());
-            ui.label(RichText::new("Each question arrives as a new turn in your interactive Claude Code session. Once:").small());
-            copy_row(ui, "Add GridCraft as a channel server", format!("claude mcp add gridcraft-channel -- '{exe}' --agent-stdio"));
-            copy_row(ui, "Then start your session with", "claude --dangerously-load-development-channels server:gridcraft-channel".into());
-            ui.label(RichText::new("Channels are a research preview: interactive sessions only, and Claude Code asks you to confirm the development channel at start.").small().color(t.text_dim));
-        }
-        Mode::Background => {
-            let st = runner::status(d.uid).unwrap_or_default();
-            card(ui, t, if st.running { p.answered } else { p.seen }, |ui| {
-                let state = if st.running {
-                    if st.in_flight > 0 { format!("Working · {} in progress", st.in_flight) } else { "Running · waiting for questions".to_string() }
-                } else {
-                    "Not running · starts with your next question".to_string()
-                };
-                ui.label(RichText::new(state).small().strong());
-                let session = if st.session_id.is_empty() { l.agent_session.clone() } else { st.session_id.clone() };
-                if !session.is_empty() {
-                    ui.label(RichText::new(format!("Session {session}")).small().monospace().color(t.text_dim));
-                }
-                if !st.cwd.is_empty() {
-                    ui.label(RichText::new(format!("In {} · also listed in Claude Desktop's Code tab", st.cwd)).small().color(t.text_dim));
-                }
-                if st.turns > 0 {
-                    ui.label(RichText::new(format!("{} turns · ${:.2}", st.turns, st.cost_usd)).small().color(t.text_dim));
-                }
-                for line in st.recent.iter().rev().take(4).rev() {
-                    ui.label(RichText::new(clip(line, 120)).small());
-                }
-                if !st.last_error.is_empty() {
-                    ui.label(RichText::new(clip(&st.last_error, 240)).small().color(p.material));
-                }
-                ui.horizontal_wrapped(|ui| {
-                    if st.running {
-                        if ui.small_button("Stop").clicked() {
-                            acts.push(Act::Run("agent.agentStop", json!({})));
-                        }
-                    } else if ui.small_button("Start").clicked() {
-                        acts.push(Act::Run("agent.agentStart", json!({})));
-                    }
-                    if ui.small_button("New session").on_hover_text("Start over from a summary of this workbook's history").clicked() {
-                        acts.push(Act::Run("agent.agentReset", json!({})));
-                    }
-                });
-                if !session.is_empty() {
-                    let cmd = runner::resume_command(&runner::Status { session_id: session.clone(), ..st.clone() });
-                    ui.horizontal(|ui| {
-                        if ui
-                            .small_button("Copy resume command")
-                            .on_hover_text("Continue this conversation yourself: stop the background agent first (one writer per session)")
-                            .clicked()
-                        {
-                            ui.ctx().copy_text(cmd.clone());
-                        }
-                    });
-                }
-            });
-            ui.label(
-                RichText::new(format!(
-                    "Runs `{}` with only GridCraft's tools, at most {} turns and ${:.2} per question.",
-                    runner::config().command,
-                    runner::config().max_turns,
-                    runner::config().max_budget_usd
-                ))
-                .small()
-                .color(t.text_dim),
-            );
-        }
-    }
-    ui.add_space(6.0);
-    ui.separator();
-}
-
 fn history_tab(app: &SheetApp, ui: &mut Ui, l: &Layer, t: &Tokens, p: &Palette, acts: &mut Vec<Act>) {
     if l.log.is_empty() {
         ui.label(RichText::new("No history yet: decisions and changes by you and the agent are recorded here.").italics());
@@ -1028,81 +839,5 @@ fn history_tab(app: &SheetApp, ui: &mut Ui, l: &Layer, t: &Tokens, p: &Palette, 
             }
         }
         ui.add_space(4.0);
-    }
-}
-
-fn connect_tab(st: &AgentUi, app: &SheetApp, ui: &mut Ui, t: &Tokens, p: &Palette, acts: &mut Vec<Act>) {
-    if gridcraft_agent::read_only() {
-        ui.label(RichText::new("Read-only copy").strong());
-        ui.label("This page was exported from GridCraft with the answers and notes the author's agent prepared. No agent is connected here, so there are no live questions.");
-        ui.add_space(6.0);
-        ui.label(
-            RichText::new("To ask your own questions, open the workbook in GridCraft (File > Save As keeps the agent layer in the .xlsx) and connect your agent there.")
-                .small()
-                .color(t.text_dim),
-        );
-        return;
-    }
-    #[cfg(not(target_arch = "wasm32"))]
-    agent_mode(app, ui, t, p, acts);
-    #[cfg(target_arch = "wasm32")]
-    let _ = p;
-    let Some(url) = crate::server_url() else {
-        ui.label("The agent server isn't running. Start GridCraft with --agent-port <port>.");
-        return;
-    };
-    let base = url.trim_end_matches("/mcp");
-    ui.label("Your own agent works on this workbook through MCP. Questions you ask wait in the workbook until it answers.");
-    ui.add_space(6.0);
-    let row = |ui: &mut Ui, title: &str, value: String| {
-        ui.label(RichText::new(title).small().strong());
-        ui.horizontal(|ui| {
-            ui.add(egui::TextEdit::singleline(&mut value.clone()).desired_width(ui.available_width() - 60.0).font(egui::TextStyle::Monospace));
-            if ui.small_button("Copy").clicked() {
-                ui.ctx().copy_text(value.clone());
-            }
-        });
-    };
-    row(ui, "MCP server", url.to_string());
-    row(ui, "Claude Code", format!("claude mcp add --transport http gridcraft {url}"));
-    row(ui, "Background monitor (new questions, one line each)", format!("curl -sN {base}/events"));
-    ui.add_space(6.0);
-    ui.label(
-        RichText::new("Client data you mark stays here: the agent sees stand-in values, with the model recalculated from them.")
-            .small()
-            .color(t.text_dim),
-    );
-    share(st, app, ui, t, acts);
-}
-
-/// Share as a web page: one HTML file beside the workbook, opened in any browser with the
-/// prepared answers and notes, read-only.
-fn share(st: &AgentUi, app: &SheetApp, ui: &mut Ui, t: &Tokens, acts: &mut Vec<Act>) {
-    if cfg!(target_arch = "wasm32") {
-        return;
-    }
-    ui.add_space(10.0);
-    ui.label(RichText::new("Share as a web page").strong());
-    ui.label(
-        RichText::new(
-            "One HTML file: the workbook in GridCraft for the browser, with the answers and notes your agent prepared. Open questions stay here.",
-        )
-        .small()
-        .color(t.text_dim),
-    );
-    let path = app.session.active().and_then(|d| d.path.as_deref()).map(|p| std::path::Path::new(p).with_extension("html").display().to_string());
-    match path {
-        Some(path) => {
-            if ui.button("Export web page").on_hover_text(&path).clicked() {
-                acts.push(Act::Share(path));
-            }
-        }
-        None => {
-            ui.add_enabled(false, egui::Button::new("Export web page"))
-                .on_disabled_hover_text("Save the workbook first: the page is written beside it");
-        }
-    }
-    if let Some(msg) = &st.pane.shared {
-        ui.label(RichText::new(msg).small().color(t.text_dim));
     }
 }
