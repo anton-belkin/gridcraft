@@ -1,6 +1,6 @@
-//! The Agent tab on the ribbon: what isn't about one cell. The pane, client data, how the agent is
-//! connected, the heat map, sharing. Groups are named the same in WordCraft and DeckCraft:
-//! Agent, Client data, Connection, View (the heat map is GridCraft's), Share.
+//! The Agent tab on the ribbon: what isn't about one cell. The pane, client data, what the agent
+//! knows (Context), the heat map, sharing. Groups are named the same in WordCraft and DeckCraft:
+//! Agent, Client data, Context, View (the heat map is GridCraft's), Share.
 
 use egui::{Align2, Color32, Rect, Response, Sense, Stroke, Ui, pos2, vec2};
 use gridcraft_agent::layer::{self, QuestionStatus};
@@ -220,28 +220,17 @@ enum Act {
     Pane(bool, Tab),
     Heat(Heat),
     CopyLink,
-    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
-    Copy(String),
-    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
-    Cowork(serde_json::Value),
     Share(String),
+    /// A step of Get ready.
+    #[cfg(not(target_arch = "wasm32"))]
+    Step(crate::context::Step),
     #[cfg(not(target_arch = "wasm32"))]
     VoiceModel(Option<craft_voice::Model>),
     #[cfg(not(target_arch = "wasm32"))]
     VoiceToggle,
-    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
-    Message(String, String),
-    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
-    OpenClaude,
-    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
-    InstallHub,
 }
 
 pub(crate) fn show(st: &mut AgentUi, app: &mut SheetApp, ui: &mut Ui) {
-    #[cfg(not(target_arch = "wasm32"))]
-    if let Some(msg) = gridcraft_agent::hub::take_result() {
-        app.message = Some(("AItoCraft".into(), msg));
-    }
     let t = Tokens::get(ui.ctx());
     let p = palette(&t);
     let read_only = gridcraft_agent::read_only();
@@ -308,8 +297,8 @@ pub(crate) fn show(st: &mut AgentUi, app: &mut SheetApp, ui: &mut Ui) {
         });
     }
 
-    // Connection: how the agent reaches this workbook.
-    group(ui, "Connection", |ui| connection(app, ui, &t, &p, read_only, &mut acts));
+    // Context: what the agent knows about this workbook, and whether it's ready.
+    group(ui, "Context", |ui| context_group(st, app, ui, &t, &p, read_only, &mut acts));
 
     // Voice: ask by speaking and pointing, and the speech model (its own group, after Connection).
     #[cfg(not(target_arch = "wasm32"))]
@@ -403,40 +392,8 @@ pub(crate) fn show(st: &mut AgentUi, app: &mut SheetApp, ui: &mut Ui) {
             }
             Act::Heat(h) => st.heat = h,
             Act::CopyLink => app.copy_to_clipboard(&ctx, "link.copy"),
-            Act::Copy(text) => {
-                ctx.copy_text(text);
-                app.toast = Some(("Copied".into(), gridcraft_ui_egui::now_ms()));
-            }
-            Act::Cowork(entry) => {
-                #[cfg(not(target_arch = "wasm32"))]
-                {
-                    gridcraft_agent::cowork::connect(entry);
-                    let st = gridcraft_agent::cowork::state_json(&gridcraft_agent::cowork::state());
-                    let msg = st.get("message").and_then(|m| m.as_str()).unwrap_or("").to_string();
-                    if !msg.is_empty() {
-                        app.message = Some(("Connect Cowork".into(), msg));
-                    }
-                }
-                #[cfg(target_arch = "wasm32")]
-                let _ = entry;
-            }
-            Act::Message(title, text) => app.message = Some((title, text)),
-            Act::InstallHub =>
-            {
-                #[cfg(not(target_arch = "wasm32"))]
-                match gridcraft_agent::hub::install_desktop() {
-                    Ok(()) => app.toast = Some(("Installing AItoCraft in Claude Desktop…".into(), gridcraft_ui_egui::now_ms())),
-                    Err(e) => app.message = Some(("AItoCraft".into(), e)),
-                }
-            }
-            Act::OpenClaude => {
-                #[cfg(target_os = "macos")]
-                {
-                    let _ = std::process::Command::new("/usr/bin/open").args(["-a", "Claude"]).spawn();
-                }
-                app.toast =
-                    Some(("Claude Desktop: the session is in its Code tab, under this workbook's folder".into(), gridcraft_ui_egui::now_ms()));
-            }
+            #[cfg(not(target_arch = "wasm32"))]
+            Act::Step(step) => crate::context::run(st, app, &ctx, step),
             Act::Share(path) => match app.run("agent.exportHtml", json!({"path": path, "includeDiscussion": st.share_discussion})) {
                 Ok(_) => app.toast = Some((format!("Saved {path}"), gridcraft_ui_egui::now_ms())),
                 Err(e) => app.message = Some(("Export Web Page".into(), e)),
@@ -450,7 +407,7 @@ pub(crate) fn show(st: &mut AgentUi, app: &mut SheetApp, ui: &mut Ui) {
 }
 
 #[cfg(target_arch = "wasm32")]
-fn connection(_app: &SheetApp, ui: &mut Ui, t: &Tokens, _p: &crate::Palette, _read_only: bool, _acts: &mut Vec<Act>) {
+fn context_group(_st: &AgentUi, _app: &SheetApp, ui: &mut Ui, t: &Tokens, _p: &crate::Palette, _read_only: bool, _acts: &mut Vec<Act>) {
     column(ui, |ui| {
         status_line(
             ui,
@@ -461,90 +418,12 @@ fn connection(_app: &SheetApp, ui: &mut Ui, t: &Tokens, _p: &crate::Palette, _re
     });
 }
 
-/// The connection's state as a drawn mark: filled (answering), half (a listener), ring (nobody),
-/// cross (no answer).
-#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
-#[derive(Clone, Copy, PartialEq)]
-enum Mark {
-    Full,
-    Half,
-    Ring,
-    Cross,
-}
-
-#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
-fn mark(p: &egui::Painter, c: egui::Pos2, r: f32, m: Mark, color: Color32) {
-    match m {
-        Mark::Full => {
-            p.circle_filled(c, r, color);
-        }
-        Mark::Half => {
-            p.circle_stroke(c, r - 0.6, Stroke::new(1.4, color));
-            let pts: Vec<egui::Pos2> = (0..=16)
-                .map(|i| {
-                    let a = std::f32::consts::FRAC_PI_2 + std::f32::consts::PI * i as f32 / 16.0;
-                    c + vec2(a.cos(), a.sin()) * r
-                })
-                .collect();
-            p.add(egui::Shape::convex_polygon(pts, color, Stroke::NONE));
-        }
-        Mark::Ring => {
-            p.circle_stroke(c, r - 0.6, Stroke::new(1.4, color));
-        }
-        Mark::Cross => {
-            let d = r * 0.8;
-            p.line_segment([c - vec2(d, d), c + vec2(d, d)], Stroke::new(2.0, color));
-            p.line_segment([c + vec2(-d, d), c + vec2(d, -d)], Stroke::new(2.0, color));
-        }
-    }
-}
-
-/// "12 s", "3 min", "2 h".
-#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
-fn span(ms: u64) -> String {
-    let s = ms / 1000;
-    if s < 60 {
-        format!("{s} s")
-    } else if s < 3600 {
-        format!("{} min", s / 60)
-    } else {
-        format!("{} h", s / 3600)
-    }
-}
-
-/// A menu item that copies one thing (its text on hover).
-#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
-fn copy_item(ui: &mut Ui, acts: &mut Vec<Act>, label: &str, tip: &str, text: String) {
-    if ui.button(label).on_hover_text(format!("{tip}\n\n{text}")).clicked() {
-        acts.push(Act::Copy(text));
-        ui.close();
-    }
-}
-
-/// The status: a mark, one line and a sub-line; the details on hover.
-#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
-fn status_block(ui: &mut Ui, m: Mark, color: Color32, line: &str, sub: &str, tip: &str) {
-    let t = Tokens::get(ui.ctx());
-    let big = theme::ui_bold(12.5);
-    let small = theme::ui_font(10.5);
-    let w = ui
-        .painter()
-        .layout_no_wrap(line.to_string(), big.clone(), t.text)
-        .size()
-        .x
-        .max(ui.painter().layout_no_wrap(sub.to_string(), small.clone(), t.text).size().x)
-        + 24.0;
-    let (rect, resp) = ui.allocate_exact_size(vec2(w, 34.0), Sense::hover());
-    mark(ui.painter(), pos2(rect.left() + 8.0, rect.top() + 9.0), 5.5, m, color);
-    ui.painter().text(pos2(rect.left() + 20.0, rect.top() + 9.0), Align2::LEFT_CENTER, line, big, t.text);
-    ui.painter().text(pos2(rect.left() + 20.0, rect.top() + 25.0), Align2::LEFT_CENTER, sub, small, t.text_dim);
-    resp.on_hover_text(tip);
-}
-
+/// Context: what the agent knows about this document. The mode button (with its Ready dot) and,
+/// beside it, what the mode needs: Web, My session | Project folder, the Ready lamp, Get ready.
 #[cfg(not(target_arch = "wasm32"))]
-fn connection(app: &SheetApp, ui: &mut Ui, t: &Tokens, p: &crate::Palette, read_only: bool, acts: &mut Vec<Act>) {
-    use gridcraft_agent::cowork::{self, Configured, State};
-    use gridcraft_agent::runner::{self, Mode, Presence};
+fn context_group(st: &AgentUi, app: &SheetApp, ui: &mut Ui, t: &Tokens, p: &crate::Palette, read_only: bool, acts: &mut Vec<Act>) {
+    use crate::context::Lamp;
+    use gridcraft_agent::layer::{CodeVia, ContextKind};
     if read_only {
         column(ui, |ui| {
             status_line(
@@ -556,179 +435,322 @@ fn connection(app: &SheetApp, ui: &mut Ui, t: &Tokens, p: &crate::Palette, read_
         });
         return;
     }
-    let Some(d) = app.session.active() else { return };
-    let mode = runner::mode();
-    let url = crate::server_url().unwrap_or("http://127.0.0.1:7980/mcp").to_string();
-    let base = url.trim_end_matches("/mcp").to_string();
-    let bg = runner::status(d.uid).unwrap_or_default();
-    let session = if bg.session_id.is_empty() { layer::get(d).agent_session.clone() } else { bg.session_id.clone() };
-    let entry = crate::stdio_entry();
-    let configured = match (&entry, cowork::config_path()) {
-        (Some(e), Some(path)) => cowork::configured(&path, e),
-        _ => Configured::NoClaude,
+    let Some(v) = crate::context::current(st, app) else { return };
+    let lamp = match v.lamp {
+        Lamp::Ready => p.agreed,
+        Lamp::Waiting => p.open,
+        Lamp::NotReady => t.text_disabled,
     };
-    let cowork_state = cowork::state();
-    let cowork_text = match (&cowork_state, &configured) {
-        (State::Waiting, _) => "waiting: quit Claude (⌘Q)",
-        (State::Done { .. }, _) => "added: open Claude",
-        (State::Failed(_), _) => "failed",
-        (_, Configured::Yes) => "connected",
-        (_, Configured::Different) => "another build is connected",
-        _ => "not set up",
-    };
-    // Everything that isn't the status goes into the details.
-    let signals = runner::signals(d.uid);
-    let mut details = format!("MCP server: {url}\nEvent stream: {base}/events\nCowork (Claude Desktop): {cowork_text}");
-    if let State::Failed(e) = &cowork_state {
-        details.push_str(&format!(" ({e})"));
-    }
-    details.push_str(&format!(
-        "\nListening now: {} event stream(s), {} channel stream(s){}",
-        signals.event_streams,
-        signals.channel_streams,
-        if signals.background { ", background agent" } else { "" }
-    ));
-    if signals.last_call_ms > 0 {
-        details.push_str(&format!("\nLast agent call: {} ago", span(gridcraft_agent::now_ms().saturating_sub(signals.last_call_ms))));
-    }
-    if !session.is_empty() {
-        details.push_str(&format!("\nBackground session: {session}"));
-        if !bg.cwd.is_empty() {
-            details.push_str(&format!(" in {}", bg.cwd));
-        }
-    }
-    if bg.turns > 0 {
-        details.push_str(&format!("\nBackground agent: {} turns, ${:.2}", bg.turns, bg.cost_usd));
-    }
-    if !bg.last_error.is_empty() {
-        details.push_str(&format!("\nLast error: {}", bg.last_error));
-    }
-    let presence = runner::presence(&app.session);
-    let red = Color32::from_rgb(0xC4, 0x2B, 0x1C);
-    let answered_by = layer::get(d).ping_answered_by();
-    let (m, color, line, sub) = match &presence {
-        _ if mode == Mode::Off => (Mark::Ring, t.text_disabled, "Agent off".to_string(), "choose a mode to let an agent in".to_string()),
-        Presence::Answering { checked_ms, latency_ms } => (
-            Mark::Full,
-            p.answered,
-            match &answered_by {
-                Some(by) => format!("Agent answering: {by}"),
-                None => "Agent answering".to_string(),
-            },
-            format!("checked {} ago · answered in {}", span(*checked_ms), span(*latency_ms)),
-        ),
-        Presence::Checking { since_ms } => (Mark::Half, p.pending, "Checking…".to_string(), format!("asked {} ago", span(*since_ms))),
-        Presence::NoAnswer { asked_ms } => (Mark::Cross, red, "No answer to check".to_string(), format!("asked {} ago", span(*asked_ms))),
-        Presence::Listening { label, seen_ms, more } => (
-            Mark::Full,
-            p.answered,
-            format!("Listening: {label}"),
-            if *more > 0 { format!("{} ago · and {more} more", span(*seen_ms)) } else { format!("{} ago", span(*seen_ms)) },
-        ),
-        Presence::Listener(what) => (Mark::Half, p.pending, "Listener connected".to_string(), format!("not checked · {}", what.join(", "))),
-        Presence::Nobody => {
-            (Mark::Ring, t.text_dim, "Nobody is listening for this document".to_string(), "questions still queue here · press Check".to_string())
-        }
-    };
-    if !matches!(presence, Presence::Nobody) {
-        ui.ctx().request_repaint_after(std::time::Duration::from_secs(1));
-    }
-    let title = d.display_title();
-    column(ui, |ui| {
-        status_block(ui, m, color, &line, &sub, &details);
-        ui.horizontal(|ui| {
-            ui.spacing_mut().item_spacing.x = 2.0;
-            if mode != Mode::Off
-                && row_button(ui, Icon::Search, "Check", "Ask \"is anyone there?\": a connection check this document's listeners answer with \"here\"", false).clicked()
-            {
-                acts.push(Act::Run("agent.ping", json!({})));
+    let kind = v.ctx.kind;
+    let (name, line, _) = kind.label();
+    let r = mode_button(ui, kind, lamp, &format!("What the agent knows about this document: {name}. {line}"));
+    egui::Popup::menu(&r).show(|ui| {
+        for k in [ContextKind::None, ContextKind::Cowork, ContextKind::Code] {
+            if mode_row(ui, k, k == kind).clicked() {
+                if k != kind {
+                    acts.push(Act::Run("agent.agentContext", json!({"kind": k.id()})));
+                }
+                ui.close();
             }
-            // Mode: a simple list.
-            let r = row_button(ui, Icon::Settings, &format!("Mode: {}", mode.label().0), "How your agent gets the questions", true);
-            egui::Popup::menu(&r).show(|ui| {
-                ui.set_min_width(330.0);
-                for m in Mode::ALL {
-                    let (name, what) = m.label();
-                    let on = mode == m;
-                    let resp = ui.add(egui::Button::selectable(on, egui::RichText::new(name).strong()).min_size(vec2(320.0, 18.0)));
-                    ui.label(egui::RichText::new(what).small().color(t.text_dim));
-                    if resp.clicked() {
-                        if !on {
-                            acts.push(Act::Run("agent.agentMode", json!({"mode": m.id()})));
-                        }
-                        ui.close();
-                    }
-                }
-            });
-            // Copy: what this mode needs, one thing per item.
-            let menu_title = if mode == Mode::Background { "Session" } else { "Copy" };
-            let r = row_button(ui, Icon::Copy, menu_title, "What to paste where, for this mode", true);
-            egui::Popup::menu(&r).show(|ui| {
-                ui.set_min_width(280.0);
-                match mode {
-                    Mode::Manual | Mode::Channel => {
-                        copy_item(ui, acts, "Copy phrase for Claude", "Paste it where the work belongs: a Cowork project, a chat, a Claude Code session", gridcraft_agent::hub::phrase(&title));
-                        if mode == Mode::Manual
-                            && ui.button("Install AItoCraft in Claude Desktop").on_hover_text("One connection for every Craft app in Claude Desktop and Cowork").clicked()
-                        {
-                            acts.push(Act::InstallHub);
-                            ui.close();
-                        }
-                        copy_item(ui, acts, "Claude Code: add AItoCraft", "Once, in a terminal", gridcraft_agent::hub::claude_code_command());
-                        if mode == Mode::Channel {
-                            copy_item(ui, acts, "Start Claude Code with the channel", "Questions arrive in that session as they're asked", gridcraft_agent::hub::CHANNEL_COMMAND.to_string());
-                        }
-                    }
-                    Mode::Background => {
-                        if ui.button("Open session in Claude Desktop").on_hover_text("Background sessions are in Claude's Code tab").clicked() {
-                            acts.push(Act::OpenClaude);
-                            ui.close();
-                        }
-                        if ui.button("New session").on_hover_text("Start over from a summary of this workbook's history").clicked() {
-                            acts.push(Act::Run("agent.agentReset", json!({})));
-                            ui.close();
-                        }
-                        let mut own = runner::config().project_folder;
-                        if ui
-                            .checkbox(&mut own, "Use the document's folder as its project")
-                            .on_hover_text("Its CLAUDE.md, memory and settings then join the agent's context. Off: a neutral, empty folder.")
-                            .changed()
-                        {
-                            acts.push(Act::Run("agent.agentMode", json!({"projectFolder": own})));
-                        }
-                    }
-                    Mode::Off => {}
-                }
-                ui.separator();
-                ui.menu_button("Details", |ui| {
-                    if ui.button("Connection details…").clicked() {
-                        acts.push(Act::Message("Connection".into(), details.clone()));
-                        ui.close();
-                    }
-                    ui.separator();
-                    ui.label(egui::RichText::new("Without AItoCraft (this app only)").small().color(t.text_dim));
-                    let can = entry.is_some() && cowork_state != State::Waiting;
-                    if ui
-                        .add_enabled(can, egui::Button::new(format!("Connect GridCraft to Claude Desktop… ({cowork_text})")))
-                        .on_hover_text("gridcraft --agent-stdio in Claude Desktop's settings. Claude rewrites its settings when it quits, so while it runs GridCraft waits for you to quit it (⌘Q), then writes.")
-                        .clicked()
-                        && let Some(e) = entry.clone()
-                    {
-                        acts.push(Act::Cowork(e));
-                        ui.close();
-                    }
-                    let mut copy = |ui: &mut Ui, label: &str, text: String| {
-                        if ui.button(label).on_hover_text(&text).clicked() {
-                            acts.push(Act::Copy(text));
-                            ui.close();
-                        }
-                    };
-                    copy(ui, "Claude Code: add GridCraft's MCP server", format!("claude mcp add --transport http gridcraft {url}"));
-                    copy(ui, "Monitor command", format!("curl -sN {base}/events"));
-                });
-            });
-        });
+        }
     });
+    column(ui, |ui| {
+        match kind {
+            ContextKind::None => {
+                if check(ui, "Web", v.ctx.web, "Also allow the agent to search the web and read pages (WebSearch and WebFetch)").clicked() {
+                    acts.push(Act::Run("agent.agentContext", json!({"web": !v.ctx.web})));
+                }
+            }
+            ContextKind::Code => {
+                let on = usize::from(v.ctx.via == CodeVia::Folder);
+                let picked = segmented(
+                    ui,
+                    &[
+                        ("My session", "Questions arrive in your own Claude Code session, through the AItoCraft channel"),
+                        ("Project folder", "A Claude Code agent runs in a folder you choose: it sees that folder's CLAUDE.md, memory and files"),
+                    ],
+                    on,
+                );
+                if let Some(i) = picked.filter(|i| *i != on) {
+                    acts.push(Act::Run("agent.agentContext", json!({"via": if i == 1 { "folder" } else { "session" }})));
+                }
+            }
+            _ => {}
+        }
+        lamp_row(ui, v.lamp.label(), lamp, &v.detail);
+        if !v.steps.is_empty() {
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 0.0;
+                let next = v.next();
+                let tip = next.map_or(String::new(), |s| format!("Next: {}. {}", s.label(), s.tip()));
+                if row_button(ui, Icon::Right, "Get ready", &tip, false).clicked()
+                    && let Some(s) = next
+                {
+                    acts.push(Act::Step(s));
+                }
+                let arrow = chevron_button(ui, "Every step");
+                egui::Popup::menu(&arrow).show(|ui| {
+                    for (s, done) in &v.steps {
+                        if step_row(ui, s.label(), *done, s.tip()).clicked() {
+                            acts.push(Act::Step(*s));
+                            ui.close();
+                        }
+                    }
+                });
+                if kind == ContextKind::Code
+                    && v.ctx.via == CodeVia::Folder
+                    && let Some(f) = &v.folder
+                {
+                    ui.add_space(6.0);
+                    let short = short_path(f, 34);
+                    ui.label(egui::RichText::new(short).font(theme::ui_font(11.0)).color(t.text_dim))
+                        .on_hover_text(format!("{f}\nThe agent runs here: it sees this folder's CLAUDE.md, memory and files"));
+                }
+            });
+        }
+    });
+}
+
+/// `~/deals/acme`, its end kept when long.
+#[cfg(not(target_arch = "wasm32"))]
+fn short_path(f: &str, n: usize) -> String {
+    let home = std::env::var("HOME").unwrap_or_default();
+    let f = match f.strip_prefix(home.as_str()) {
+        Some(rest) if !home.is_empty() => format!("~{rest}"),
+        _ => f.to_string(),
+    };
+    let k = f.chars().count();
+    if k <= n { f } else { format!("…{}", f.chars().skip(k - n + 1).collect::<String>()) }
+}
+
+/// The mode, large: its drawn sign with the Ready dot, its name, a chevron for the menu.
+#[cfg(not(target_arch = "wasm32"))]
+fn mode_button(ui: &mut Ui, kind: gridcraft_agent::layer::ContextKind, lamp: Color32, tip: &str) -> Response {
+    use gridcraft_agent::layer::ContextKind;
+    let t = Tokens::get(ui.ctx());
+    let label = match kind {
+        ContextKind::None => "No\ncontext",
+        ContextKind::Cowork => "Claude\nCowork",
+        ContextKind::Code => "Claude\nCode",
+        ContextKind::Off => "Agent\noff",
+    };
+    let font = theme::ui_font(11.0);
+    let w = label.split('\n').map(|l| ui.painter().layout_no_wrap(l.to_string(), font.clone(), t.text).size().x).fold(0.0, f32::max);
+    let (rect, resp) = ui.allocate_exact_size(vec2(w.max(40.0) + 14.0, BODY), Sense::click());
+    if resp.is_pointer_button_down_on() {
+        ui.painter().rect_filled(rect, 5.0, t.pressed);
+    } else if resp.hovered() {
+        ui.painter().rect_filled(rect, 5.0, t.hover);
+    }
+    let icon = Rect::from_center_size(pos2(rect.center().x, rect.top() + 2.0 + 10.0), vec2(20.0, 20.0));
+    mode_sign(ui.painter(), icon, kind, t.text);
+    // The Ready dot, on the sign's corner.
+    let dot = pos2(icon.right() + 1.0, icon.top() + 2.0);
+    ui.painter().circle_filled(dot, 4.6, t.ribbon);
+    ui.painter().circle_filled(dot, 3.4, lamp);
+    let mut y = rect.top() + 20.0 + 9.0;
+    for l in label.split('\n') {
+        ui.painter().text(pos2(rect.center().x, y), Align2::CENTER_CENTER, l, font.clone(), t.text);
+        y += 11.5;
+    }
+    icons::paint(ui.painter(), Rect::from_center_size(pos2(rect.center().x, y - 1.0), vec2(9.0, 9.0)), Icon::Chevron, t.text_dim);
+    resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, label.replace('\n', " ")));
+    resp.on_hover_text(tip)
+}
+
+/// A sign per mode, drawn: a page (only the document), a chat bubble (Cowork), a prompt (Code).
+#[cfg(not(target_arch = "wasm32"))]
+fn mode_sign(p: &egui::Painter, r: Rect, kind: gridcraft_agent::layer::ContextKind, color: Color32) {
+    use gridcraft_agent::layer::ContextKind;
+    let s = Stroke::new(1.5, color);
+    match kind {
+        ContextKind::None => {
+            let page = Rect::from_center_size(r.center(), vec2(r.width() * 0.66, r.height() * 0.86));
+            let fold = page.width() * 0.32;
+            let pts = vec![
+                page.left_top(),
+                pos2(page.right() - fold, page.top()),
+                pos2(page.right(), page.top() + fold),
+                page.right_bottom(),
+                page.left_bottom(),
+                page.left_top(),
+            ];
+            p.add(egui::Shape::line(pts, s));
+            p.line_segment([pos2(page.right() - fold, page.top()), pos2(page.right() - fold, page.top() + fold)], s);
+            p.line_segment([pos2(page.right() - fold, page.top() + fold), pos2(page.right(), page.top() + fold)], s);
+            for k in 0..3 {
+                let y = page.top() + page.height() * (0.48 + 0.16 * k as f32);
+                p.line_segment([pos2(page.left() + 3.0, y), pos2(page.right() - 3.0, y)], Stroke::new(1.2, color));
+            }
+        }
+        ContextKind::Cowork => {
+            let b = Rect::from_min_max(pos2(r.left() + 1.0, r.top() + 3.0), pos2(r.right() - 1.0, r.bottom() - 6.0));
+            p.rect_stroke(b, 4.0, s, egui::StrokeKind::Middle);
+            p.add(egui::Shape::line(
+                vec![pos2(b.left() + 5.0, b.bottom()), pos2(b.left() + 4.0, r.bottom() - 1.0), pos2(b.left() + 10.0, b.bottom())],
+                s,
+            ));
+            for k in 0..3 {
+                p.circle_filled(pos2(b.center().x + (k as f32 - 1.0) * 4.5, b.center().y), 1.3, color);
+            }
+        }
+        ContextKind::Code => {
+            let b = r.shrink2(vec2(0.5, 2.5));
+            p.rect_stroke(b, 3.0, s, egui::StrokeKind::Middle);
+            let x = b.left() + 4.0;
+            let y = b.center().y;
+            p.add(egui::Shape::line(vec![pos2(x, y - 3.5), pos2(x + 4.0, y), pos2(x, y + 3.5)], s));
+            p.line_segment([pos2(x + 6.0, y + 3.5), pos2(x + 11.0, y + 3.5)], s);
+        }
+        ContextKind::Off => {
+            p.circle_stroke(r.center(), r.width() * 0.4, s);
+            let d = r.width() * 0.28;
+            p.line_segment([r.center() + vec2(-d, d), r.center() + vec2(d, -d)], s);
+        }
+    }
+}
+
+/// A row of the mode menu: the name, one line, chips for what the agent knows.
+#[cfg(not(target_arch = "wasm32"))]
+fn mode_row(ui: &mut Ui, kind: gridcraft_agent::layer::ContextKind, on: bool) -> Response {
+    let t = Tokens::get(ui.ctx());
+    let (name, line, chips) = kind.label();
+    let (rect, resp) = ui.allocate_exact_size(vec2(320.0, 58.0), Sense::click());
+    if on {
+        ui.painter().rect_filled(rect, 5.0, t.pressed);
+    } else if resp.hovered() {
+        ui.painter().rect_filled(rect, 5.0, t.hover);
+    }
+    let sign = Rect::from_center_size(pos2(rect.left() + 18.0, rect.top() + 16.0), vec2(18.0, 18.0));
+    mode_sign(ui.painter(), sign, kind, t.text);
+    let x = rect.left() + 36.0;
+    ui.painter().text(pos2(x, rect.top() + 11.0), Align2::LEFT_CENTER, name, theme::ui_bold(12.5), t.text);
+    ui.painter().text(pos2(x, rect.top() + 27.0), Align2::LEFT_CENTER, line, theme::ui_font(11.0), t.text_dim);
+    let mut cx = x;
+    for c in chips {
+        let g = ui.painter().layout_no_wrap(c.to_string(), theme::ui_font(10.0), t.text);
+        let chip = Rect::from_min_size(pos2(cx, rect.top() + 37.0), vec2(g.size().x + 12.0, 15.0));
+        ui.painter().rect_filled(chip, 7.5, t.window);
+        ui.painter().rect_stroke(chip, 7.5, Stroke::new(1.0, t.separator), egui::StrokeKind::Inside);
+        ui.painter().galley(chip.center() - g.size() / 2.0, g, t.text);
+        cx = chip.right() + 4.0;
+    }
+    if on {
+        icons::paint(ui.painter(), Rect::from_center_size(pos2(rect.right() - 14.0, rect.top() + 16.0), vec2(12.0, 12.0)), Icon::Check, t.accent);
+    }
+    resp.widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::SelectableLabel, true, on, name));
+    resp
+}
+
+/// A checkbox as a ribbon row.
+#[cfg(not(target_arch = "wasm32"))]
+fn check(ui: &mut Ui, label: &str, on: bool, tip: &str) -> Response {
+    let t = Tokens::get(ui.ctx());
+    let font = theme::ui_font(12.0);
+    let w = ui.painter().layout_no_wrap(label.to_string(), font.clone(), t.text).size().x + 26.0;
+    let (rect, resp) = ui.allocate_exact_size(vec2(w, 19.0), Sense::click());
+    if resp.hovered() {
+        ui.painter().rect_filled(rect, 4.0, t.hover);
+    }
+    let b = Rect::from_center_size(pos2(rect.left() + 9.0, rect.center().y), vec2(11.0, 11.0));
+    if on {
+        ui.painter().rect_filled(b, 2.0, t.accent);
+        icons::paint(ui.painter(), b.shrink(1.0), Icon::Check, Color32::WHITE);
+    } else {
+        ui.painter().rect_stroke(b, 2.0, Stroke::new(1.0, t.text_dim), egui::StrokeKind::Inside);
+    }
+    ui.painter().text(pos2(rect.left() + 20.0, rect.center().y), Align2::LEFT_CENTER, label, font, t.text);
+    resp.widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::Checkbox, true, on, label));
+    resp.on_hover_text(tip)
+}
+
+/// Two or three choices side by side; the one clicked.
+#[cfg(not(target_arch = "wasm32"))]
+fn segmented(ui: &mut Ui, items: &[(&str, &str)], on: usize) -> Option<usize> {
+    let t = Tokens::get(ui.ctx());
+    let font = theme::ui_font(11.5);
+    let mut clicked = None;
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 0.0;
+        let n = items.len();
+        for (i, (label, tip)) in items.iter().enumerate() {
+            let w = ui.painter().layout_no_wrap(label.to_string(), font.clone(), t.text).size().x + 16.0;
+            let (rect, resp) = ui.allocate_exact_size(vec2(w, 19.0), Sense::click());
+            let cr = egui::CornerRadius {
+                nw: if i == 0 { 4 } else { 0 },
+                sw: if i == 0 { 4 } else { 0 },
+                ne: if i + 1 == n { 4 } else { 0 },
+                se: if i + 1 == n { 4 } else { 0 },
+            };
+            let fill = if i == on {
+                t.pressed
+            } else if resp.hovered() {
+                t.hover
+            } else {
+                t.window
+            };
+            ui.painter().rect_filled(rect, cr, fill);
+            ui.painter().rect_stroke(rect, cr, Stroke::new(1.0, t.separator), egui::StrokeKind::Inside);
+            ui.painter().text(rect.center(), Align2::CENTER_CENTER, *label, font.clone(), if i == on { t.text } else { t.text_dim });
+            resp.widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::SelectableLabel, true, i == on, *label));
+            if resp.on_hover_text(*tip).clicked() {
+                clicked = Some(i);
+            }
+        }
+    });
+    clicked
+}
+
+/// The Ready lamp: a dot and a word, the details on hover.
+#[cfg(not(target_arch = "wasm32"))]
+fn lamp_row(ui: &mut Ui, text: &str, color: Color32, tip: &str) {
+    let t = Tokens::get(ui.ctx());
+    let font = theme::ui_bold(12.0);
+    let w = ui.painter().layout_no_wrap(text.to_string(), font.clone(), t.text).size().x + 22.0;
+    let (rect, resp) = ui.allocate_exact_size(vec2(w, 19.0), Sense::hover());
+    ui.painter().circle_filled(pos2(rect.left() + 9.0, rect.center().y), 4.5, color);
+    ui.painter().text(pos2(rect.left() + 20.0, rect.center().y), Align2::LEFT_CENTER, text, font, t.text);
+    resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Label, true, text));
+    resp.on_hover_text(tip);
+}
+
+/// The ▾ half of a split button.
+#[cfg(not(target_arch = "wasm32"))]
+fn chevron_button(ui: &mut Ui, tip: &str) -> Response {
+    let t = Tokens::get(ui.ctx());
+    let (rect, resp) = ui.allocate_exact_size(vec2(14.0, 19.0), Sense::click());
+    if resp.hovered() {
+        ui.painter().rect_filled(rect, 4.0, t.hover);
+    }
+    icons::paint(ui.painter(), Rect::from_center_size(rect.center() + vec2(0.0, 1.0), vec2(9.0, 9.0)), Icon::Chevron, t.text_dim);
+    resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, tip));
+    resp.on_hover_text(tip)
+}
+
+/// A step in Get ready's menu: ticked when done.
+#[cfg(not(target_arch = "wasm32"))]
+fn step_row(ui: &mut Ui, label: &str, done: bool, tip: &str) -> Response {
+    let t = Tokens::get(ui.ctx());
+    let p = palette(&t);
+    let (rect, resp) = ui.allocate_exact_size(vec2(240.0, 22.0), Sense::click());
+    if resp.hovered() {
+        ui.painter().rect_filled(rect, 4.0, t.hover);
+    }
+    let c = pos2(rect.left() + 11.0, rect.center().y);
+    if done {
+        icons::paint(ui.painter(), Rect::from_center_size(c, vec2(13.0, 13.0)), Icon::Check, p.agreed);
+    } else {
+        ui.painter().circle_stroke(c, 5.0, Stroke::new(1.0, t.text_dim));
+    }
+    ui.painter().text(
+        pos2(rect.left() + 24.0, rect.center().y),
+        Align2::LEFT_CENTER,
+        label,
+        theme::ui_font(12.0),
+        if done { t.text_dim } else { t.text },
+    );
+    resp.widget_info(|| egui::WidgetInfo::selected(egui::WidgetType::Checkbox, true, done, label));
+    resp.on_hover_text(tip)
 }
 
 /// The Voice group: the microphone (status under it) and the model, off until the reader picks one.

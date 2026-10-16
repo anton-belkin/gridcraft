@@ -125,9 +125,11 @@ upstream. Each one accepted upstream removes its lines from the patch.
   `link.addUses` and the registry file `ArtCraft/links.jsonl` (read when a workbook opens), and
   opens the source with `link.reveal` or `gridcraft <file> --goto <name>`. The uses are kept in the
   layer, so "▸ 2 slides" and Go to Slide travel with the workbook.
-- **The app can bring the agent in itself**, in a mode the app sets (never the file: a workbook
-  someone sends must not start an agent that spends the reader's money). Connect tab, or
-  `--agent-mode connect|channel|background|off`.
+- **The app can bring the agent in itself**, in the mode the document's Context says (below), or
+  `--agent-mode connect|channel|background|off`. A workbook someone sends must not start an
+  agent that spends the reader's money: the background client starts for a document only after
+  the person asked a question in it, chose its context or started it in this run
+  (`runner::arm`), whatever context the file carries.
   - *Send to my session* (Claude Code Channels, research preview): the server declares
     `experimental["claude/channel"]` and streams each new question on `GET /mcp` (SSE) as
     `notifications/claude/channel`. Claude Code spawns channel servers over stdio, so
@@ -147,24 +149,41 @@ upstream. Each one accepted upstream removes its lines from the patch.
     needs an API key). The command is configurable (`GRIDCRAFT_AGENT_COMMAND`). Desktop only.
 - **The Agent tab on the ribbon holds what isn't about one cell**: the pane with what waits
   (answers ready, questions with the agent), client data (mark, safe file, export for Excel), the
-  connection (server status, whether an agent is connected, the mode, New session, Copy MCP
-  command, Connect Cowork, Open Claude), the heat maps, sharing (link for a slide, web page). The
-  pane keeps only the content: the cell's questions and notes, the trace, sensitivity,
-  alternatives, risk, history. Group names match WordCraft and DeckCraft (Agent, Client data,
-  Connection, View, Share). Agent: one big button with the agent's mark and "1 ready" / "1 in
-  work" / "2 waiting" / "idle". Connection holds three things only: the status, the mode and a
-  Copy menu. The status answers "is anyone listening?": "Agent answering · checked 12 s ago"
-  (green: a check answered), "Listener connected · not checked" (amber: an `/events` stream, a
-  Claude Code channel stream, `wait_for_questions` polled in the last minute, the background
-  agent, or recent tool calls), "Nobody is listening" (grey), "No answer to check" (red: a check
-  unanswered for 60 s). **Check** sends `agent.ping`: a system question of kind `ping` ("Is
-  anyone there?"), sent out on every path (list/wait_for_questions, `/events`, the channel, the
-  background agent) but never shown as a question, badged, logged or saved; the agent answers
-  "here". The mode is a list: I connect my agent (MCP), Send to my Claude Code session
-  (channels), Background agent, Off (tools refuse). Copy holds one thing per item, by mode (MCP
-  command, monitor command, Connect Cowork…; the two channel steps; for the background agent,
-  open the session in Claude Desktop and New session), and Details… (URL, streams, session,
-  last error). Keytip G (Alt, G; F10, G on macOS): A is Data, as in Excel. The floating Agent button shows only while the ribbon is collapsed.
+  context (what the agent knows), the heat maps, sharing (link for a slide, web page). Group names
+  match WordCraft and DeckCraft (Agent, Client data, Context, View, Share). Agent: one big button
+  with the agent's mark and the sign-off count. Keytip G (Alt, G; F10, G on macOS): A is Data, as
+  in Excel. The floating Agent button shows only while the ribbon is collapsed.
+- **Context: what the agent knows** (the brief shared with WordCraft and DeckCraft, Anton
+  2026-10-16; `context.rs` in both crates). A large button shows the mode, with the Ready dot on
+  its sign; its menu has three rows, each a name, one line and chips: **No context** ("Only this
+  document. Runs in the background." [Document]: the background client in its neutral folder),
+  **Claude Cowork** ("Your Cowork chat, its project and memory." [Document][Your chat]: AItoCraft
+  and the `wait_for_questions` loop), **Claude Code** ("Your Claude Code session or a project
+  folder." [Document][Project folder]). Beside it, by mode: No context has **☐ Web** (the
+  background client is also allowed WebSearch and WebFetch), the Ready lamp, and **Get ready ▾**
+  only while `claude` isn't logged in (one step: Log in to Claude, a terminal with `claude auth
+  login`). Cowork: the lamp, Get ready with Install AItoCraft (`aitocraft --install-desktop`) and
+  Ask Cowork to collaborate (copies the phrase). Claude Code: **My session | Project folder**, the
+  lamp, Get ready: My session installs AItoCraft (`claude mcp add --scope user aitocraft -- <hub>`,
+  done when `claude mcp get aitocraft` succeeds) and copies the command that starts claude with
+  the channel; Project folder chooses a folder (shown beside it; the background client runs
+  there and sees its CLAUDE.md, memory and files). Get ready's main click runs the first step not
+  done; its menu ticks the done ones.
+  - *The lamp*: green Ready (a listener attached to this document recently or a check answered;
+    or the background client is usable: `claude` logged in, the folder there), amber Waiting
+    (after a Get ready step until a listener attaches, or while something listens that hasn't
+    answered), grey Not ready. The app checks by itself: `claude auth status`, `claude mcp get`
+    and Claude Desktop's configuration in the background (once a minute, every 5 s while
+    waiting), and when something listens without having answered it sends `agent.ping` quietly
+    (at most every 2 minutes). The ping stays an internal mechanism: no button, no wording.
+  - *Per document*: `agent.agentContext {kind, via, web, folder}` keeps the choice in the layer
+    (`context`), logged and undoable as a person's action (`Part::Context`); a document without
+    one follows the last choice made in the app (`<settings>/agent/context.json`, without a
+    folder). `context::sync` turns the active document's choice into the runner's mode, folder
+    and web permission each frame (and after every change or undo); a changed folder or web
+    permission restarts that document's client. `agent.agentMode` maps onto it. The old status
+    line, Check, Mode list and Copy menu are gone; the direct stdio connection to Claude Desktop
+    stays as the `agent.connectCowork` command.
 - **Cowork and Claude Desktop** run local servers over stdio: `gridcraft --agent-stdio [--control
   127.0.0.1:7979]`, handled on the first line of `main` (no window, nothing but protocol on
   stdout), speaks MCP on stdin/stdout and exits when stdin closes. It reaches the app through the
@@ -349,7 +368,8 @@ Rules that keep it this way:
 
 Prototype. Done for GridCraft: topics (TOPICS.md v1: places with whereabouts, statuses with
 sign-off, links inside text that follow the cells, numbered markers, Selection / Overview pane,
-person actions on ⌘Z, layer format v2), question queue with live markers, agent notes with links, privacy
+person actions on ⌘Z, layer format v2), the Context group (what the agent knows, per document,
+with the Ready lamp and Get ready), question queue with live markers, agent notes with links, privacy
 gate, the calculation tree, sensitivity with reasoned ranges (tornado on hover, Impact heat map),
 the confidence heat map, decision history and audit trail, in-app MCP and event stream, storage
 in the `.xlsx`; export to a self-contained web page (WASM, prepared answers only, read-only); alternatives in the document ("A or B?", switch and recalculate) and

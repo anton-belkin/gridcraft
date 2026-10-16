@@ -127,6 +127,14 @@ fn main() {
     if signal.as_deref() == Some("wait") {
         let _ = session.execute("agent.questions", json!({"status": "pending", "waiting": true, "actor": "agent"}));
     }
+    // The Context group shows what this computer's Claude setup is: wait for its check.
+    gridcraft_agent::context::recheck();
+    for _ in 0..200 {
+        if gridcraft_agent::context::setup().checked_at > 0 {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
     if let Some(tab) = &pane {
         gridcraft_agent_ui::request_pane(true, tab, &heat);
     } else {

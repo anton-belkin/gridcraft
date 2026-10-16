@@ -5,13 +5,15 @@
 //! - hovering a number shows its sensitivity to its inputs (a small tornado chart);
 //! - the Agent pane: the selection's topics (status, places, notes, discussion) and, folded, where
 //!   the number comes from, sensitivity, alternatives and risk; an overview with sign-off; history;
-//! - the Agent tab on the ribbon: the pane and what waits, client data, the connection (modes,
-//!   Cowork), the heat maps, sharing;
+//! - the Agent tab on the ribbon: the pane and what waits, client data, the context (what the agent
+//!   knows: only the document, your Cowork chat, or Claude Code), the heat maps, sharing;
 //! - context-menu items: Ask the Agent, Where Does This Come From, Mark as Client Data;
 //! - voice questions (native): hold ⌥ or click the microphone, speak, click the cells you mean.
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 #![forbid(unsafe_code)]
 
+#[cfg(not(target_arch = "wasm32"))]
+mod context;
 mod overlay;
 mod pane;
 mod ribbon;
@@ -31,14 +33,10 @@ use serde_json::json;
 static SERVER: OnceLock<String> = OnceLock::new();
 static STDIO_ENTRY: OnceLock<serde_json::Value> = OnceLock::new();
 
-/// The `claude_desktop_config.json` entry that starts this app in stdio mode (for Connect Cowork).
+/// The `claude_desktop_config.json` entry that starts this app in stdio mode (kept for the hosts
+/// that set it; `agent.connectCowork` builds its own).
 pub fn set_stdio_entry(entry: serde_json::Value) {
     let _ = STDIO_ENTRY.set(entry);
-}
-
-#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
-pub(crate) fn stdio_entry() -> Option<serde_json::Value> {
-    STDIO_ENTRY.get().cloned()
 }
 
 /// Registers the agent UI (call once, on the UI thread, before the first frame).
@@ -56,6 +54,20 @@ pub fn install() {
 /// Tells the UI where the agent server listens (shown on the Agent tab).
 pub fn set_server_url(url: String) {
     let _ = SERVER.set(url);
+}
+
+/// The app's folder picker (desktop: a native dialog).
+type PickFolder = Box<dyn Fn() -> Option<String> + Send + Sync>;
+static PICK_FOLDER: OnceLock<PickFolder> = OnceLock::new();
+
+/// Context → Claude Code → Project folder → Choose folder… asks this.
+pub fn set_pick_folder(pick: PickFolder) {
+    let _ = PICK_FOLDER.set(pick);
+}
+
+#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+pub(crate) fn pick_folder() -> Option<String> {
+    PICK_FOLDER.get().and_then(|f| f())
 }
 
 static REQUEST: std::sync::Mutex<Option<(bool, String, String)>> = std::sync::Mutex::new(None);
@@ -130,6 +142,8 @@ pub(crate) struct AgentUi {
     pub pane: pane::State,
     #[cfg(not(target_arch = "wasm32"))]
     pub voice: voice::Voice,
+    #[cfg(not(target_arch = "wasm32"))]
+    pub context: context::State,
 }
 
 /// The agent at work, and an answer not yet read.
@@ -367,6 +381,9 @@ impl UiExtension for AgentUi {
                 ctx.request_repaint_after(std::time::Duration::from_secs(5));
             }
         }
+        // The runner follows the active document's context; readiness is checked quietly.
+        #[cfg(not(target_arch = "wasm32"))]
+        context::frame(self, app, ctx);
         // The background agent: start it on a new question, feed it the questions.
         #[cfg(not(target_arch = "wasm32"))]
         if gridcraft_agent::runner::mode() == gridcraft_agent::runner::Mode::Background {

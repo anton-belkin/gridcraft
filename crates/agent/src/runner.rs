@@ -12,8 +12,9 @@
 //!   workbook resumes the same conversation. Never `--bare` (it needs an API key; a subscription
 //!   login works without one).
 //!
-//! The mode is the app's, never the file's: opening a workbook someone sent must not start an
-//! agent that spends the reader's money.
+//! The mode follows the document's context ([`crate::context`]), but opening a workbook someone
+//! sent never starts an agent that spends the reader's money: a document's background agent
+//! starts only after the person acted on it in this run ([`arm`]).
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::io::{BufRead, BufReader, Write};
@@ -135,9 +136,11 @@ pub struct Config {
     pub max_budget_usd: f64,
     /// Where the MCP config and the skill are written.
     pub data_dir: Option<PathBuf>,
-    /// Run in the document's folder (its CLAUDE.md, memory and settings join the context) instead
-    /// of the neutral `ArtCraft/agent-sessions/`.
-    pub project_folder: bool,
+    /// The folder to run in (its CLAUDE.md, memory and files join the context) instead of the
+    /// neutral `ArtCraft/agent-sessions/`.
+    pub folder: Option<PathBuf>,
+    /// Also allow WebSearch and WebFetch.
+    pub web: bool,
 }
 
 impl Default for Config {
@@ -153,7 +156,8 @@ impl Default for Config {
             max_turns: 40,
             max_budget_usd: 3.0,
             data_dir: default_data_dir(),
-            project_folder: false,
+            folder: None,
+            web: false,
         }
     }
 }
@@ -163,7 +167,7 @@ pub fn sessions_dir() -> Option<PathBuf> {
     crate::registry::folder().and_then(|f| f.parent().map(|p| p.join("agent-sessions")))
 }
 
-fn default_data_dir() -> Option<PathBuf> {
+pub(crate) fn default_data_dir() -> Option<PathBuf> {
     let home = std::env::var_os("HOME").map(PathBuf::from);
     if cfg!(target_os = "macos") {
         home.map(|h| h.join("Library/Application Support/GridCraft/agent"))
@@ -258,6 +262,9 @@ pub fn args(c: &Config, session: &str, resume: bool, mcp_config: &str, skill: Op
     a.extend(["--name".to_string(), name.to_string()]);
     a.extend(["--mcp-config".to_string(), mcp_config.to_string(), "--strict-mcp-config".to_string()]);
     a.extend(["--allowedTools".to_string(), "mcp__gridcraft__*".to_string()]);
+    if c.web {
+        a.extend(["WebSearch".to_string(), "WebFetch".to_string()]);
+    }
     if let Some(s) = skill {
         a.extend(["--append-system-prompt-file".to_string(), s.to_string()]);
     }
@@ -364,11 +371,10 @@ pub fn start(s: &Session) -> Result<Status, String> {
     let fresh = agents().as_ref().is_some_and(|a| a.fresh.contains(&uid));
     let (session, resume) = if l.agent_session.is_empty() || fresh { (crate::links::new_uuid(uid), false) } else { (l.agent_session.clone(), true) };
     // A neutral, empty folder by default, so no project's CLAUDE.md, memory or settings become its
-    // context (AItoCraft §4); the document's folder only when asked.
-    let doc_folder = d.path.as_deref().and_then(|p| std::path::absolute(p).ok()).and_then(|p| p.parent().map(std::path::Path::to_path_buf));
-    let cwd = match (c.project_folder, doc_folder) {
-        (true, Some(f)) => f,
-        _ => {
+    // context (AItoCraft §4); a project folder only when the person chose one.
+    let cwd = match c.folder.clone().filter(|f| f.is_dir()) {
+        Some(f) => f,
+        None => {
             let n = sessions_dir().unwrap_or_else(std::env::temp_dir);
             let _ = std::fs::create_dir_all(&n);
             n
@@ -488,6 +494,22 @@ pub fn question_text(s: &Session, q: &Json) -> String {
     t
 }
 
+/// Documents whose background agent may start: the person asked or chose the context in this run.
+/// A workbook someone sent, opened with questions pending and a saved context, never starts an
+/// agent on the reader's subscription by itself.
+static ARMED: Mutex<Option<HashSet<u64>>> = Mutex::new(None);
+
+/// Lets the document's background agent start (a person's own action on it).
+pub fn arm(uid: u64) {
+    if let Ok(mut g) = ARMED.lock() {
+        g.get_or_insert_with(HashSet::new).insert(uid);
+    }
+}
+
+pub fn armed(uid: u64) -> bool {
+    ARMED.lock().ok().is_some_and(|g| g.as_ref().is_some_and(|x| x.contains(&uid)))
+}
+
 /// Called every frame (and by tests): in the background mode, starts the active document's agent
 /// when it has open questions and sends each new question once, in order.
 pub fn tick(s: &mut Session) {
@@ -496,6 +518,9 @@ pub fn tick(s: &mut Session) {
     }
     let Some(d) = s.active() else { return };
     let uid = d.uid;
+    if !armed(uid) && !agents().as_ref().is_some_and(|a| a.by_doc.contains_key(&uid)) {
+        return;
+    }
     // A finished process: keep its status; a resume that failed starts fresh next time.
     let exited = {
         let mut g = agents();
@@ -586,7 +611,7 @@ use gridcraft_engine::cmd::CommandSpec;
 use crate::commands::{bad, spec, str_p};
 
 pub static SPECS: &[CommandSpec] = &[
-    spec!(query "agent.agentMode", "Agent Mode", "{mode?: connect|channel|background|off, projectFolder?: bool (the background agent runs in the document's folder)} → the mode (how the agent comes in: you connect it over MCP, into your own Claude Code session, as a background agent per document, or not at all)", mode_cmd),
+    spec!(query "agent.agentMode", "Agent Mode", "{mode?: connect|channel|background|off, projectFolder?: bool (the background agent runs in the document's folder)} → the mode (how the agent comes in: you connect it over MCP, into your own Claude Code session, as a background agent per document, or not at all). Sets the document's context (agent.agentContext)", mode_cmd),
     spec!(query "agent.agentStart", "Start Background Agent", "{} — starts (or resumes) the active document's background agent", start_cmd),
     spec!(query "agent.agentStop", "Stop Background Agent", "{}", stop_cmd),
     spec!(query "agent.agentReset", "New Agent Session", "{} — a fresh session for the active document, started from a summary of its history", reset_cmd),
@@ -599,7 +624,8 @@ pub fn status_json(uid: u64, session: &str) -> Json {
     json!({
         "mode": mode().id(),
         "command": config().command,
-        "projectFolder": config().project_folder,
+        "folder": config().folder.map(|f| f.display().to_string()),
+        "web": config().web,
         "running": st.running,
         "sessionId": st.session_id,
         "cwd": st.cwd,
@@ -625,14 +651,27 @@ fn here(s: &Session) -> gridcraft_engine::Result<(u64, String)> {
 }
 
 fn mode_cmd(s: &mut Session, p: &Json) -> gridcraft_engine::Result<Json> {
+    // The document's context says it now: the old switches map onto it.
+    use crate::layer::{CodeVia, ContextKind};
     if let Some(on) = p.get("projectFolder").and_then(Json::as_bool) {
         refuse_agent(p, "agent.agentMode")?;
-        set_config(Config { project_folder: on, ..config() });
+        let folder = s.doc()?.path.as_deref().and_then(|x| std::path::absolute(x).ok()).and_then(|x| x.parent().map(|f| f.display().to_string()));
+        let params = match (on, folder) {
+            (true, Some(f)) => json!({"kind": "code", "via": "folder", "folder": f}),
+            _ => json!({"kind": "none"}),
+        };
+        crate::context::set(s, &params)?;
     }
     if let Some(m) = str_p(p, "mode") {
         refuse_agent(p, "agent.agentMode")?;
         let m = Mode::parse(m).ok_or_else(|| bad("agent.agentMode", "`mode` is connect, channel, background or off"))?;
-        set_mode(m);
+        let (kind, via) = match m {
+            Mode::Manual => (ContextKind::Cowork, CodeVia::Session),
+            Mode::Channel => (ContextKind::Code, CodeVia::Session),
+            Mode::Background => (ContextKind::None, CodeVia::Session),
+            Mode::Off => (ContextKind::Off, CodeVia::Session),
+        };
+        crate::context::set(s, &json!({"kind": kind, "via": via}))?;
         remember_mode(m);
     }
     let (uid, session) = here(s)?;
@@ -641,6 +680,7 @@ fn mode_cmd(s: &mut Session, p: &Json) -> gridcraft_engine::Result<Json> {
 
 fn start_cmd(s: &mut Session, p: &Json) -> gridcraft_engine::Result<Json> {
     refuse_agent(p, "agent.agentStart")?;
+    arm(s.doc()?.uid);
     start(s).map_err(|e| bad("agent.agentStart", e))?;
     let (uid, session) = here(s)?;
     Ok(status_json(uid, &session))

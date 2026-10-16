@@ -239,6 +239,8 @@ pub enum Part {
     Private(Vec<String>),
     Inputs(Vec<Input>),
     Safe(Option<SafeFile>),
+    /// What the agent knows (the Agent tab's Context).
+    Context(Option<layer::AgentContext>),
 }
 
 impl Part {
@@ -279,6 +281,7 @@ impl Part {
             Part::Private(v) => l.private.clone_from(v),
             Part::Inputs(v) => l.inputs.clone_from(v),
             Part::Safe(v) => l.safe.clone_from(v),
+            Part::Context(v) => l.context.clone_from(v),
         }
     }
 }
@@ -348,6 +351,21 @@ fn with_doc(s: &mut Session, uid: u64, f: impl FnOnce(&mut Layer)) {
 
 impl gridcraft_engine::ext::UndoStep for Step {
     fn undo(&self, s: &mut Session) {
+        self.undo_layer(s);
+        // The runner follows the document's context.
+        #[cfg(not(target_arch = "wasm32"))]
+        crate::context::sync(s);
+    }
+
+    fn redo(&self, s: &mut Session) {
+        self.redo_layer(s);
+        #[cfg(not(target_arch = "wasm32"))]
+        crate::context::sync(s);
+    }
+}
+
+impl Step {
+    fn undo_layer(&self, s: &mut Session) {
         match &self.kind {
             StepKind::Parts { before, .. } => with_doc(s, self.uid, |l| {
                 restore_anchors(l, &self.anchors);
@@ -384,7 +402,7 @@ impl gridcraft_engine::ext::UndoStep for Step {
         }
     }
 
-    fn redo(&self, s: &mut Session) {
+    fn redo_layer(&self, s: &mut Session) {
         match &self.kind {
             StepKind::Parts { after, .. } => with_doc(s, self.uid, |l| {
                 restore_anchors(l, &self.anchors);

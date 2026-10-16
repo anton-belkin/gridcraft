@@ -57,6 +57,8 @@ pub static ALL: &[&[CommandSpec]] = &[
     crate::runner::SPECS,
     #[cfg(not(target_arch = "wasm32"))]
     crate::cowork::SPECS,
+    #[cfg(not(target_arch = "wasm32"))]
+    crate::context::SPECS,
 ];
 
 pub static SPECS: &[CommandSpec] = &[
@@ -207,6 +209,11 @@ fn ask(s: &mut Session, p: &Json) -> Result<Json> {
         }
     };
     let by = actor_p(p, Actor::Human);
+    // The person asked: the document's background agent may start for it.
+    #[cfg(not(target_arch = "wasm32"))]
+    if by == Actor::Human {
+        crate::runner::arm(s.doc()?.uid);
+    }
     let (topic, created) = match found {
         Some(t) => (t, false),
         None => (crate::topics::new_topic(s, &place, layer::Status::Open, by)?, true),

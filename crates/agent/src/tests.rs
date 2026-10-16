@@ -714,6 +714,7 @@ fn wait_for(mut f: impl FnMut() -> bool) -> bool {
 #[cfg(unix)]
 #[test]
 fn background_agent_gets_questions_and_resumes_its_session() {
+    let _g = CONTEXT_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     use crate::runner::{self, Config, Mode};
     use std::os::unix::fs::PermissionsExt;
     let (mut s, path) = saved_model("runner");
@@ -1584,4 +1585,88 @@ fn mcp_topics_tools() {
     let list = call(&mut b, "list_topics", json!({"status": "revise"})).unwrap();
     assert_eq!(list.as_array().unwrap().len(), 1);
     call(&mut b, "widen_place", json!({"place": "1.2", "to": "A7:B7", "reason": "the whole row"})).unwrap();
+}
+
+// ---------------------------------------------------------------- Context (what the agent knows)
+
+/// Context tests change the app-wide runner mode: one at a time.
+static CONTEXT_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+#[test]
+fn context_is_per_document_saved_in_it_and_undoable() {
+    use crate::context;
+    use crate::layer::{CodeVia, ContextKind};
+    use crate::runner::{self, Mode};
+    let _g = CONTEXT_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    context::forget_last();
+    runner::set_mode(Mode::Manual);
+    let mut s = model();
+    // Before any choice the document follows the app (Claude Cowork for `connect`).
+    let c = s.execute("agent.agentContext", json!({})).unwrap();
+    assert_eq!(c["kind"], json!("cowork"));
+    // Claude Code, my session: the runner hands questions to the session's channel.
+    s.execute("agent.agentContext", json!({"kind": "code"})).unwrap();
+    assert_eq!(runner::mode(), Mode::Channel);
+    // A project folder: a background client in that folder.
+    let dir = std::env::temp_dir().join(format!("gc-context-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let c = s.execute("agent.agentContext", json!({"via": "folder", "folder": dir.display().to_string()})).unwrap();
+    assert_eq!((c["kind"].clone(), c["via"].clone(), c["mode"].clone()), (json!("code"), json!("folder"), json!("background")));
+    assert_eq!(runner::mode(), Mode::Background);
+    assert_eq!(runner::config().folder, Some(dir.clone()));
+    assert!(s.execute("agent.agentContext", json!({"folder": "/no/such/folder/here"})).is_err());
+    // No context, with the web: WebSearch and WebFetch join the allowed tools; no folder.
+    s.execute("agent.agentContext", json!({"kind": "none", "web": true})).unwrap();
+    assert_eq!(runner::config().folder, None);
+    let args = runner::args(&runner::config(), "id", false, "mcp.json", None, "x");
+    assert!(args.contains(&"WebSearch".to_string()) && args.contains(&"WebFetch".to_string()), "{args:?}");
+    s.execute("agent.agentContext", json!({"web": false})).unwrap();
+    assert!(!runner::args(&runner::config(), "id", false, "mcp.json", None, "x").contains(&"WebSearch".to_string()));
+    // Each change is the person's, on their ⌘Z: back to web on, then to the project folder.
+    s.execute("edit.undo", json!({})).unwrap();
+    assert!(layer::get(s.active().unwrap()).context.as_ref().unwrap().web);
+    assert!(runner::config().web);
+    s.execute("edit.undo", json!({})).unwrap();
+    let c = layer::get(s.active().unwrap()).context.clone().unwrap();
+    assert_eq!((c.kind, c.via), (ContextKind::Code, CodeVia::Folder));
+    assert_eq!(runner::mode(), Mode::Background);
+    s.execute("edit.redo", json!({})).unwrap();
+    assert_eq!(layer::get(s.active().unwrap()).context.as_ref().unwrap().kind, ContextKind::None);
+    // Logged in the history, and only a person decides it.
+    assert!(layer::get(s.active().unwrap()).log.iter().any(|e| e.text.starts_with("Context: No context")));
+    assert!(s.execute("agent.agentContext", json!({"kind": "cowork", "actor": "agent"})).is_err());
+    // Saved in the file and read back.
+    let mut wb = (*s.active().unwrap().wb).clone();
+    layer::write_into(&mut wb, &layer::get(s.active().unwrap()));
+    assert_eq!(layer::read_from(&wb).context, layer::get(s.active().unwrap()).context);
+    // A new document starts with the last choice made in the app (its mode, not a folder).
+    s.execute("agent.agentContext", json!({"kind": "code", "via": "folder", "folder": dir.display().to_string()})).unwrap();
+    s.new_workbook();
+    let c = s.execute("agent.agentContext", json!({})).unwrap();
+    assert_eq!((c["kind"].clone(), c["via"].clone(), c["folder"].clone()), (json!("code"), json!("folder"), json!("")));
+    context::forget_last();
+    runner::set_mode(Mode::Manual);
+    runner::set_config(runner::Config { folder: None, web: false, ..runner::config() });
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_saved_context_never_starts_an_agent_by_itself() {
+    use crate::runner::{self, Mode};
+    let _g = CONTEXT_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut s = model();
+    // A workbook someone sent: questions pending, no context chosen and nothing asked in this run.
+    let uid = s.active().unwrap().uid;
+    let q = layer::Question {
+        id: "q90".into(),
+        anchor: String::new(),
+        text: "Why?".into(),
+        status: layer::QuestionStatus::Pending,
+        ..Default::default()
+    };
+    layer::update(s.active().unwrap(), |l| l.questions.push(q));
+    runner::set_mode(Mode::Background);
+    runner::tick(&mut s);
+    assert!(runner::status(uid).is_none(), "nothing started for a file just opened");
+    runner::set_mode(Mode::Manual);
 }

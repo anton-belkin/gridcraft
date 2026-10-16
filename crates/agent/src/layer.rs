@@ -355,6 +355,45 @@ impl Status {
     }
 }
 
+/// What the agent knows, chosen on the Agent tab: only the document (a background client in a
+/// neutral folder), the person's Cowork chat, or their Claude Code session or a project folder.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ContextKind {
+    /// Only this document; runs in the background.
+    #[default]
+    None,
+    /// The person's Cowork chat, its project and memory (AItoCraft).
+    Cowork,
+    /// The person's Claude Code session, or a project folder.
+    Code,
+    /// No agent at all (not offered on the tab; `agent.agentMode off`).
+    Off,
+}
+
+/// Claude Code: the person's own session, or a background client in a folder they chose.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum CodeVia {
+    #[default]
+    Session,
+    Folder,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct AgentContext {
+    #[serde(default)]
+    pub kind: ContextKind,
+    #[serde(default)]
+    pub via: CodeVia,
+    /// No context: the background client may also search and fetch the web.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub web: bool,
+    /// Claude Code, project folder: where the background client runs.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub folder: String,
+}
+
 /// A topic's status, with its free text and who set it.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct TopicStatus {
@@ -468,6 +507,9 @@ pub struct Layer {
     /// Where deleted places and links were.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub whereabouts: Vec<Whereabouts>,
+    /// What the agent knows about this document (the Agent tab's Context): chosen per document.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context: Option<AgentContext>,
     /// Bumped on every change (not saved meaningfully; lets views cache).
     #[serde(skip)]
     pub revision: u64,
@@ -507,7 +549,12 @@ impl Layer {
     }
 
     pub fn is_empty(&self) -> bool {
-        self.anchors.is_empty() && self.log.is_empty() && self.safe.is_none() && self.workbook_id.is_empty() && self.links.is_empty()
+        self.anchors.is_empty()
+            && self.log.is_empty()
+            && self.safe.is_none()
+            && self.workbook_id.is_empty()
+            && self.links.is_empty()
+            && self.context.is_none()
     }
 
     pub fn topic(&self, id: &str) -> Option<&Topic> {

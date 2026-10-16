@@ -73,7 +73,13 @@ pub fn start(agent: Option<u16>, control: Option<u16>) {
     gridcraft_agent_ui::install();
     if !MODE_FROM_FLAG.load(std::sync::atomic::Ordering::Relaxed) {
         gridcraft_agent::runner::load_saved_mode();
+        // What a new document's agent knows: the last choice made in the app.
+        gridcraft_agent::context::load_saved();
     }
+    // Context → Claude Code → Project folder → Choose folder….
+    gridcraft_agent_ui::set_pick_folder(Box::new(|| {
+        rfd::FileDialog::new().set_title("Project folder for the agent").pick_folder().map(|p| p.display().to_string())
+    }));
     match gridcraft_agent::server::start(port, format!("127.0.0.1:{control}")) {
         Ok(port) => {
             gridcraft_agent_ui::set_server_url(format!("http://127.0.0.1:{port}/mcp"));
