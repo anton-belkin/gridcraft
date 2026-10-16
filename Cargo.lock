@@ -1522,6 +1522,7 @@ dependencies = [
 name = "gridcraft-agent"
 version = "0.7.0"
 dependencies = [
+ "flate2",
  "gridcraft-engine",
  "gridcraft-mcp",
  "gridcraft-xlsx",
@@ -1685,6 +1686,8 @@ version = "0.7.0"
 dependencies = [
  "eframe",
  "egui",
+ "gridcraft-agent",
+ "gridcraft-agent-ui",
  "gridcraft-engine",
  "gridcraft-ui-egui",
  "js-sys",
