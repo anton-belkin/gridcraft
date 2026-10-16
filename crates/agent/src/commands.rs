@@ -8,7 +8,7 @@
 use std::cell::Cell as StdCell;
 
 use gridcraft_engine::calc::Key;
-use gridcraft_engine::cmd::{CommandSpec, has_doc};
+use gridcraft_engine::cmd::CommandSpec;
 use gridcraft_engine::core::RangeRef;
 use gridcraft_engine::model::Workbook;
 use gridcraft_engine::{EngineError, Result, Session};
@@ -20,16 +20,16 @@ use crate::layer::{self, Actor, Answer, Confidence, Input, Layer, Link, Note, Qu
 
 macro_rules! spec {
     ($kind:ident $id:literal, $label:literal, $params:literal, $run:expr) => {
-        CommandSpec {
+        gridcraft_engine::cmd::CommandSpec {
             id: $id,
             label: $label,
             menu: &[],
             shortcut: None,
             params: $params,
-            enabled: has_doc,
+            enabled: gridcraft_engine::cmd::has_doc,
             run: {
-                fn guarded(s: &mut Session, p: &Json) -> Result<Json> {
-                    writable($id, spec!(@journal $kind))?;
+                fn guarded(s: &mut gridcraft_engine::Session, p: &serde_json::Value) -> gridcraft_engine::Result<serde_json::Value> {
+                    $crate::commands::writable($id, spec!(@journal $kind))?;
                     $run(s, p)
                 }
                 guarded
@@ -41,6 +41,18 @@ macro_rules! spec {
     (@journal query) => { false };
     (@journal change) => { true };
 }
+pub(crate) use spec;
+
+/// Every command of the layer, by module.
+pub static ALL: &[&[CommandSpec]] = &[
+    SPECS,
+    crate::variants::SPECS,
+    crate::stress::SPECS,
+    crate::safe::SPECS,
+    crate::links::SPECS,
+    #[cfg(not(target_arch = "wasm32"))]
+    crate::runner::SPECS,
+];
 
 pub static SPECS: &[CommandSpec] = &[
     // the reader's side
@@ -67,27 +79,28 @@ pub static SPECS: &[CommandSpec] = &[
 
 // ---------------------------------------------------------------- params
 
-/// A read-only layer (an exported page) refuses every change but marking an answer read.
-fn writable(id: &str, changes: bool) -> Result<()> {
-    if changes && crate::read_only() && id != "agent.seen" {
+/// A read-only layer (an exported page) refuses every change but marking an answer read and
+/// switching between the alternatives the author left (that only changes the reader's copy).
+pub(crate) fn writable(id: &str, changes: bool) -> Result<()> {
+    if changes && crate::read_only() && !matches!(id, "agent.seen" | "agent.useVariant") {
         return Err(EngineError::Other("This is a read-only copy: questions go to the agent from the workbook in GridCraft.".into()));
     }
     Ok(())
 }
 
-fn bad(cmd: &str, msg: impl Into<String>) -> EngineError {
+pub(crate) fn bad(cmd: &str, msg: impl Into<String>) -> EngineError {
     EngineError::BadParams { cmd: cmd.into(), msg: msg.into() }
 }
 
-fn str_p<'a>(p: &'a Json, k: &str) -> Option<&'a str> {
+pub(crate) fn str_p<'a>(p: &'a Json, k: &str) -> Option<&'a str> {
     p.get(k).and_then(Json::as_str)
 }
 
-fn masked_p(p: &Json) -> bool {
+pub(crate) fn masked_p(p: &Json) -> bool {
     p.get("masked").and_then(Json::as_bool).unwrap_or(true)
 }
 
-fn actor_p(p: &Json, default: Actor) -> Actor {
+pub(crate) fn actor_p(p: &Json, default: Actor) -> Actor {
     match str_p(p, "actor") {
         Some("agent") => Actor::Agent,
         Some("human") => Actor::Human,
@@ -97,7 +110,7 @@ fn actor_p(p: &Json, default: Actor) -> Actor {
 }
 
 /// `range` / `cell` param (on the active sheet unless it names one), else the selection.
-fn place_p(s: &Session, p: &Json, cmd: &str) -> Result<Place> {
+pub(crate) fn place_p(s: &Session, p: &Json, cmd: &str) -> Result<Place> {
     let d = s.doc()?;
     let text = str_p(p, "range").or_else(|| str_p(p, "cell"));
     match text {
@@ -110,20 +123,20 @@ fn place_p(s: &Session, p: &Json, cmd: &str) -> Result<Place> {
     }
 }
 
-fn links_p(p: &Json) -> Vec<Link> {
+pub(crate) fn links_p(p: &Json) -> Vec<Link> {
     p.get("links")
         .and_then(Json::as_array)
         .map(|a| a.iter().take(50).filter_map(|v| serde_json::from_value(v.clone()).ok()).collect())
         .unwrap_or_default()
 }
 
-fn text_p(p: &Json, k: &str, cmd: &str) -> Result<String> {
+pub(crate) fn text_p(p: &Json, k: &str, cmd: &str) -> Result<String> {
     let t = str_p(p, k).map(str::trim).filter(|t| !t.is_empty()).ok_or_else(|| bad(cmd, format!("missing `{k}`")))?;
     // Long enough for an essay, short enough to never be a problem in the file.
     Ok(t.chars().take(20_000).collect())
 }
 
-fn where_json(s: &Session, l: &Layer, anchor_id: &str) -> Json {
+pub(crate) fn where_json(s: &Session, l: &Layer, anchor_id: &str) -> Json {
     let Ok(d) = s.doc() else { return Json::Null };
     match l.anchor(anchor_id).and_then(|a| anchor::resolve(&d.wb, a)) {
         Some(p) => json!(p.a1()),
@@ -397,6 +410,7 @@ fn context(s: &mut Session, p: &Json) -> Result<Json> {
         "privateRanges": private,
         "privacyNote": "Cells in privateRanges hold client data. You see stand-in values there (same sign and magnitude), and everything computed from them is recalculated from the stand-ins: never quote these numbers as real. Formulas are real.",
         "inputs": inputs,
+        "safeFile": l.safe.as_ref().map(|x| json!({"on": true, "locked": x.sealed.is_some()})),
         "openQuestions": l.questions.iter().filter(|q| q.status != QuestionStatus::Answered).count(),
         "notes": l.notes.len(),
         "log": l.log.iter().rev().take(20).collect::<Vec<_>>(),
@@ -508,5 +522,7 @@ fn exec(s: &mut Session, p: &Json) -> Result<Json> {
 }
 
 thread_local! {
+    /// > 0 while a layer command makes a change it records itself (the audit log skips it).
+    pub(crate) static QUIET: StdCell<u32> = const { StdCell::new(0) };
     pub(crate) static PENDING_REASON: std::cell::RefCell<Option<(String, String)>> = const { std::cell::RefCell::new(None) };
 }

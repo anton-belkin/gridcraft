@@ -155,6 +155,96 @@ pub struct LogEntry {
     pub source: String,
 }
 
+/// What a set of alternatives is.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum VariantKind {
+    /// "A or B?": alternative assumptions or formulas for a range, both kept in the document.
+    #[default]
+    Alternatives,
+    /// A readable formula and an exact one for the same cell (options 0 and 1).
+    Method,
+}
+
+/// One alternative of a [`VariantSet`].
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct VariantOption {
+    pub name: String,
+    /// The range's contents in this option, row by row, as typed: numbers, booleans, text or
+    /// `=formulas` (the canonical spelling).
+    pub values: Vec<Vec<serde_json::Value>>,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub note: String,
+}
+
+/// Alternatives for a range that live in the document: the reader switches between them and
+/// sees the model recalculate.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct VariantSet {
+    pub id: String,
+    pub anchor: String,
+    #[serde(default)]
+    pub kind: VariantKind,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub title: String,
+    pub options: Vec<VariantOption>,
+    /// Cells to compare the options on (anchors); empty: the model's final outputs.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub outputs: Vec<String>,
+    /// For a method: the relative difference on an output above which the choice matters.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub threshold: Option<f64>,
+    #[serde(default)]
+    pub author: Actor,
+    #[serde(default)]
+    pub at: u64,
+}
+
+/// Real values of client data, encrypted (AES-256-CTR, HMAC-SHA256) under a key kept outside
+/// the workbook.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct Sealed {
+    pub alg: String,
+    pub nonce: String,
+    pub data: String,
+    pub mac: String,
+    /// How many cells are sealed.
+    pub cells: usize,
+}
+
+/// Safe file mode: saves write stand-ins for client data and seal the real values.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct SafeFile {
+    /// The key's id in the local key store (never the key).
+    pub key_id: String,
+    /// Present in the file; in memory only while the key isn't available here.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sealed: Option<Sealed>,
+}
+
+/// One place a linked range of this workbook is used (a slide of a deck), as DeckCraft reports it
+/// (`agent-layer` links contract, §5).
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct LinkUse {
+    pub link: String,
+    pub at: u64,
+    pub app: String,
+    pub workbook: String,
+    pub workbook_id: String,
+    /// The `_GcLink_` name of the range.
+    pub anchor: String,
+    pub sheet: String,
+    pub range: String,
+    pub deck: String,
+    pub deck_title: String,
+    pub slide: u32,
+    pub slide_title: String,
+    pub shape: u64,
+    pub shape_key: String,
+    pub mode: String,
+}
+
 /// Most log entries kept (oldest dropped first).
 pub const MAX_LOG: usize = 5_000;
 
@@ -179,6 +269,22 @@ pub struct Layer {
     pub confidence: Vec<Confidence>,
     #[serde(default)]
     pub log: Vec<LogEntry>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub variants: Vec<VariantSet>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub safe: Option<SafeFile>,
+    /// The workbook's own id, made the first time it is a linked source (survives Save As and moves).
+    #[serde(default, skip_serializing_if = "String::is_empty", rename = "workbookId")]
+    pub workbook_id: String,
+    /// Ranges copied as linked sources: `_GcLink_` names (never cleaned up: other files use them).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub links: Vec<Anchor>,
+    /// The background agent's session (Claude Code session id), resumed when the workbook reopens.
+    #[serde(default, skip_serializing_if = "String::is_empty", rename = "agentSession")]
+    pub agent_session: String,
+    /// Where those ranges are used (decks and slides).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub uses: Vec<LinkUse>,
     /// Bumped on every change (not saved meaningfully; lets views cache).
     #[serde(skip)]
     pub revision: u64,
@@ -204,7 +310,7 @@ impl Layer {
     }
 
     pub fn is_empty(&self) -> bool {
-        self.anchors.is_empty() && self.log.is_empty()
+        self.anchors.is_empty() && self.log.is_empty() && self.safe.is_none() && self.workbook_id.is_empty() && self.links.is_empty()
     }
 
     /// Anchors nothing refers to any more.
@@ -216,6 +322,7 @@ impl Layer {
                 || self.private.iter().any(|p| p == id)
                 || self.confidence.iter().any(|c| c.anchor == id)
                 || self.log.iter().any(|e| e.anchor.as_deref() == Some(id))
+                || self.variants.iter().any(|v| v.anchor == id || v.outputs.iter().any(|o| o == id))
         };
         self.anchors.iter().filter(|a| !used(&a.id)).map(|a| a.id.clone()).collect()
     }

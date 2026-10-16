@@ -1522,13 +1522,16 @@ dependencies = [
 name = "gridcraft-agent"
 version = "0.7.0"
 dependencies = [
+ "aes",
  "flate2",
+ "getrandom 0.3.4",
  "gridcraft-engine",
  "gridcraft-mcp",
  "gridcraft-xlsx",
  "log",
  "serde",
  "serde_json",
+ "sha2",
 ]
 
 [[package]]

@@ -18,13 +18,21 @@
 
 pub mod analysis;
 pub mod anchor;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod channel;
 pub mod commands;
 pub mod export;
 pub mod layer;
+pub mod links;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod mcp;
 #[cfg(not(target_arch = "wasm32"))]
+pub mod runner;
+pub mod safe;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod server;
+pub mod stress;
+pub mod variants;
 
 use std::sync::Arc;
 
@@ -60,7 +68,9 @@ pub fn now_ms() -> u64 {
 pub fn install() {
     static ONCE: std::sync::Once = std::sync::Once::new();
     ONCE.call_once(|| {
-        gridcraft_engine::ext::register_commands(commands::SPECS);
+        for specs in commands::ALL {
+            gridcraft_engine::ext::register_commands(specs);
+        }
         gridcraft_engine::ext::register_observer(&KEEPER);
     });
 }
@@ -90,16 +100,22 @@ fn is_view_only(id: &str) -> bool {
         || id.starts_with("file.")
         || id.starts_with("sheet.activate")
         || id.starts_with("ui.")
+        || id.starts_with("link.")
         || id == "edit.copy"
 }
 
 impl Observer for Keeper {
     fn before(&self, s: &mut Session, id: &str, _params: &Json) {
+        // A safe save that didn't finish puts the real workbook back first.
+        safe::restore(s);
         BEFORE.with(|b| b.borrow_mut().push(wb_ptr(s)));
-        // Write the layer into the workbook just before it is saved.
-        if matches!(id, "file.save" | "file.saveAs" | "file.saveBytes")
-            && let Some(d) = s.active_mut()
-        {
+        // Write the layer into the workbook just before it is saved; in safe file mode, save a
+        // copy with stand-ins for client data and the real values sealed instead.
+        let saving = matches!(id, "file.save" | "file.saveAs" | "file.saveBytes");
+        if saving && safe::swap_in(s) {
+            return;
+        }
+        if saving && let Some(d) = s.active_mut() {
             let l = layer::get(d);
             let has_part = layer::read_from(&d.wb) != Layer::default();
             if !l.is_empty() || has_part {
@@ -110,10 +126,26 @@ impl Observer for Keeper {
 
     fn after(&self, s: &mut Session, id: &str, params: &Json, result: &Result<Json>) {
         let before = BEFORE.with(|b| b.borrow_mut().pop()).flatten();
+        safe::restore(s);
+        if id == "file.open"
+            && result.is_ok()
+            && let Some(d) = s.active_mut()
+            && let Err(e) = safe::unseal(d)
+        {
+            log::warn!("safe file: {e}; the client data stays locked (stand-ins)");
+        }
+        if id == "file.open"
+            && result.is_ok()
+            && let Some(d) = s.active()
+        {
+            links::load_registry(d);
+        }
         let Some(d) = s.active_mut() else { return };
         anchor::refresh(d);
+        links::refresh(d);
         let changed = result.is_ok() && before.is_some_and(|(uid, ptr)| uid == d.uid && ptr != Arc::as_ptr(&d.wb) as usize);
-        if !changed || is_view_only(id) || id == "edit.undo" || id == "edit.redo" {
+        let quiet = commands::QUIET.with(std::cell::Cell::get) > 0;
+        if !changed || quiet || is_view_only(id) || id == "edit.undo" || id == "edit.redo" {
             return;
         }
         // The audit trail: who changed what, on what basis. People's own edits are recorded once

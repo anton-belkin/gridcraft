@@ -5,7 +5,10 @@ use std::collections::HashMap;
 use egui::{Align2, Color32, Painter, Rect, Stroke, StrokeKind, Ui, pos2, vec2};
 use gridcraft_agent::analysis::{self, Swing};
 use gridcraft_agent::anchor;
-use gridcraft_agent::layer::{self, Layer, QuestionStatus};
+use gridcraft_agent::layer::{self, Layer, QuestionStatus, VariantKind};
+use gridcraft_agent::links;
+use gridcraft_agent::stress::{self, Stress};
+use gridcraft_agent::variants::{self, Comparison};
 use gridcraft_engine::DocState;
 use gridcraft_engine::core::{CellRef, RangeRef, Value};
 use gridcraft_ui_egui::SheetApp;
@@ -28,6 +31,8 @@ pub(crate) struct Sens {
 pub(crate) struct State {
     hover: Option<(usize, CellRef, f64)>,
     cache: HashMap<(u64, usize, u64, usize, CellRef), Sens>,
+    comparisons: Option<((u64, usize, u64), Vec<Comparison>)>,
+    stress: Option<((u64, usize, u64), usize, CellRef, Option<Stress>)>,
 }
 
 /// Version of what an analysis depends on: the document, its workbook and its layer.
@@ -50,9 +55,38 @@ impl State {
         self.cache.insert(key, s.clone());
         s
     }
+
+    /// The worst and best combination of the inputs of a cell, cached until something changes.
+    pub(crate) fn stress(&mut self, d: &DocState, l: &Layer, sheet: usize, c: CellRef) -> Option<Stress> {
+        let ver = version(d, l);
+        if let Some((v, s, k, r)) = &self.stress
+            && *v == ver
+            && *s == sheet
+            && *k == c
+        {
+            return r.clone();
+        }
+        let dims = stress::pick_dims(&d.wb, &d.calc, l, (sheet, c), &[]);
+        let r = stress::search(&d.wb, &d.calc, (sheet, c), dims, 2_000);
+        self.stress = Some((ver, sheet, c, r.clone()));
+        r
+    }
+
+    /// Every set of alternatives and calculation methods compared, cached until something changes.
+    pub(crate) fn comparisons(&mut self, d: &DocState, l: &Layer) -> Vec<Comparison> {
+        let ver = version(d, l);
+        if let Some((v, list)) = &self.comparisons
+            && *v == ver
+        {
+            return list.clone();
+        }
+        let list: Vec<Comparison> = l.variants.iter().filter_map(|set| variants::compare(&d.wb, &d.calc, l, set)).collect();
+        self.comparisons = Some((ver, list.clone()));
+        list
+    }
 }
 
-fn is_formula_number(d: &DocState, sheet: usize, c: CellRef) -> bool {
+pub(crate) fn is_formula_number(d: &DocState, sheet: usize, c: CellRef) -> bool {
     d.wb.sheet(sheet).and_then(|s| s.cell(c)).is_some_and(|x| x.formula.is_some() && matches!(x.value, Value::Number(_)))
 }
 
@@ -118,6 +152,61 @@ pub(crate) fn paint(st: &mut AgentUi, app: &SheetApp, ui: &Ui, painter: &Painter
         let c = pos2(r.left() + 5.0, r.bottom() - 5.0);
         let pts = vec![pos2(c.x, c.y - 3.5), pos2(c.x + 3.5, c.y), pos2(c.x, c.y + 3.5), pos2(c.x - 3.5, c.y)];
         painter.add(egui::Shape::convex_polygon(pts, p.input, Stroke::NONE));
+    }
+
+    // Alternatives: two small tabs at the bottom right; a calculation method: "≈", amber where
+    // the choice changes a result materially (and those results get an amber underline).
+    if !l.variants.is_empty() {
+        for c in st.overlay.comparisons(d, &l) {
+            if c.place.sheet != si {
+                continue;
+            }
+            let r = cells.rect(c.place.range);
+            let color = if c.kind == VariantKind::Method && c.material() { p.material } else { p.variant };
+            match c.kind {
+                VariantKind::Alternatives => {
+                    let br = r.right_bottom();
+                    for (i, k) in [(0.0, 0.55), (1.0, 1.0)] {
+                        let x = br.x - 4.0 - (1.0 - i) * 7.0;
+                        let tab = Rect::from_min_max(pos2(x - 5.0, br.y - 7.0), pos2(x, br.y - 2.0));
+                        painter.rect_filled(tab, 1.0, color.gamma_multiply(k));
+                    }
+                }
+                VariantKind::Method => {
+                    painter.text(pos2(r.right() - 3.0, r.bottom() - 1.0), Align2::RIGHT_BOTTOM, "≈", theme::ui_bold(11.0), color);
+                    for row in c.rows.iter().filter(|x| x.material && x.key.0 == si && !c.place.range.contains(x.key.1)) {
+                        let o = cells.rect(RangeRef::cell(row.key.1));
+                        let y = o.bottom() - 1.5;
+                        let mut x = o.left() + 2.0;
+                        while x < o.right() - 2.0 {
+                            painter.line_segment([pos2(x, y), pos2((x + 3.0).min(o.right() - 2.0), y)], Stroke::new(1.5, p.material));
+                            x += 5.0;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Ranges used on slides: an outline and "▸ 2 slides".
+    if !l.uses.is_empty() {
+        let mut by_range: Vec<(RangeRef, usize)> = vec![];
+        for (pl, _) in links::uses_at(&d.wb, &l, si, None).into_iter().filter(|(pl, _)| pl.sheet == si) {
+            match by_range.iter_mut().find(|(r, _)| *r == pl.range) {
+                Some((_, n)) => *n += 1,
+                None => by_range.push((pl.range, 1)),
+            }
+        }
+        for (range, n) in by_range {
+            let r = cells.rect(range);
+            painter.rect_stroke(r, 0.0, Stroke::new(1.2, p.slide.gamma_multiply(0.8)), StrokeKind::Inside);
+            let text = format!("▸ {n} slide{}", if n == 1 { "" } else { "s" });
+            let galley = painter.layout_no_wrap(text, theme::ui_bold(9.0), Color32::WHITE);
+            // Beside the range, so it never covers a cell's text.
+            let pill = Rect::from_min_size(pos2(r.right() + 4.0, r.top() + 2.0), galley.size() + vec2(8.0, 2.0));
+            painter.rect_filled(pill, 4.0, p.slide);
+            painter.galley(pill.min + vec2(4.0, 1.0), galley, Color32::WHITE);
+        }
     }
 
     // Notes: a triangle in the top-left corner (Excel's comments use the top right).
@@ -215,9 +304,10 @@ fn hover(st: &mut AgentUi, app: &SheetApp, ui: &Ui, d: &DocState, l: &Layer, cel
     let questions: Vec<_> = l.questions.iter().filter(|q| here(&q.anchor)).collect();
     let private = l.private.iter().any(|id| here(id));
     let input = l.inputs.iter().find(|i| here(&i.anchor));
+    let slides: Vec<_> = links::uses_at(&d.wb, l, si, Some(&RangeRef::cell(c))).into_iter().map(|(_, u)| u).collect();
     let sens = if is_formula_number(d, si, c) { Some(st.overlay.sensitivity(d, l, si, c)) } else { None };
     let sens = sens.filter(|s| !s.swings.is_empty());
-    if notes.is_empty() && questions.is_empty() && !private && input.is_none() && sens.is_none() {
+    if notes.is_empty() && questions.is_empty() && !private && input.is_none() && sens.is_none() && slides.is_empty() {
         return;
     }
     let pos = pointer + vec2(18.0, 18.0);
@@ -228,6 +318,14 @@ fn hover(st: &mut AgentUi, app: &SheetApp, ui: &Ui, d: &DocState, l: &Layer, cel
                 ui.set_max_width(320.0);
                 if private {
                     ui.label(egui::RichText::new("Client data · the agent sees stand-in values").color(p.private).small().strong());
+                }
+                if !slides.is_empty() {
+                    ui.label(egui::RichText::new("Used on slides").color(p.slide).small().strong());
+                    for u in slides.iter().take(4) {
+                        let title = if u.slide_title.is_empty() { String::new() } else { format!(" · {}", u.slide_title) };
+                        ui.label(egui::RichText::new(format!("{} · slide {}{title}", u.deck_title, u.slide)).small());
+                    }
+                    ui.add_space(4.0);
                 }
                 for q in questions.iter().take(2) {
                     let (status, color) = match q.status {

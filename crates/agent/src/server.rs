@@ -1,7 +1,9 @@
 //! The in-app agent server: HTTP on 127.0.0.1, started by the app itself, so connecting an agent
 //! is one line of MCP config (`http://127.0.0.1:7980/mcp`) and no extra process.
 //!
-//! - `POST /mcp` — MCP over Streamable HTTP (JSON responses; no server-initiated stream).
+//! - `POST /mcp` — MCP over Streamable HTTP (JSON responses).
+//! - `GET /mcp` — the server-initiated stream (SSE): in "my session" mode each new question as a
+//!   `notifications/claude/channel` event (Claude Code Channels).
 //! - `GET /events` — one JSON line per new question, kept open: what an agent's background
 //!   monitor watches (`curl -sN http://127.0.0.1:7980/events`).
 //! - `GET /health` — `ok`.
@@ -111,7 +113,10 @@ fn serve(stream: TcpStream, control: &str) {
         }
         let result = match (req.method.as_str(), req.path.as_str()) {
             ("POST", "/mcp") => post_mcp(&mut w, &req, control, &mut backend),
-            ("GET", "/mcp") => respond(&mut w, "405 Method Not Allowed", "text/plain", b"POST JSON-RPC messages here"),
+            ("GET", "/mcp") => {
+                channel_stream(w, control);
+                return;
+            }
             ("DELETE", "/mcp") => respond(&mut w, "200 OK", "text/plain", b""),
             ("GET", "/events") => {
                 events(w, control);
@@ -127,7 +132,7 @@ fn serve(stream: TcpStream, control: &str) {
     }
 }
 
-const HELP: &str = "GridCraft agent layer\n\nPOST /mcp     MCP (Streamable HTTP)\nGET  /events  one JSON line per new question (for a background monitor)\nGET  /health  ok\n";
+const HELP: &str = "GridCraft agent layer\n\nPOST /mcp     MCP (Streamable HTTP)\nGET  /mcp     questions as channel events (SSE, in \"my session\" mode)\nGET  /events  one JSON line per new question (for a background monitor)\nGET  /health  ok\n";
 
 fn backend<'a>(slot: &'a mut Option<Remote>, control: &str) -> Result<&'a mut Remote, String> {
     if slot.is_none() {
@@ -158,6 +163,51 @@ fn handle_any(b: &mut dyn Backend, msg: &Value) -> Option<Value> {
             (!out.is_empty()).then_some(Value::Array(out))
         }
         m => crate::mcp::handle(b, m),
+    }
+}
+
+/// The `GET /mcp` stream: in "my session" mode, each new pending question as a channel event.
+/// Questions that wait while the mode is off are sent when it is switched on.
+fn channel_stream(mut w: TcpStream, control: &str) {
+    if w.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n: connected\n\n")
+        .is_err()
+    {
+        return;
+    }
+    let _ = w.flush();
+    let mut seen: HashSet<String> = HashSet::new();
+    let mut slot: Option<Remote> = None;
+    let mut quiet = 0u32;
+    loop {
+        if crate::runner::mode() == crate::runner::Mode::Channel
+            && let Ok(b) = backend(&mut slot, control)
+        {
+            match b.call("engine.execute", json!({"command": "agent.questions", "params": {"status": "pending", "actor": "agent", "masked": true}})) {
+                Ok(Value::Array(list)) => {
+                    for q in list {
+                        let Some(id) = q.get("id").and_then(Value::as_str).map(str::to_string) else { continue };
+                        if !seen.insert(id) {
+                            continue;
+                        }
+                        let event = format!("event: message\ndata: {}\n\n", crate::channel::notification(&q));
+                        if w.write_all(event.as_bytes()).and_then(|()| w.flush()).is_err() {
+                            return;
+                        }
+                    }
+                }
+                Ok(_) => {}
+                Err(_) => slot = None,
+            }
+        }
+        std::thread::sleep(Duration::from_millis(800));
+        quiet += 1;
+        // A comment now and then: notices a client that went away.
+        if quiet >= 20 {
+            quiet = 0;
+            if w.write_all(b": ping\n\n").and_then(|()| w.flush()).is_err() {
+                return;
+            }
+        }
     }
 }
 

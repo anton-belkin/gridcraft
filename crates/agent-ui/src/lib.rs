@@ -36,8 +36,16 @@ pub fn set_server_url(url: String) {
 }
 
 static REQUEST: std::sync::Mutex<Option<(bool, String, String)>> = std::sync::Mutex::new(None);
+static GOTO: std::sync::Mutex<Option<(String, u32)>> = std::sync::Mutex::new(None);
 
-/// Opens (or closes) the Agent pane on a tab (`cell`, `questions`, `notes`, `history`,
+/// Selects a defined name or a place (`Sheet1!B5`) once a workbook is open (`--goto`).
+pub fn set_goto(target: String) {
+    if let Ok(mut g) = GOTO.lock() {
+        *g = Some((target, 0));
+    }
+}
+
+/// Opens (or closes) the Agent pane on a tab (`cell`, `questions`, `notes`, `variants`, `risk`, `history`,
 /// `connect`) with a heat map (`off`, `confidence`, `impact`), from the next frame.
 pub fn request_pane(open: bool, tab: &str, heat: &str) {
     if let Ok(mut r) = REQUEST.lock() {
@@ -55,6 +63,8 @@ pub(crate) enum Tab {
     Cell,
     Questions,
     Notes,
+    Variants,
+    Risk,
     History,
     Connect,
 }
@@ -92,6 +102,12 @@ pub(crate) struct Palette {
     pub input: Color32,
     pub agent: Color32,
     pub person: Color32,
+    /// Alternatives and calculation methods.
+    pub variant: Color32,
+    /// Ranges linked to slides.
+    pub slide: Color32,
+    /// A choice that changes the result materially.
+    pub material: Color32,
 }
 
 pub(crate) fn palette(t: &Tokens) -> Palette {
@@ -105,6 +121,9 @@ pub(crate) fn palette(t: &Tokens) -> Palette {
         input: Color32::from_rgb(0xD9, 0x5D, 0x1E),
         agent: Color32::from_rgb(0x7B, 0x4F, 0xD6),
         person: t.accent,
+        variant: Color32::from_rgb(0x0E, 0x8C, 0x8C),
+        slide: Color32::from_rgb(0xC2, 0x41, 0x0C),
+        material: Color32::from_rgb(0xD9, 0x6A, 0x00),
     }
 }
 
@@ -128,6 +147,15 @@ pub(crate) fn fmt_num(v: f64) -> String {
         format!("{v:.3}")
     };
     s.replace(".00bn", "bn").replace(".00M", "M").replace(".0k", "k")
+}
+
+/// A value as the cell at `k` would show it (its number format), else [`fmt_num`].
+pub(crate) fn fmt_at(wb: &gridcraft_engine::model::Workbook, k: (usize, gridcraft_engine::core::CellRef), v: f64) -> String {
+    let code = wb.sheet(k.0).map(|sh| wb.styles.get(sh.style_id(k.1)).num_fmt.as_str().to_string()).unwrap_or_default();
+    if code.is_empty() || code.eq_ignore_ascii_case("general") || !v.is_finite() {
+        return fmt_num(v);
+    }
+    gridcraft_engine::display::format(&gridcraft_engine::core::Value::Number(v), &code, wb).text
 }
 
 /// Follows a link: `cell:Sheet1!B5` selects it, `note:n3` shows the note, a URL opens.
@@ -164,6 +192,8 @@ impl UiExtension for AgentUi {
             self.tab = match tab.as_str() {
                 "questions" => Tab::Questions,
                 "notes" => Tab::Notes,
+                "variants" => Tab::Variants,
+                "risk" => Tab::Risk,
                 "history" => Tab::History,
                 "connect" => Tab::Connect,
                 _ => Tab::Cell,
@@ -176,6 +206,34 @@ impl UiExtension for AgentUi {
             self.pane.trace_open = true;
         }
         self.launcher(app, ctx);
+        // Copy Link to Cells: Cmd+Alt+C (Ctrl+Alt+C), not while typing in a cell.
+        if app.editor.is_none()
+            && !ctx.egui_wants_keyboard_input()
+            && ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND | egui::Modifiers::ALT, egui::Key::C))
+        {
+            app.copy_to_clipboard(ctx, "link.copy");
+        }
+        // `--goto` once the workbook is open (a few frames at most).
+        if let Ok(mut g) = GOTO.lock()
+            && let Some((target, tries)) = g.as_mut()
+        {
+            *tries += 1;
+            let done = app.session.active().is_some() && gridcraft_agent::links::goto(&mut app.session, target).is_ok();
+            if done || *tries > 300 {
+                *g = None;
+            }
+        }
+        // The background agent: start it on a new question, feed it the questions.
+        #[cfg(not(target_arch = "wasm32"))]
+        if gridcraft_agent::runner::mode() == gridcraft_agent::runner::Mode::Background {
+            gridcraft_agent::runner::tick(&mut app.session);
+            ctx.request_repaint_after(std::time::Duration::from_millis(700));
+        }
+        // A slide asked to see its cells: scroll there and come to the front.
+        if gridcraft_agent::links::take_revealed() {
+            app.grid.ensure_visible = true;
+            ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
+        }
     }
 
     fn side_panel(&mut self, app: &mut SheetApp, ui: &mut Ui) {
@@ -202,6 +260,11 @@ impl UiExtension for AgentUi {
             self.open = true;
             self.tab = Tab::Cell;
             self.pane.trace_open = true;
+            return true;
+        }
+        if item(ui, "Copy Link to Cells") {
+            let ctx = ui.ctx().clone();
+            app.copy_to_clipboard(&ctx, "link.copy");
             return true;
         }
         let private = app.session.active().is_some_and(|d| {

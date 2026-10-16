@@ -57,7 +57,7 @@ pub fn parse_place(wb: &Workbook, text: &str, default_sheet: usize) -> Option<Pl
     Some(Place { sheet, sheet_name, range })
 }
 
-fn absolute(r: RangeRef) -> String {
+pub(crate) fn absolute(r: RangeRef) -> String {
     let cell = |c: gridcraft_engine::core::CellRef| {
         let a = c.a1();
         let split = a.find(|ch: char| ch.is_ascii_digit()).unwrap_or(a.len());
@@ -101,7 +101,7 @@ pub fn anchor_at(s: &mut Session, place: &Place) -> gridcraft_engine::Result<Str
     Ok(id)
 }
 
-fn add_name(wb: &mut Workbook, name: &str, place: &Place) {
+pub(crate) fn add_name(wb: &mut Workbook, name: &str, place: &Place) {
     wb.names.retain(|n| n.name != name);
     wb.names.push(DefinedName {
         name: name.to_string(),

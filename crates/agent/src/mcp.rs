@@ -14,10 +14,16 @@ The user reviews and signs off on this workbook; your job is to make that fast. 
 investigate with get_context / read_range / trace_number / sensitivity, then answer_question with links to the cells and \
 sources you used (href \"cell:Sheet1!B5\", \"note:n3\" or https URLs). Leave prepared explanations with add_note, \
 mark inputs with reasoned ranges (set_input_range), say how sure you are (set_confidence) and log decisions (log_decision). \
+When the model rests on a choice, put both sides in the document (add_alternatives) instead of picking one; when a readable \
+formula approximates, add the exact one beside it (add_calculation_method) and say where the difference matters. Use \
+worst_case and risk_matrix to find what to check first. \
 Change the workbook only with run_command, giving a reason and a source. PRIVACY: ranges listed in get_context.privateRanges \
 hold client data; you see stand-in values with the same sign and magnitude, and everything computed from them is computed \
 from the stand-ins. Never present those numbers as real; reason about the model's mechanics instead. You cannot write to \
-private cells.";
+private cells. \
+CHANNEL: when GridCraft sends questions to this session, each arrives as <channel source=\"gridcraft\" question_id=\"q3\" \
+range=\"Sheet1!B7\">question text</channel>: claim_question with that id, investigate, answer_question. Keep it short; \
+the user is waiting in the spreadsheet.";
 
 fn tool(name: &str, desc: &str, props: Value, required: &[&str], read_only: bool) -> Value {
     json!({
@@ -125,6 +131,54 @@ pub fn tools() -> Vec<Value> {
             &["text"],
             false,
         ),
+        tool(
+            "add_alternatives",
+            "Put \"A or B?\" into the document: alternative values or formulas for a range (two growth assumptions, two cost formulas). The range's present contents stay as an option (\"As built\" unless you name it with `current`). The reader switches in the Agent pane and sees the model recalculate. Not allowed on private ranges.",
+            json!({
+                "range": s("Range, e.g. \"Model!C4\" or \"C4:C8\""),
+                "title": s("What the choice is about, e.g. \"Growth assumption\""),
+                "options": {"type": "array", "description": "1-8 options: {name, values, note?}. values: one value for every cell, a flat list for a single row/column, or rows of values; strings starting with = are formulas, \"5%\" is 0.05.", "items": {"type": "object", "properties": {"name": {"type": "string"}, "values": {}, "note": {"type": "string"}}, "required": ["name", "values"]}},
+                "current": s("Name for the range's present contents (default \"As built\")"),
+                "outputs": {"type": "array", "items": {"type": "string"}, "description": "Cells to compare the options on (default: the final outputs the choice moves most)"},
+            }),
+            &["range", "options"],
+            false,
+        ),
+        tool(
+            "add_calculation_method",
+            "Give a cell a second calculation method side by side: the simple, readable formula (default: the cell's own) and an exact one. compare_alternatives then shows the relative difference on the outputs and flags where it is material (above `threshold`).",
+            json!({"cell": s("Cell"), "exact": s("The exact formula, e.g. \"=XNPV(…)\""), "simple": s("The readable formula (default: the cell's)"), "threshold": n("Relative difference on an output that matters (default 0.01 = 1%)"), "note": s("Why the exact method differs"), "title": s("Short title"), "outputs": {"type": "array", "items": {"type": "string"}}}),
+            &["cell", "exact"],
+            false,
+        ),
+        tool(
+            "compare_alternatives",
+            "Every set of alternatives and calculation methods (or one, by id) evaluated on a copy of the model: the current option and the outputs' values under each option, with material differences flagged. Deterministic.",
+            json!({"id": s("Set id (default: all)")}),
+            &[],
+            true,
+        ),
+        tool(
+            "use_alternative",
+            "Switch a range to one of its alternatives (an ordinary, undoable edit, logged as yours).",
+            json!({"id": s("Set id"), "option": s("Option name (or index)")}),
+            &["id", "option"],
+            false,
+        ),
+        tool(
+            "worst_case",
+            "Move several inputs together (3-12, each inside its reasoned range from set_input_range) and find the lowest and highest value of an output, with where each input sits there. Deterministic, bounded search (all corners when few enough, points inside, coordinate refinement) on a copy of the model. oneAtATime shows what the single moves add up to: the gap is the inputs' interaction.",
+            json!({"cell": s("Output cell"), "inputs": {"type": "array", "items": {"type": "string"}, "description": "Input cells (default: the marked inputs it depends on)"}, "maxEvals": n("Most model evaluations (default 3000, max 20000)")}),
+            &["cell"],
+            true,
+        ),
+        tool(
+            "risk_matrix",
+            "The inputs of an output on a confidence × impact matrix: how far each moves the output over its range, against your set_confidence level. Ranked by impact × (1 − confidence); \"check first\" = high impact, low confidence.",
+            json!({"cell": s("Output cell")}),
+            &["cell"],
+            true,
+        ),
         tool("get_layer", "The whole agent layer: anchors, questions, notes, inputs, private ranges, confidence, history.", json!({}), &[], true),
         tool(
             "run_command",
@@ -187,6 +241,12 @@ pub fn call(b: &mut dyn Backend, name: &str, args: &Value) -> Result<Value, Stri
         "set_confidence" => exec(b, "agent.confidence", pick(args, &["range", "level", "reason"])),
         "log_decision" => exec(b, "agent.decision", pick(args, &["text", "range", "source"])),
         "get_layer" => exec(b, "agent.layer", json!({})),
+        "add_alternatives" => exec(b, "agent.variants", pick(args, &["range", "title", "options", "current", "outputs"])),
+        "add_calculation_method" => exec(b, "agent.method", pick(args, &["cell", "exact", "simple", "threshold", "note", "title", "outputs"])),
+        "compare_alternatives" => exec(b, "agent.compareVariants", pick(args, &["id"])),
+        "worst_case" => exec(b, "agent.stress", pick(args, &["cell", "inputs", "maxEvals"])),
+        "risk_matrix" => exec(b, "agent.risk", pick(args, &["cell"])),
+        "use_alternative" => exec(b, "agent.useVariant", pick(args, &["id", "option"])),
         "run_command" => exec(b, "agent.exec", pick(args, &["command", "params", "reason", "source"])),
         "list_commands" => {
             let all = b.call("engine.commands", json!({}))?;
@@ -226,7 +286,8 @@ pub fn handle(b: &mut dyn Backend, msg: &Value) -> Option<Value> {
             let version = if SUPPORTED.contains(&asked) { asked } else { PROTOCOL_VERSION };
             ok(json!({
                 "protocolVersion": version,
-                "capabilities": {"tools": {"listChanged": false}},
+                // A channel too: in "my session" mode new questions arrive as channel events.
+                "capabilities": {"tools": {"listChanged": false}, "experimental": {"claude/channel": {}}},
                 "serverInfo": {"name": "gridcraft-agent", "title": "GridCraft agent layer", "version": env!("CARGO_PKG_VERSION")},
                 "instructions": INSTRUCTIONS,
             }))
