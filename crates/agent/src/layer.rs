@@ -222,6 +222,29 @@ pub struct SafeFile {
     pub sealed: Option<Sealed>,
 }
 
+/// One place a linked range of this workbook is used (a slide of a deck), as DeckCraft reports it
+/// (`agent-layer` links contract, §5).
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct LinkUse {
+    pub link: String,
+    pub at: u64,
+    pub app: String,
+    pub workbook: String,
+    pub workbook_id: String,
+    /// The `_GcLink_` name of the range.
+    pub anchor: String,
+    pub sheet: String,
+    pub range: String,
+    pub deck: String,
+    pub deck_title: String,
+    pub slide: u32,
+    pub slide_title: String,
+    pub shape: u64,
+    pub shape_key: String,
+    pub mode: String,
+}
+
 /// Most log entries kept (oldest dropped first).
 pub const MAX_LOG: usize = 5_000;
 
@@ -250,6 +273,15 @@ pub struct Layer {
     pub variants: Vec<VariantSet>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub safe: Option<SafeFile>,
+    /// The workbook's own id, made the first time it is a linked source (survives Save As and moves).
+    #[serde(default, skip_serializing_if = "String::is_empty", rename = "workbookId")]
+    pub workbook_id: String,
+    /// Ranges copied as linked sources: `_GcLink_` names (never cleaned up: other files use them).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub links: Vec<Anchor>,
+    /// Where those ranges are used (decks and slides).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub uses: Vec<LinkUse>,
     /// Bumped on every change (not saved meaningfully; lets views cache).
     #[serde(skip)]
     pub revision: u64,
@@ -275,7 +307,7 @@ impl Layer {
     }
 
     pub fn is_empty(&self) -> bool {
-        self.anchors.is_empty() && self.log.is_empty() && self.safe.is_none()
+        self.anchors.is_empty() && self.log.is_empty() && self.safe.is_none() && self.workbook_id.is_empty() && self.links.is_empty()
     }
 
     /// Anchors nothing refers to any more.

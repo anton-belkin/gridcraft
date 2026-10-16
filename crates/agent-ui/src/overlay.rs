@@ -6,6 +6,7 @@ use egui::{Align2, Color32, Painter, Rect, Stroke, StrokeKind, Ui, pos2, vec2};
 use gridcraft_agent::analysis::{self, Swing};
 use gridcraft_agent::anchor;
 use gridcraft_agent::layer::{self, Layer, QuestionStatus, VariantKind};
+use gridcraft_agent::links;
 use gridcraft_agent::stress::{self, Stress};
 use gridcraft_agent::variants::{self, Comparison};
 use gridcraft_engine::DocState;
@@ -187,6 +188,27 @@ pub(crate) fn paint(st: &mut AgentUi, app: &SheetApp, ui: &Ui, painter: &Painter
         }
     }
 
+    // Ranges used on slides: an outline and "▸ 2 slides".
+    if !l.uses.is_empty() {
+        let mut by_range: Vec<(RangeRef, usize)> = vec![];
+        for (pl, _) in links::uses_at(&d.wb, &l, si, None).into_iter().filter(|(pl, _)| pl.sheet == si) {
+            match by_range.iter_mut().find(|(r, _)| *r == pl.range) {
+                Some((_, n)) => *n += 1,
+                None => by_range.push((pl.range, 1)),
+            }
+        }
+        for (range, n) in by_range {
+            let r = cells.rect(range);
+            painter.rect_stroke(r, 0.0, Stroke::new(1.2, p.slide.gamma_multiply(0.8)), StrokeKind::Inside);
+            let text = format!("▸ {n} slide{}", if n == 1 { "" } else { "s" });
+            let galley = painter.layout_no_wrap(text, theme::ui_bold(9.0), Color32::WHITE);
+            // Beside the range, so it never covers a cell's text.
+            let pill = Rect::from_min_size(pos2(r.right() + 4.0, r.top() + 2.0), galley.size() + vec2(8.0, 2.0));
+            painter.rect_filled(pill, 4.0, p.slide);
+            painter.galley(pill.min + vec2(4.0, 1.0), galley, Color32::WHITE);
+        }
+    }
+
     // Notes: a triangle in the top-left corner (Excel's comments use the top right).
     for n in &l.notes {
         let Some(pl) = on_sheet(&n.anchor) else { continue };
@@ -282,9 +304,10 @@ fn hover(st: &mut AgentUi, app: &SheetApp, ui: &Ui, d: &DocState, l: &Layer, cel
     let questions: Vec<_> = l.questions.iter().filter(|q| here(&q.anchor)).collect();
     let private = l.private.iter().any(|id| here(id));
     let input = l.inputs.iter().find(|i| here(&i.anchor));
+    let slides: Vec<_> = links::uses_at(&d.wb, l, si, Some(&RangeRef::cell(c))).into_iter().map(|(_, u)| u).collect();
     let sens = if is_formula_number(d, si, c) { Some(st.overlay.sensitivity(d, l, si, c)) } else { None };
     let sens = sens.filter(|s| !s.swings.is_empty());
-    if notes.is_empty() && questions.is_empty() && !private && input.is_none() && sens.is_none() {
+    if notes.is_empty() && questions.is_empty() && !private && input.is_none() && sens.is_none() && slides.is_empty() {
         return;
     }
     let pos = pointer + vec2(18.0, 18.0);
@@ -295,6 +318,14 @@ fn hover(st: &mut AgentUi, app: &SheetApp, ui: &Ui, d: &DocState, l: &Layer, cel
                 ui.set_max_width(320.0);
                 if private {
                     ui.label(egui::RichText::new("Client data · the agent sees stand-in values").color(p.private).small().strong());
+                }
+                if !slides.is_empty() {
+                    ui.label(egui::RichText::new("Used on slides").color(p.slide).small().strong());
+                    for u in slides.iter().take(4) {
+                        let title = if u.slide_title.is_empty() { String::new() } else { format!(" · {}", u.slide_title) };
+                        ui.label(egui::RichText::new(format!("{} · slide {}{title}", u.deck_title, u.slide)).small());
+                    }
+                    ui.add_space(4.0);
                 }
                 for q in questions.iter().take(2) {
                     let (status, color) = match q.status {

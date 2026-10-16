@@ -20,6 +20,7 @@ pub mod analysis;
 pub mod anchor;
 pub mod commands;
 pub mod layer;
+pub mod links;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod mcp;
 pub mod safe;
@@ -78,6 +79,7 @@ fn is_view_only(id: &str) -> bool {
         || id.starts_with("file.")
         || id.starts_with("sheet.activate")
         || id.starts_with("ui.")
+        || id.starts_with("link.")
         || id == "edit.copy"
 }
 
@@ -111,8 +113,15 @@ impl Observer for Keeper {
         {
             log::warn!("safe file: {e}; the client data stays locked (stand-ins)");
         }
+        if id == "file.open"
+            && result.is_ok()
+            && let Some(d) = s.active()
+        {
+            links::load_registry(d);
+        }
         let Some(d) = s.active_mut() else { return };
         anchor::refresh(d);
+        links::refresh(d);
         let changed = result.is_ok() && before.is_some_and(|(uid, ptr)| uid == d.uid && ptr != Arc::as_ptr(&d.wb) as usize);
         let quiet = commands::QUIET.with(std::cell::Cell::get) > 0;
         if !changed || quiet || is_view_only(id) || id == "edit.undo" || id == "edit.redo" {

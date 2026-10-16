@@ -46,3 +46,10 @@ snap --in "$out/demo.xlsx" --cmd "$(sel B18)" --pane risk "$out/4-risk.png"
 export GRIDCRAFT_AGENT_KEYS="$out-keys"
 snap --in "$out/demo.xlsx" --cmd 'agent.safeMode={}' --cmd "file.saveAs={\"path\":\"$out/safe.xlsx\"}" --cmd "$(sel B3)" --pane cell "$out/5-safe-on.png"
 GRIDCRAFT_AGENT_KEYS="$out-elsewhere" snap --in "$out/safe.xlsx" --cmd "$(sel B3)" --pane cell "$out/5-safe-elsewhere.png"
+# Excel → slide links: copy a range as a linked source, then a use as DeckCraft reports it.
+unset GRIDCRAFT_AGENT_KEYS
+snap --in "$out/demo.xlsx" --cmd 'link.copy={"range":"A15:B18"}' --cmd 'file.save={}' "$out/.links.png"
+anchor=$(python3 -c "import zipfile,re,sys; print(re.search(r'name=\"(_GcLink_l\d+)\"', zipfile.ZipFile(sys.argv[1]).read('xl/workbook.xml').decode()).group(1))" "$out/demo.xlsx")
+use="{\"uses\":[{\"event\":\"use\",\"at\":1,\"app\":\"DeckCraft\",\"link\":\"l18f\",\"workbook\":\"$out/demo.xlsx\",\"anchor\":\"$anchor\",\"sheet\":\"Sheet1\",\"range\":\"A15:B18\",\"deck\":\"$out/board.pptx\",\"deckTitle\":\"Board update Q3\",\"slide\":3,\"slideTitle\":\"Revenue and EBITDA\",\"shapeKey\":\"k4f2a9\",\"mode\":\"table\"}]}"
+snap --in "$out/demo.xlsx" --cmd "link.addUses=$use" --cmd "$(sel B17)" --pane cell --hover B18 "$out/6-linked-slides.png"
+rm -f "$out/.links.png"

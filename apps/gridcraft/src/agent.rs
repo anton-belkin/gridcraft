@@ -1,7 +1,8 @@
 //! fork:agent — starts the agent layer: the `agent.*` commands, the Agent pane and the in-app MCP
 //! server (`http://127.0.0.1:7980/mcp`), which reaches the document through the control channel.
 //!
-//! `--agent-port <port>` (or `GRIDCRAFT_AGENT_PORT`) picks the port, `--no-agent` turns it off.
+//! `--agent-port <port>` (or `GRIDCRAFT_AGENT_PORT`) picks the port, `--no-agent` turns it off,
+//! `--goto <name | Sheet!A1>` selects a place once the workbook is open.
 //! With the agent on, the control channel starts too (on 7979 unless `--control` says otherwise).
 
 /// Default port of the agent server.
@@ -18,6 +19,12 @@ pub fn take_args(args: Vec<String>) -> (Vec<String>, Option<u16>) {
         match a.as_str() {
             "--agent-port" => port = it.next().and_then(|p| p.parse().ok()),
             "--no-agent" => port = None,
+            // Open the workbook at a defined name or a place (a slide's "Open source").
+            "--goto" => {
+                if let Some(t) = it.next() {
+                    gridcraft_agent_ui::set_goto(t);
+                }
+            }
             _ => rest.push(a),
         }
     }

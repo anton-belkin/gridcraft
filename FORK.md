@@ -13,9 +13,9 @@ before changing anything outside the agent crates.
 
 | Path | What | Upstream? |
 | --- | --- | --- |
-| `crates/agent/` (`gridcraft-agent`) | The layer: data model, anchors, storage in the `.xlsx`, `agent.*` commands, privacy masking, trace, sensitivity, alternatives and calculation methods (`variants.rs`), worst and best combinations and the risk matrix (`stress.rs`), safe file mode (`safe.rs`), the in-app MCP server | fork only |
+| `crates/agent/` (`gridcraft-agent`) | The layer: data model, anchors, storage in the `.xlsx`, `agent.*` commands, privacy masking, trace, sensitivity, alternatives and calculation methods (`variants.rs`), worst and best combinations and the risk matrix (`stress.rs`), safe file mode (`safe.rs`), Excel → slide links (`links.rs`), the in-app MCP server | fork only |
 | `crates/agent-ui/` (`gridcraft-agent-ui`) | The Agent pane, cell badges, heat maps, hover card with the tornado chart, context-menu items; `examples/agent_snapshot.rs` renders it offscreen | fork only |
-| `apps/gridcraft/src/agent.rs` | Starts the layer in the desktop app (`--agent-port`, `--no-agent`) | fork only |
+| `apps/gridcraft/src/agent.rs` | Starts the layer in the desktop app (`--agent-port`, `--no-agent`, `--goto`) | fork only |
 | `agent-layer/` | The agent's skill, the rebase script | fork only |
 | `crates/engine/src/ext.rs` | **Hook**: extension commands and command observers | new file in an upstream crate |
 | `crates/ui-egui/src/ext.rs` | **Hook**: UI extensions (side panel, cell painting, context menu, per-frame) | new file in an upstream crate |
@@ -85,6 +85,16 @@ upstream. Each one accepted upstream removes its lines from the patch.
   exact) and a threshold: the difference is shown on the furthest results downstream and flagged
   where it is material. Comparing evaluates every option on a scratch copy. Alternatives are
   refused on private ranges: they would keep real values in the layer, which the agent can read.
+- **Excel → slide links** follow the contract DeckCraft keeps in `agent-layer/links.md` (the
+  ArtCraft links contract v1). `link.copy` (context menu "Copy Link to Cells", ⌘⌥C, a button in
+  the Cell tab) anchors the range with a hidden name `_GcLink_<id>` (moved with rows and columns
+  like the agent's anchors, never cleaned up, put back if an undo takes it), gives the workbook a
+  stable `workbookId` in the layer, and puts a plain table on the clipboard whose
+  `data-artcraft-link` attribute carries the payload (values, displayed text, source). DeckCraft
+  asks a running GridCraft for fresh values with `link.read` (control channel), reports uses with
+  `link.addUses` and the registry file `ArtCraft/links.jsonl` (read when a workbook opens), and
+  opens the source with `link.reveal` or `gridcraft <file> --goto <name>`. The uses are kept in the
+  layer, so "▸ 2 slides" and Go to Slide travel with the workbook.
 - **Analysis is deterministic.** The trace and the sensitivity are computed by the engine (the
   dependency graph, recalculation of a scratch copy). The agent explains them; it doesn't make them up.
 - **Several inputs at once, bounded.** The worst and best combination moves 3–12 inputs inside
@@ -142,8 +152,9 @@ calculation methods side by side (simple vs exact, material differences flagged 
 multi-dimensional analysis (the worst and best combination of an output's inputs, against the
 single moves added up); the risk matrix (each input's impact on an output against the agent's
 confidence in it, Risk tab); safe file mode (client data saved as stand-ins, real values sealed
-under a key kept on this computer; export for standard Excel). `agent-layer/demo/build-demo.sh`
+under a key kept on this computer; export for standard Excel); GridCraft's side of Excel → slide
+links (copy as linked source, `link.read`, "used on slides" with Go to Slide, `--goto`). `agent-layer/demo/build-demo.sh`
 builds a demo workbook with all of it and renders each feature.
 
-Next: export to a self-contained web page (WASM, prepared answers only), then WordCraft and
-DeckCraft (Excel → slide links with a back-reference in the workbook), built the same way.
+Next: export to a self-contained web page (WASM, prepared answers only); WordCraft and DeckCraft
+are built the same way in their own forks.

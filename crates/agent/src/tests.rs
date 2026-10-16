@@ -494,3 +494,132 @@ fn sealed_data_refuses_a_wrong_key_or_a_change() {
     sealed.data = gridcraft_engine::io::base64_encode(&data);
     assert!(crate::safe::open_bytes(&k1, &sealed).is_err());
 }
+
+/// The model saved to a file of its own (a linked source must have one).
+fn saved_model(name: &str) -> (Session, std::path::PathBuf) {
+    let mut s = model();
+    let dir = std::env::temp_dir().join(format!("gridcraft-links-{}-{name}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("q3.xlsx");
+    s.execute("file.saveAs", json!({"path": path.to_str().unwrap()})).unwrap();
+    (s, path)
+}
+
+/// The payload a reader finds in the clipboard HTML (first `data-artcraft-link=`, base64).
+fn payload_of(html: &str) -> Value {
+    let start = html.find("data-artcraft-link=\"").unwrap() + "data-artcraft-link=\"".len();
+    let end = start + html[start..].find('"').unwrap();
+    let bytes = gridcraft_engine::io::base64_decode(&html[start..end]).unwrap();
+    serde_json::from_slice(&bytes).unwrap()
+}
+
+#[test]
+fn link_copy_puts_a_linked_table_on_the_clipboard() {
+    let (mut s, path) = saved_model("copy");
+    s.execute("agent.private", json!({"range": "B3"})).unwrap();
+    let r = s.execute("link.copy", json!({"range": "A2:B4"})).unwrap();
+    let html = r["html"].as_str().unwrap();
+    assert!(html.starts_with("<table data-artcraft-link=\""));
+    assert!(html.contains("<td>Price</td><td>120</td>"));
+    assert_eq!(r["text"], json!("Price\t120\nVolume\t5000\nUnit cost\t70"));
+    let p = payload_of(html);
+    assert_eq!(p["kind"], json!("artcraft.link"));
+    assert_eq!(p["version"], json!(1));
+    assert_eq!(p["source"]["app"], json!("GridCraft"));
+    assert_eq!(p["source"]["path"], json!(std::path::absolute(&path).unwrap().display().to_string()));
+    assert_eq!(p["source"]["sheet"], json!("Sheet1"));
+    assert_eq!(p["source"]["range"], json!("A2:B4"));
+    assert_eq!(p["values"], json!([["Price", 120.0], ["Volume", 5000.0], ["Unit cost", 70.0]]));
+    assert_eq!(p["private"], json!(true));
+    let anchor = p["source"]["anchor"].as_str().unwrap().to_string();
+    assert!(anchor.starts_with("_GcLink_"));
+    let id = p["source"]["workbookId"].as_str().unwrap().to_string();
+    assert_eq!(id.len(), 36);
+    // The same range again: the same name; the name is hidden and survives the agent's clean-up.
+    let again = s.execute("link.copy", json!({"range": "A2:B4"})).unwrap();
+    assert_eq!(again["anchor"], json!(anchor));
+    s.execute("agent.ask", json!({"range": "B7", "text": "?"})).unwrap();
+    s.execute("cell.set", json!({"cell": "B5", "input": 90000})).unwrap();
+    let names = &s.active().unwrap().wb.names;
+    assert!(names.iter().any(|n| n.name == anchor && n.hidden));
+    // The id and the link travel in the file.
+    let b64 = s.execute("file.saveBytes", json!({})).unwrap()["base64"].as_str().unwrap().to_string();
+    let mut t = Session::new();
+    t.execute("file.open", json!({"name": "q3.xlsx", "base64": b64})).unwrap();
+    assert_eq!(layer::get(t.active().unwrap()).workbook_id, id);
+    // Refused: an unsaved workbook, a range a slide can't hold.
+    let mut u = model();
+    assert!(u.execute("link.copy", json!({"range": "A1:B2"})).is_err());
+    assert!(s.execute("link.copy", json!({"range": "A1:BZ10"})).is_err());
+    let _ = std::fs::remove_dir_all(path.parent().unwrap());
+}
+
+#[test]
+fn link_read_follows_rows_and_unsaved_edits() {
+    let (mut s, path) = saved_model("read");
+    let p = payload_of(s.execute("link.copy", json!({"range": "B6:B7"})).unwrap()["html"].as_str().unwrap());
+    let src = p["source"].clone();
+    s.execute("selection.set", json!({"range": "A1"})).unwrap();
+    s.execute("home.insertRows", json!({})).unwrap();
+    s.execute("cell.set", json!({"cell": "B3", "input": 130})).unwrap();
+    let r = s.execute("link.read", src.clone()).unwrap();
+    assert_eq!(r["range"], json!("B7:B8"));
+    assert_eq!(r["values"], json!([[650000.0], [200000.0]]));
+    assert_eq!(r["text"][0][0], json!("650000"));
+    // By path when the id doesn't match; an error when the workbook isn't open here.
+    let mut by_path = src.clone();
+    by_path["workbookId"] = json!("other");
+    assert!(s.execute("link.read", by_path).is_ok());
+    let mut elsewhere = src.clone();
+    elsewhere["workbookId"] = json!("other");
+    elsewhere["path"] = json!("/nowhere/q3.xlsx");
+    assert!(s.execute("link.read", elsewhere).is_err());
+    // An undo past the copy keeps the name.
+    for _ in 0..10 {
+        let _ = s.execute("edit.undo", json!({}));
+    }
+    assert!(s.execute("link.read", src).is_ok());
+    let _ = std::fs::remove_dir_all(path.parent().unwrap());
+}
+
+#[test]
+fn link_uses_and_reveal() {
+    let (mut s, path) = saved_model("uses");
+    let p = payload_of(s.execute("link.copy", json!({"range": "B6"})).unwrap()["html"].as_str().unwrap());
+    let src = p["source"].clone();
+    let deck = path.parent().unwrap().join("board.pptx");
+    std::fs::write(&deck, b"deck").unwrap();
+    let use_line = json!({"event": "use", "at": 1, "app": "DeckCraft", "link": "l18f", "workbook": src["path"], "workbookId": src["workbookId"],
+        "anchor": src["anchor"], "sheet": "Sheet1", "range": "B6", "deck": deck.to_str().unwrap(), "deckTitle": "board", "slide": 3,
+        "slideTitle": "Revenue", "shape": 412, "shapeKey": "k4f2a9", "mode": "table"});
+    assert_eq!(s.execute("link.addUses", json!({"uses": [use_line.clone()]})).unwrap()["added"], json!(1));
+    let uses = s.execute("link.uses", json!({"range": "B6"})).unwrap();
+    assert_eq!(uses[0]["use"]["slide"], json!(3));
+    assert_eq!(uses[0]["range"], json!("Sheet1!B6"));
+    assert!(s.execute("link.uses", json!({"range": "B2"})).unwrap().as_array().unwrap().is_empty());
+    // The registry file brings uses in when the workbook opens (latest line per link, decks that exist).
+    s.execute("file.save", json!({})).unwrap();
+    let registry = path.parent().unwrap().join("links.jsonl");
+    let mut later = use_line.clone();
+    later["at"] = json!(2);
+    later["slide"] = json!(5);
+    let mut gone = use_line.clone();
+    gone["link"] = json!("l2");
+    gone["deck"] = json!("/nowhere/old.pptx");
+    std::fs::write(&registry, format!("{use_line}\n{later}\n{gone}\nnot json\n")).unwrap();
+    crate::links::set_thread_registry(Some(registry));
+    let mut t = Session::new();
+    t.new_workbook();
+    t.execute("file.open", json!({"path": path.to_str().unwrap()})).unwrap();
+    let l = layer::get(t.active().unwrap());
+    assert_eq!(l.uses.len(), 1);
+    assert_eq!(l.uses[0].slide, 5);
+    // Reveal: the right workbook, the linked cell, from another document.
+    t.set_active(0);
+    let r = t.execute("link.reveal", src).unwrap();
+    assert_eq!(r["range"], json!("B6"));
+    assert_eq!(t.active().unwrap().selection.current().a1(), "B6");
+    assert!(crate::links::take_revealed());
+    crate::links::set_thread_registry(None);
+    let _ = std::fs::remove_dir_all(path.parent().unwrap());
+}

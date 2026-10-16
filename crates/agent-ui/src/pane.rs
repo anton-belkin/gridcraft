@@ -25,6 +25,7 @@ pub(crate) struct State {
 enum Act {
     Follow(String),
     Run(&'static str, Json),
+    CopyLink,
 }
 
 pub(crate) fn show(st: &mut AgentUi, app: &mut SheetApp, ui: &mut Ui) {
@@ -84,6 +85,7 @@ pub(crate) fn show(st: &mut AgentUi, app: &mut SheetApp, ui: &mut Ui) {
         match a {
             Act::Follow(href) => follow(st, app, &ctx, &href),
             Act::Run(id, params) => app.run_or_alert(id, params),
+            Act::CopyLink => app.copy_to_clipboard(&ctx, "link.copy"),
         }
     }
 }
@@ -259,6 +261,25 @@ fn cell_tab(st: &mut AgentUi, app: &SheetApp, ui: &mut Ui, l: &Layer, t: &Tokens
         });
     }
 
+    // Slides that use these cells.
+    let slides = gridcraft_agent::links::uses_at(&d.wb, l, si, Some(&sel));
+    if !slides.is_empty() {
+        card(ui, t, p.slide, |ui| {
+            ui.label(
+                RichText::new(format!("Used on {} slide{}", slides.len(), if slides.len() == 1 { "" } else { "s" })).color(p.slide).small().strong(),
+            );
+            for (pl, u) in &slides {
+                ui.horizontal_wrapped(|ui| {
+                    let title = if u.slide_title.is_empty() { String::new() } else { format!(" · {}", u.slide_title) };
+                    ui.label(RichText::new(format!("{} · slide {}{title}", u.deck_title, u.slide)).small());
+                    if ui.small_button("Go to slide").on_hover_text(format!("{} ({}, {})", u.deck, pl.a1(), u.mode)).clicked() {
+                        acts.push(Act::Run("link.gotoSlide", json!({"link": u.link})));
+                    }
+                });
+            }
+        });
+    }
+
     // Alternatives and calculation methods on the selection.
     if l.variants.iter().any(|v| hits(&v.anchor)) {
         for c in st.overlay.comparisons(d, l).iter().filter(|c| c.place.sheet == si && c.place.range.intersects(&sel)) {
@@ -341,6 +362,13 @@ fn cell_tab(st: &mut AgentUi, app: &SheetApp, ui: &mut Ui, l: &Layer, t: &Tokens
         }
     });
     safe_file(ui, d, l, t, p, acts);
+    if ui
+        .button("Copy link to these cells for a slide")
+        .on_hover_text("⌘⌥C · paste it on a DeckCraft slide: the slide stays linked to these cells")
+        .clicked()
+    {
+        acts.push(Act::CopyLink);
+    }
     ui.horizontal_wrapped(|ui| {
         ui.label(RichText::new("Heat map").small());
         for (h, name) in [(Heat::Off, "Off"), (Heat::Confidence, "Confidence"), (Heat::Impact, "Impact on this cell")] {
