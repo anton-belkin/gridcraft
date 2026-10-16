@@ -224,6 +224,9 @@ enum Act {
     /// A step of Get ready.
     #[cfg(not(target_arch = "wasm32"))]
     Step(crate::context::Step),
+    /// Open a topic (the lamp while the agent works on it).
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    Topic(String),
     #[cfg(not(target_arch = "wasm32"))]
     VoiceModel(Option<craft_voice::Model>),
     #[cfg(not(target_arch = "wasm32"))]
@@ -243,7 +246,25 @@ pub(crate) fn show(st: &mut AgentUi, app: &mut SheetApp, ui: &mut Ui) {
     group(ui, "Agent", |ui| {
         let (sub, color, detail) = status(app, &t, &p);
         let tip = format!("Show or hide the Agent pane: topics on the selection, their status, notes and discussion\n\n{detail}");
-        if tall_button(ui, "Agent", Some((&sub, color)), st.open, true, tip.trim_end(), |pa, r, _| sparkle(pa, r, p.agent)).clicked() {
+        #[cfg(not(target_arch = "wasm32"))]
+        let working = app.session.active().is_some_and(|d| crate::context::working(d, gridcraft_agent::now_ms()).is_some());
+        #[cfg(target_arch = "wasm32")]
+        let working = false;
+        let time = ui.input(|i| i.time);
+        let resp = tall_button(ui, "Agent", Some((&sub, color)), st.open, true, tip.trim_end(), |pa, r, _| {
+            sparkle(pa, r, p.agent);
+            // The agent at work: the same small blue pulse as the lamp.
+            if working {
+                let k = ((time * 2.2).sin() * 0.5 + 0.5) as f32;
+                let c = pos2(r.left() + 2.0, r.top() + 3.0);
+                pa.circle_filled(c, 3.0 + 2.5 * k, crate::BLUE.gamma_multiply(0.35 * (1.0 - k) + 0.1));
+                pa.circle_filled(c, 3.0, crate::BLUE);
+            }
+        });
+        if working {
+            ui.ctx().request_repaint_after(std::time::Duration::from_millis(33));
+        }
+        if resp.clicked() {
             acts.push(Act::Pane(!st.open, if ready > 0 || waiting > 0 { Tab::Overview } else { Tab::Selection }));
         }
     });
@@ -394,6 +415,10 @@ pub(crate) fn show(st: &mut AgentUi, app: &mut SheetApp, ui: &mut Ui) {
             Act::CopyLink => app.copy_to_clipboard(&ctx, "link.copy"),
             #[cfg(not(target_arch = "wasm32"))]
             Act::Step(step) => crate::context::run(st, app, &ctx, step),
+            Act::Topic(id) => {
+                crate::open_topic(st, app, &id, None);
+                st.pane.scroll_focus = true;
+            }
             Act::Share(path) => match app.run("agent.exportHtml", json!({"path": path, "includeDiscussion": st.share_discussion})) {
                 Ok(_) => app.toast = Some((format!("Saved {path}"), gridcraft_ui_egui::now_ms())),
                 Err(e) => app.message = Some(("Export Web Page".into(), e)),
@@ -437,6 +462,7 @@ fn context_group(st: &AgentUi, app: &SheetApp, ui: &mut Ui, t: &Tokens, p: &crat
     }
     let Some(v) = crate::context::current(st, app) else { return };
     let lamp = match v.lamp {
+        Lamp::Working => crate::BLUE,
         Lamp::Ready => p.agreed,
         Lamp::Waiting => p.open,
         Lamp::NotReady => t.text_disabled,
@@ -477,7 +503,12 @@ fn context_group(st: &AgentUi, app: &SheetApp, ui: &mut Ui, t: &Tokens, p: &crat
             }
             _ => {}
         }
-        lamp_row(ui, v.lamp.label(), lamp, &v.detail);
+        let working = v.lamp == Lamp::Working;
+        if lamp_row(ui, &v.label, lamp, &v.detail, working).clicked()
+            && let Some(t) = &v.topic
+        {
+            acts.push(Act::Topic(t.clone()));
+        }
         if !v.steps.is_empty() {
             ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = 0.0;
@@ -701,17 +732,37 @@ fn segmented(ui: &mut Ui, items: &[(&str, &str)], on: usize) -> Option<usize> {
     clicked
 }
 
-/// The Ready lamp: a dot and a word, the details on hover.
+/// The Ready lamp: a dot and a word, the details on hover. While the agent works it pulses (the
+/// only thing that repaints for it, at about 30 fps) and a click opens the topic.
 #[cfg(not(target_arch = "wasm32"))]
-fn lamp_row(ui: &mut Ui, text: &str, color: Color32, tip: &str) {
+fn lamp_row(ui: &mut Ui, text: &str, color: Color32, tip: &str, working: bool) -> Response {
     let t = Tokens::get(ui.ctx());
     let font = theme::ui_bold(12.0);
     let w = ui.painter().layout_no_wrap(text.to_string(), font.clone(), t.text).size().x + 22.0;
-    let (rect, resp) = ui.allocate_exact_size(vec2(w, 19.0), Sense::hover());
-    ui.painter().circle_filled(pos2(rect.left() + 9.0, rect.center().y), 4.5, color);
-    ui.painter().text(pos2(rect.left() + 20.0, rect.center().y), Align2::LEFT_CENTER, text, font, t.text);
+    let (rect, resp) = ui.allocate_exact_size(vec2(w, 19.0), if working { Sense::click() } else { Sense::hover() });
+    let c = pos2(rect.left() + 9.0, rect.center().y);
+    if working {
+        if resp.hovered() {
+            ui.painter().rect_filled(rect, 4.0, t.hover);
+        }
+        pulse(ui, c, 4.5, color);
+    } else {
+        ui.painter().circle_filled(c, 4.5, color);
+    }
+    ui.painter().text(pos2(rect.left() + 20.0, rect.center().y), Align2::LEFT_CENTER, text, font, if working { color } else { t.text });
     resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Label, true, text));
-    resp.on_hover_text(tip);
+    resp.on_hover_text(tip)
+}
+
+/// A blue light that breathes: a halo growing and fading around a steady dot. Repaints itself at
+/// about 30 fps while shown.
+#[cfg(not(target_arch = "wasm32"))]
+fn pulse(ui: &Ui, c: egui::Pos2, r: f32, color: Color32) {
+    let time = ui.input(|i| i.time);
+    let k = ((time * 2.2).sin() * 0.5 + 0.5) as f32;
+    ui.painter().circle_filled(c, r + 3.5 * k, color.gamma_multiply(0.35 * (1.0 - k) + 0.1));
+    ui.painter().circle_filled(c, r, color.gamma_multiply(0.75 + 0.25 * k));
+    ui.ctx().request_repaint_after(std::time::Duration::from_millis(33));
 }
 
 /// The ▾ half of a split button.

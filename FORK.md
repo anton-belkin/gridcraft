@@ -169,6 +169,11 @@ upstream. Each one accepted upstream removes its lines from the patch.
   the channel; Project folder chooses a folder (shown beside it; the background client runs
   there and sees its CLAUDE.md, memory and files). Get ready's main click runs the first step not
   done; its menu ticks the done ones.
+  - *Working…* (brief 2026-10-17, outranks the rest): blue and pulsing, never green, while the
+    agent works on this document: a question claimed and not answered (until no agent call for
+    90 s), or a proposal step recorded in the last 10 s (`proposals::building`). One topic:
+    "Working… · topic 3", a click opens it; the tooltip names the listener. Only the lamp and the
+    Agent button's small blue pulse repaint for it, at about 30 fps, and only while it shows.
   - *The lamp*: green Ready (a listener attached to this document recently or a check answered;
     or the background client is usable: `claude` logged in, the folder there), amber Waiting
     (after a Get ready step until a listener attaches, or while something listens that hasn't

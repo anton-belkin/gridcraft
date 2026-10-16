@@ -3,7 +3,7 @@
 //! `cargo run -p gridcraft-agent-ui --example agent_snapshot -- --in book.xlsx [--cmd id=json]… (`$q`/`$t`: latest question/topic)
 //!  [--pane selection|overview|history|analysis] [--heat off|confidence|impact] [--hover B23]
 //!  [--size 1440x900] [--dark] [--tab Agent] [--ping checking|answered|noanswer] [--signal wait]
-//!  [--click <label>]… [--hover-label <label>] [--listener <label>] [--voice off|small|turbo]
+//!  [--click <label>]… [--hover-label <label>] [--working] [--listener <label>] [--voice off|small|turbo]
 //!  [--voice-recording 4:Sheet1!C5,Sheet1!D7] [--voice-download 42] out.png`
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
@@ -23,6 +23,7 @@ fn main() {
     let (mut ping, mut signal, mut listener): (Option<String>, Option<String>, Option<String>) = (None, None, None);
     let mut click: Vec<String> = vec![];
     let mut hover_label: Option<String> = None;
+    let mut working = false;
     let mut it = args.into_iter();
     while let Some(a) = it.next() {
         match a.as_str() {
@@ -40,6 +41,7 @@ fn main() {
             "--signal" => signal = it.next(),
             "--click" => click.extend(it.next()),
             "--hover-label" => hover_label = it.next(),
+            "--working" => working = true,
             "--listener" => listener = it.next(),
             "--size" => {
                 if let Some((w, h)) = it.next().as_deref().and_then(|s| s.split_once('x').map(|(w, h)| (w.to_string(), h.to_string()))) {
@@ -131,6 +133,13 @@ fn main() {
                 }
             }
         });
+    }
+    // The agent at work: a question on the active cell, claimed and not answered yet.
+    if working {
+        let at = session.active().map(|d| d.selection.active.a1()).unwrap_or_else(|| "A1".into());
+        let q = session.execute("agent.ask", json!({"range": at, "text": "Why is this so high?"})).expect("ask");
+        let id = q["id"].as_str().unwrap_or("").to_string();
+        session.execute("agent.claim", json!({"id": id, "actor": "agent", "listener": listener_id})).expect("claim");
     }
     // A listener without a check: an agent waiting for questions.
     if signal.as_deref() == Some("wait") {

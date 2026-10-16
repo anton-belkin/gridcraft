@@ -216,6 +216,29 @@ pub fn proposal_json(e: &EditProposal) -> Json {
 
 // ---------------------------------------------------------------- the agent's side
 
+/// When the agent last added to a topic's proposal: (document, topic, ms). The Context lamp shows
+/// it working on that topic for a few seconds after.
+static BUILDING: Mutex<Vec<(u64, String, u64)>> = Mutex::new(Vec::new());
+
+fn note_building(uid: u64, topic: &str) {
+    if let Ok(mut g) = BUILDING.lock() {
+        g.retain(|(u, t, _)| !(*u == uid && t == topic));
+        g.push((uid, topic.to_string(), crate::now_ms()));
+        let n = g.len();
+        if n > 64 {
+            g.drain(..n - 64);
+        }
+    }
+}
+
+/// Topics of a document whose proposal the agent added to within `within_ms`.
+pub fn building(uid: u64, now: u64, within_ms: u64) -> Vec<String> {
+    BUILDING
+        .lock()
+        .map(|g| g.iter().filter(|(u, _, at)| *u == uid && now.saturating_sub(*at) <= within_ms).map(|(_, t, _)| t.clone()).collect())
+        .unwrap_or_default()
+}
+
 /// `run_command {topic, option?}`: runs the command on the option's draft and records it.
 pub fn record(s: &mut Session, p: &Json, command: &str, params: Json, reason: String) -> Result<Json> {
     const CMD: &str = "agent.exec";
@@ -244,6 +267,7 @@ pub fn record(s: &mut Session, p: &Json, command: &str, params: Json, reason: St
     let n = o.steps.len();
     e.state = ProposalState::Pending;
     e.at = crate::now_ms();
+    note_building(d.uid, &id);
     layer::update(d, |l| {
         if let Some(t) = l.topics.iter_mut().find(|t| t.id == id) {
             t.edits = Some(e);

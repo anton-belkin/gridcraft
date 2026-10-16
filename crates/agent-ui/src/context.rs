@@ -48,6 +48,8 @@ impl Step {
 /// The Ready lamp.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Lamp {
+    /// The agent is working on a question or a proposal of this document (blue, pulsing).
+    Working,
     Ready,
     Waiting,
     NotReady,
@@ -56,6 +58,7 @@ pub(crate) enum Lamp {
 impl Lamp {
     pub(crate) fn label(self) -> &'static str {
         match self {
+            Lamp::Working => "Working…",
             Lamp::Ready => "Ready",
             Lamp::Waiting => "Waiting",
             Lamp::NotReady => "Not ready",
@@ -81,10 +84,26 @@ const SEEN_MS: u64 = 5 * 60_000;
 /// A quiet check at most this often.
 const CHECK_EVERY_MS: u64 = 2 * 60_000;
 
+/// What the agent is working on: the topics (id, number) and who works (a listener's label).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub(crate) struct Working {
+    pub topics: Vec<(String, u32)>,
+    pub by: String,
+}
+
+/// A claimed question with no agent call for this long isn't being worked on any more.
+const WORK_IDLE_MS: u64 = 90_000;
+/// A proposal step shows the agent working for this long.
+const BUILDING_MS: u64 = 10_000;
+
 /// The group as drawn.
 pub(crate) struct View {
     pub ctx: AgentContext,
     pub lamp: Lamp,
+    /// The lamp's words: "Working… · topic 3", "Ready"…
+    pub label: String,
+    /// The topic a click on the lamp opens (while working on one).
+    pub topic: Option<String>,
     pub detail: String,
     /// Every step of Get ready with whether it's done; empty: no Get ready.
     pub steps: Vec<(Step, bool)>,
@@ -108,7 +127,16 @@ fn listener_ready(p: &Presence) -> bool {
 }
 
 /// The lamp, its details and the steps, for a context (pure, so it is tested).
-pub(crate) fn view(c: &AgentContext, setup: &Setup, presence: &Presence, waiting: bool, copied: &dyn Fn(Step) -> bool, server: &str) -> View {
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn view(
+    c: &AgentContext,
+    setup: &Setup,
+    presence: &Presence,
+    waiting: bool,
+    copied: &dyn Fn(Step) -> bool,
+    server: &str,
+    working: Option<&Working>,
+) -> View {
     let folder = (!c.folder.is_empty() && std::path::Path::new(&c.folder).is_dir()).then(|| c.folder.clone());
     let background = |extra: &str| {
         if setup.logged_in {
@@ -164,8 +192,24 @@ pub(crate) fn view(c: &AgentContext, setup: &Setup, presence: &Presence, waiting
         }
         (ContextKind::Off, _) => (Lamp::NotReady, "No agent: its tools refuse and nothing is sent.".to_string(), vec![]),
     };
+    // Working outranks the rest: Working > Ready > Waiting > Not ready.
+    let (lamp, label, topic, detail) = match working.filter(|w| !w.topics.is_empty() && c.kind != ContextKind::Off) {
+        Some(w) => {
+            let by = if w.by.is_empty() { "The agent".to_string() } else { w.by.clone() };
+            match w.topics.as_slice() {
+                [(id, n)] => {
+                    (Lamp::Working, format!("Working… · topic {n}"), Some(id.clone()), format!("{by} is working on topic {n}. Click to open it."))
+                }
+                many => {
+                    let list = many.iter().map(|(_, n)| n.to_string()).collect::<Vec<_>>().join(", ");
+                    (Lamp::Working, "Working…".to_string(), None, format!("{by} is working on topics {list}."))
+                }
+            }
+        }
+        None => (lamp, lamp.label().to_string(), None, detail),
+    };
     let detail = format!("{detail}\n\nGridCraft's MCP server: {server}");
-    View { ctx: c.clone(), lamp, detail, steps, folder }
+    View { ctx: c.clone(), lamp, label, topic, detail, steps, folder }
 }
 
 /// The active document's group.
@@ -178,7 +222,42 @@ pub(crate) fn current(st: &AgentUi, app: &SheetApp) -> Option<View> {
     let waiting = st.context.waiting.get(&d.uid).is_some_and(|t| now.saturating_sub(*t) < WAIT_MS);
     let uid = d.uid;
     let copied = |s: Step| st.context.copied.contains(&(uid, s));
-    Some(view(&c, &setup, &presence, waiting, &copied, crate::server_url().unwrap_or("http://127.0.0.1:7980/mcp")))
+    let w = working(d, now);
+    Some(view(&c, &setup, &presence, waiting, &copied, crate::server_url().unwrap_or("http://127.0.0.1:7980/mcp"), w.as_ref()))
+}
+
+/// What the agent is working on in a document now: questions it claimed and hasn't answered (while
+/// it keeps calling), and proposals it added to in the last seconds.
+pub(crate) fn working(d: &gridcraft_engine::DocState, now: u64) -> Option<Working> {
+    let l = layer::get(d);
+    let active = now.saturating_sub(gridcraft_agent::last_agent_call_ms()) <= WORK_IDLE_MS;
+    let mut ids: Vec<String> = if active {
+        l.questions.iter().filter(|q| q.status == layer::QuestionStatus::Working && !q.hidden && !q.is_ping()).map(|q| q.topic.clone()).collect()
+    } else {
+        vec![]
+    };
+    ids.extend(gridcraft_agent::proposals::building(d.uid, now, BUILDING_MS));
+    let n = gridcraft_agent::topics::numbering(&d.wb, &l);
+    let mut topics: Vec<(String, u32)> = vec![];
+    for id in ids {
+        if let Some(num) = n.topic.get(&id)
+            && !topics.iter().any(|(t, _)| *t == id)
+        {
+            topics.push((id, *num));
+        }
+    }
+    if topics.is_empty() {
+        return None;
+    }
+    topics.sort_by_key(|x| x.1);
+    // Who: the conversation attached to the document, or the background client.
+    let by = gridcraft_agent::docs::listeners(d.uid)
+        .into_iter()
+        .next()
+        .map(|x| x.label)
+        .or_else(|| runner::status(d.uid).filter(|s| s.running).map(|_| "The background agent".to_string()))
+        .unwrap_or_default();
+    Some(Working { topics, by })
 }
 
 /// Once per frame: the runner follows the active document's context; something listening that
@@ -283,14 +362,14 @@ mod tests {
     #[test]
     fn no_context_needs_only_a_login() {
         let none = ctx(ContextKind::None, CodeVia::Session, "");
-        let v = view(&none, &checked(false), &Presence::Nobody, false, &|_| false, "url");
+        let v = view(&none, &checked(false), &Presence::Nobody, false, &|_| false, "url", None);
         assert_eq!(v.lamp, Lamp::NotReady);
         assert_eq!(v.steps, vec![(Step::LogIn, false)]);
         assert_eq!(v.next(), Some(Step::LogIn));
         // After the step: waiting until Claude is logged in.
-        assert_eq!(view(&none, &checked(false), &Presence::Nobody, true, &|_| false, "url").lamp, Lamp::Waiting);
+        assert_eq!(view(&none, &checked(false), &Presence::Nobody, true, &|_| false, "url", None).lamp, Lamp::Waiting);
         // Logged in: ready, and no Get ready at all.
-        let v = view(&none, &checked(true), &Presence::Nobody, false, &|_| false, "url");
+        let v = view(&none, &checked(true), &Presence::Nobody, false, &|_| false, "url", None);
         assert_eq!(v.lamp, Lamp::Ready);
         assert!(v.steps.is_empty());
     }
@@ -298,22 +377,22 @@ mod tests {
     #[test]
     fn cowork_installs_then_asks_and_is_ready_when_its_chat_listens() {
         let c = ctx(ContextKind::Cowork, CodeVia::Session, "");
-        let v = view(&c, &checked(true), &Presence::Nobody, false, &|_| false, "url");
+        let v = view(&c, &checked(true), &Presence::Nobody, false, &|_| false, "url", None);
         assert_eq!(v.lamp, Lamp::NotReady);
         assert_eq!(v.next(), Some(Step::InstallDesktop));
         let installed = Setup { desktop_hub: true, ..checked(true) };
-        let v = view(&c, &installed, &Presence::Nobody, false, &|_| false, "url");
+        let v = view(&c, &installed, &Presence::Nobody, false, &|_| false, "url", None);
         assert_eq!(v.next(), Some(Step::AskCowork));
         assert_eq!(v.steps, vec![(Step::InstallDesktop, true), (Step::AskCowork, false)]);
         // The phrase copied: waiting for the chat to attach.
-        let v = view(&c, &installed, &Presence::Nobody, true, &|s| s == Step::AskCowork, "url");
+        let v = view(&c, &installed, &Presence::Nobody, true, &|s| s == Step::AskCowork, "url", None);
         assert_eq!(v.lamp, Lamp::Waiting);
         assert!(v.steps.iter().all(|(_, d)| *d));
         // Something listens without having answered: still waiting (the app checks quietly).
-        assert_eq!(view(&c, &installed, &Presence::Listener(vec!["waiting for questions"]), false, &|_| false, "url").lamp, Lamp::Waiting);
+        assert_eq!(view(&c, &installed, &Presence::Listener(vec!["waiting for questions"]), false, &|_| false, "url", None).lamp, Lamp::Waiting);
         // The chat attached: ready, every step ticked.
         let attached = Presence::Listening { label: "Cowork · Northwind".into(), seen_ms: 4_000, more: 0 };
-        let v = view(&c, &installed, &attached, false, &|_| false, "url");
+        let v = view(&c, &installed, &attached, false, &|_| false, "url", None);
         assert_eq!(v.lamp, Lamp::Ready);
         assert!(v.steps.iter().all(|(_, d)| *d));
         assert!(v.detail.contains("Cowork · Northwind"));
@@ -322,21 +401,21 @@ mod tests {
     #[test]
     fn claude_code_session_or_folder() {
         let session = ctx(ContextKind::Code, CodeVia::Session, "");
-        let v = view(&session, &checked(true), &Presence::Nobody, false, &|_| false, "url");
+        let v = view(&session, &checked(true), &Presence::Nobody, false, &|_| false, "url", None);
         assert_eq!(v.steps, vec![(Step::InstallCode, false), (Step::AskSession, false)]);
         let answering = Presence::Answering { checked_ms: 2_000, latency_ms: 900 };
-        assert_eq!(view(&session, &checked(true), &answering, false, &|_| false, "url").lamp, Lamp::Ready);
+        assert_eq!(view(&session, &checked(true), &answering, false, &|_| false, "url", None).lamp, Lamp::Ready);
         // A project folder: chosen, it is shown and the background client is ready.
         let none_yet = ctx(ContextKind::Code, CodeVia::Folder, "");
-        let v = view(&none_yet, &checked(true), &Presence::Nobody, false, &|_| false, "url");
+        let v = view(&none_yet, &checked(true), &Presence::Nobody, false, &|_| false, "url", None);
         assert_eq!((v.lamp, v.next()), (Lamp::NotReady, Some(Step::ChooseFolder)));
         let dir = std::env::temp_dir().display().to_string();
-        let v = view(&ctx(ContextKind::Code, CodeVia::Folder, &dir), &checked(true), &Presence::Nobody, false, &|_| false, "url");
+        let v = view(&ctx(ContextKind::Code, CodeVia::Folder, &dir), &checked(true), &Presence::Nobody, false, &|_| false, "url", None);
         assert_eq!(v.lamp, Lamp::Ready);
         assert_eq!(v.folder.as_deref(), Some(dir.as_str()));
         assert_eq!(v.steps, vec![(Step::ChooseFolder, true)]);
         // Not logged in: that comes first.
-        let v = view(&ctx(ContextKind::Code, CodeVia::Folder, &dir), &checked(false), &Presence::Nobody, false, &|_| false, "url");
+        let v = view(&ctx(ContextKind::Code, CodeVia::Folder, &dir), &checked(false), &Presence::Nobody, false, &|_| false, "url", None);
         assert_eq!(v.next(), Some(Step::LogIn));
     }
 
@@ -358,7 +437,7 @@ mod tests {
         for c in &all {
             for p in &presences {
                 for setup in [checked(false), checked(true), Setup::default()] {
-                    let v = view(c, &setup, p, false, &|_| false, "url");
+                    let v = view(c, &setup, p, false, &|_| false, "url", None);
                     let words = format!(
                         "{} {} {}",
                         v.detail,
@@ -370,5 +449,53 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn working_outranks_the_other_states() {
+        let c = ctx(ContextKind::Cowork, CodeVia::Session, "");
+        let attached = Presence::Listening { label: "Cowork · Acme".into(), seen_ms: 2_000, more: 0 };
+        let one = Working { topics: vec![("t7".into(), 3)], by: "Cowork · Acme".into() };
+        // Ready, until the agent works: then Working, never green, naming the topic and who.
+        assert_eq!(view(&c, &checked(true), &attached, false, &|_| false, "url", None).lamp, Lamp::Ready);
+        let v = view(&c, &checked(true), &attached, false, &|_| false, "url", Some(&one));
+        assert_eq!((v.lamp, v.label.as_str(), v.topic.as_deref()), (Lamp::Working, "Working… · topic 3", Some("t7")));
+        assert!(v.detail.contains("Cowork · Acme"), "{}", v.detail);
+        // Even over Waiting and Not ready; several topics: no single one to open.
+        let two = Working { topics: vec![("t1".into(), 1), ("t7".into(), 3)], by: String::new() };
+        let v = view(&c, &checked(true), &Presence::Nobody, false, &|_| false, "url", Some(&two));
+        assert_eq!((v.lamp, v.label.as_str(), v.topic), (Lamp::Working, "Working…", None));
+        // No context, background client: the same.
+        let none = ctx(ContextKind::None, CodeVia::Session, "");
+        assert_eq!(view(&none, &checked(false), &Presence::Nobody, false, &|_| false, "url", Some(&one)).lamp, Lamp::Working);
+        // Nothing to work on: the usual state and label.
+        let v = view(&c, &checked(true), &attached, false, &|_| false, "url", Some(&Working::default()));
+        assert_eq!((v.lamp, v.label.as_str()), (Lamp::Ready, "Ready"));
+    }
+
+    #[test]
+    fn a_claimed_question_or_a_proposal_step_is_work() {
+        gridcraft_agent::install();
+        let mut s = gridcraft_engine::Session::new();
+        s.new_workbook();
+        s.execute("cell.set", serde_json::json!({"cell": "B2", "input": 5})).unwrap();
+        let now = || gridcraft_agent::now_ms();
+        let q = s.execute("agent.ask", serde_json::json!({"range": "B2", "text": "Why?"})).unwrap();
+        let (id, topic) = (q["id"].as_str().unwrap().to_string(), q["topic"].as_str().unwrap().to_string());
+        // Asked, not taken: not work yet.
+        assert!(working(s.active().unwrap(), now()).is_none());
+        s.execute("agent.claim", serde_json::json!({"id": id, "actor": "agent"})).unwrap();
+        let w = working(s.active().unwrap(), now()).unwrap();
+        assert_eq!(w.topics, vec![(topic.clone(), 1)]);
+        // No agent call for 90 s: it isn't working any more.
+        assert!(working(s.active().unwrap(), now() + 91_000).is_none());
+        // Answered: done.
+        s.execute("agent.answer", serde_json::json!({"id": id, "text": "Because.", "actor": "agent"})).unwrap();
+        assert!(working(s.active().unwrap(), now()).is_none());
+        // A proposal step shows work for a few seconds.
+        s.execute("agent.exec", serde_json::json!({"topic": topic, "command": "cell.set", "params": {"cell": "B2", "input": 6}, "actor": "agent"}))
+            .unwrap();
+        assert_eq!(working(s.active().unwrap(), now()).unwrap().topics.len(), 1);
+        assert!(working(s.active().unwrap(), now() + 11_000).is_none());
     }
 }
