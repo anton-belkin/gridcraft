@@ -19,6 +19,7 @@
 pub mod analysis;
 pub mod anchor;
 pub mod commands;
+pub mod export;
 pub mod layer;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod mcp;
@@ -32,6 +33,22 @@ use gridcraft_engine::{Result, Session};
 use serde_json::Value as Json;
 
 pub use layer::{Actor, Layer};
+
+thread_local! {
+    /// The layer is read-only on this thread (the app's: a browser page has only one).
+    static READ_ONLY: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Makes the layer read-only (an exported web page): commands that would change it are refused,
+/// except marking an answer read. Call it on the thread that runs the app.
+pub fn set_read_only(on: bool) {
+    READ_ONLY.with(|r| r.set(on));
+}
+
+/// Whether the layer is read-only (see [`set_read_only`]).
+pub fn read_only() -> bool {
+    READ_ONLY.with(std::cell::Cell::get)
+}
 
 /// Milliseconds since the Unix epoch (0 where the platform has no clock).
 pub fn now_ms() -> u64 {

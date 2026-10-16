@@ -16,6 +16,8 @@ use crate::{AgentUi, Heat, Palette, Tab, fmt_num, follow, palette};
 #[derive(Default)]
 pub(crate) struct State {
     pub trace_open: bool,
+    /// What the last Share as Web Page said (the file written, or why not).
+    shared: Option<String>,
     trace: Option<((u64, usize, u64), usize, CellRef, Json)>,
 }
 
@@ -23,6 +25,8 @@ pub(crate) struct State {
 enum Act {
     Follow(String),
     Run(&'static str, Json),
+    /// Export the workbook as a web page to this path.
+    Share(String),
 }
 
 pub(crate) fn show(st: &mut AgentUi, app: &mut SheetApp, ui: &mut Ui) {
@@ -31,9 +35,13 @@ pub(crate) fn show(st: &mut AgentUi, app: &mut SheetApp, ui: &mut Ui) {
     let max = (ui.available_width() / 2.0).max(320.0);
     let mut acts: Vec<Act> = vec![];
     let mut close = false;
-    egui::Panel::right("agent_pane").default_size(340.0).max_size(max).resizable(true).frame(egui::Frame::NONE.fill(t.ribbon).inner_margin(10)).show(
-        ui,
-        |ui| {
+    egui::Panel::right("agent_pane")
+        .default_size(340.0)
+        .min_size(280.0)
+        .max_size(max)
+        .resizable(true)
+        .frame(egui::Frame::NONE.fill(t.ribbon).inner_margin(10))
+        .show(ui, |ui| {
             ui.horizontal(|ui| {
                 ui.label(RichText::new("Agent").font(theme::ui_bold(15.0)));
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -66,10 +74,9 @@ pub(crate) fn show(st: &mut AgentUi, app: &mut SheetApp, ui: &mut Ui) {
                 Tab::Questions => questions_tab(app, ui, &l, &t, &p, &mut acts),
                 Tab::Notes => notes_tab(st, app, ui, &l, &p, &mut acts),
                 Tab::History => history_tab(app, ui, &l, &t, &p, &mut acts),
-                Tab::Connect => connect_tab(ui, &t),
+                Tab::Connect => connect_tab(st, app, ui, &t, &mut acts),
             });
-        },
-    );
+        });
     if close {
         st.open = false;
     }
@@ -78,6 +85,12 @@ pub(crate) fn show(st: &mut AgentUi, app: &mut SheetApp, ui: &mut Ui) {
         match a {
             Act::Follow(href) => follow(st, app, &ctx, &href),
             Act::Run(id, params) => app.run_or_alert(id, params),
+            Act::Share(path) => {
+                st.pane.shared = Some(match app.run("agent.exportHtml", json!({"path": path})) {
+                    Ok(_) => format!("Saved {path}"),
+                    Err(e) => e.to_string(),
+                });
+            }
         }
     }
 }
@@ -93,12 +106,13 @@ fn links(ui: &mut Ui, list: &[Link], acts: &mut Vec<Act>) {
     }
     ui.horizontal_wrapped(|ui| {
         for k in list {
+            // Glyphs the web build's fonts have too.
             let icon = if k.href.starts_with("cell:") {
-                "↳ "
+                "» "
             } else if k.href.starts_with("note:") {
                 "¶ "
             } else {
-                "↗ "
+                "» "
             };
             let mut r = ui.link(format!("{icon}{}", k.label));
             if !k.summary.is_empty() {
@@ -199,24 +213,12 @@ fn cell_tab(st: &mut AgentUi, app: &SheetApp, ui: &mut Ui, l: &Layer, t: &Tokens
     }
     ui.add_space(6.0);
 
-    // Ask.
-    ui.label(RichText::new("Ask the agent about this").small().strong());
-    let r = ui.add(
-        egui::TextEdit::multiline(&mut st.draft).hint_text("Why is this growing faster than revenue?").desired_rows(2).desired_width(f32::INFINITY),
-    );
-    if st.focus_draft {
-        r.request_focus();
-        st.focus_draft = false;
+    // Ask (not in a read-only copy: the author's agent isn't reachable from it).
+    if gridcraft_agent::read_only() {
+        ask_closed(ui, t);
+    } else {
+        ask_box(st, ui, t, &here, acts);
     }
-    let send_key = r.has_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter) && i.modifiers.command);
-    ui.horizontal(|ui| {
-        let can = !st.draft.trim().is_empty();
-        if (ui.add_enabled(can, egui::Button::new("Ask")).clicked() || send_key) && can {
-            acts.push(Act::Run("agent.ask", json!({"range": here.a1(), "text": st.draft.trim()})));
-            st.draft.clear();
-        }
-        ui.label(RichText::new("⌘↩ · keep working, the badge tells you when it's answered").small().color(t.text_dim));
-    });
     ui.add_space(6.0);
 
     let hits = |id: &str| l.anchor(id).and_then(|a| anchor::resolve(&d.wb, a)).is_some_and(|pl| pl.sheet == si && pl.range.intersects(&sel));
@@ -288,7 +290,7 @@ fn cell_tab(st: &mut AgentUi, app: &SheetApp, ui: &mut Ui, l: &Layer, t: &Tokens
                         }
                         ui.label(
                             RichText::new(format!(
-                                "{} … {} → {} … {}",
+                                "{} … {} gives {} … {}",
                                 fmt_num(w.low_input),
                                 fmt_num(w.high_input),
                                 fmt_num(w.at_low),
@@ -310,11 +312,13 @@ fn cell_tab(st: &mut AgentUi, app: &SheetApp, ui: &mut Ui, l: &Layer, t: &Tokens
     }
     ui.add_space(8.0);
     ui.separator();
-    ui.horizontal_wrapped(|ui| {
-        if ui.button(if is_private { "Unmark client data" } else { "Mark selection as client data" }).clicked() {
-            acts.push(Act::Run("agent.private", json!({"range": here.a1(), "on": !is_private})));
-        }
-    });
+    if !gridcraft_agent::read_only() {
+        ui.horizontal_wrapped(|ui| {
+            if ui.button(if is_private { "Unmark client data" } else { "Mark selection as client data" }).clicked() {
+                acts.push(Act::Run("agent.private", json!({"range": here.a1(), "on": !is_private})));
+            }
+        });
+    }
     ui.horizontal_wrapped(|ui| {
         ui.label(RichText::new("Heat map").small());
         for (h, name) in [(Heat::Off, "Off"), (Heat::Confidence, "Confidence"), (Heat::Impact, "Impact on this cell")] {
@@ -323,6 +327,37 @@ fn cell_tab(st: &mut AgentUi, app: &SheetApp, ui: &mut Ui, l: &Layer, t: &Tokens
             }
         }
     });
+}
+
+fn ask_box(st: &mut AgentUi, ui: &mut Ui, t: &Tokens, here: &Place, acts: &mut Vec<Act>) {
+    ui.label(RichText::new("Ask the agent about this").small().strong());
+    let r = ui.add(
+        egui::TextEdit::multiline(&mut st.draft).hint_text("Why is this growing faster than revenue?").desired_rows(2).desired_width(f32::INFINITY),
+    );
+    if st.focus_draft {
+        r.request_focus();
+        st.focus_draft = false;
+    }
+    let send_key = r.has_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter) && i.modifiers.command);
+    ui.horizontal(|ui| {
+        let can = !st.draft.trim().is_empty();
+        if (ui.add_enabled(can, egui::Button::new("Ask")).clicked() || send_key) && can {
+            acts.push(Act::Run("agent.ask", json!({"range": here.a1(), "text": st.draft.trim()})));
+            st.draft.clear();
+        }
+        let send = if cfg!(target_os = "macos") { "⌘↩" } else { "Ctrl+Enter" };
+        ui.label(RichText::new(format!("{send} · keep working, the badge tells you when it's answered")).small().color(t.text_dim));
+    });
+}
+
+fn ask_closed(ui: &mut Ui, t: &Tokens) {
+    ui.label(
+        RichText::new(
+            "Read-only copy: the answers and notes the author's agent prepared are here; new questions go through the workbook in GridCraft.",
+        )
+        .small()
+        .color(t.text_dim),
+    );
 }
 
 fn trace_node(ui: &mut Ui, n: &Json, t: &Tokens, p: &Palette, acts: &mut Vec<Act>, depth: usize) {
@@ -380,7 +415,14 @@ fn short_cell(a1: &str) -> String {
 
 fn questions_tab(app: &SheetApp, ui: &mut Ui, l: &Layer, t: &Tokens, p: &Palette, acts: &mut Vec<Act>) {
     if l.questions.is_empty() {
-        ui.label(RichText::new("No questions yet. Right-click a cell and choose Ask the Agent, or use the Cell tab.").italics());
+        ui.label(
+            RichText::new(if gridcraft_agent::read_only() {
+                "No prepared answers in this copy."
+            } else {
+                "No questions yet. Right-click a cell and choose Ask the Agent, or use the Cell tab."
+            })
+            .italics(),
+        );
         return;
     }
     let order = |q: &Question| match (q.status, q.seen) {
@@ -461,7 +503,18 @@ fn history_tab(app: &SheetApp, ui: &mut Ui, l: &Layer, t: &Tokens, p: &Palette, 
     }
 }
 
-fn connect_tab(ui: &mut Ui, t: &Tokens) {
+fn connect_tab(st: &AgentUi, app: &SheetApp, ui: &mut Ui, t: &Tokens, acts: &mut Vec<Act>) {
+    if gridcraft_agent::read_only() {
+        ui.label(RichText::new("Read-only copy").strong());
+        ui.label("This page was exported from GridCraft with the answers and notes the author's agent prepared. No agent is connected here, so there are no live questions.");
+        ui.add_space(6.0);
+        ui.label(
+            RichText::new("To ask your own questions, open the workbook in GridCraft (File > Save As keeps the agent layer in the .xlsx) and connect your agent there.")
+                .small()
+                .color(t.text_dim),
+        );
+        return;
+    }
     let Some(url) = crate::server_url() else {
         ui.label("The agent server isn't running. Start GridCraft with --agent-port <port>.");
         return;
@@ -487,4 +540,37 @@ fn connect_tab(ui: &mut Ui, t: &Tokens) {
             .small()
             .color(t.text_dim),
     );
+    share(st, app, ui, t, acts);
+}
+
+/// Share as a web page: one HTML file beside the workbook, opened in any browser with the
+/// prepared answers and notes, read-only.
+fn share(st: &AgentUi, app: &SheetApp, ui: &mut Ui, t: &Tokens, acts: &mut Vec<Act>) {
+    if cfg!(target_arch = "wasm32") {
+        return;
+    }
+    ui.add_space(10.0);
+    ui.label(RichText::new("Share as a web page").strong());
+    ui.label(
+        RichText::new(
+            "One HTML file: the workbook in GridCraft for the browser, with the answers and notes your agent prepared. Open questions stay here.",
+        )
+        .small()
+        .color(t.text_dim),
+    );
+    let path = app.session.active().and_then(|d| d.path.as_deref()).map(|p| std::path::Path::new(p).with_extension("html").display().to_string());
+    match path {
+        Some(path) => {
+            if ui.button("Export web page").on_hover_text(&path).clicked() {
+                acts.push(Act::Share(path));
+            }
+        }
+        None => {
+            ui.add_enabled(false, egui::Button::new("Export web page"))
+                .on_disabled_hover_text("Save the workbook first: the page is written beside it");
+        }
+    }
+    if let Some(msg) = &st.pane.shared {
+        ui.label(RichText::new(msg).small().color(t.text_dim));
+    }
 }

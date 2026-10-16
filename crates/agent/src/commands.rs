@@ -27,7 +27,13 @@ macro_rules! spec {
             shortcut: None,
             params: $params,
             enabled: has_doc,
-            run: $run,
+            run: {
+                fn guarded(s: &mut Session, p: &Json) -> Result<Json> {
+                    writable($id, spec!(@journal $kind))?;
+                    $run(s, p)
+                }
+                guarded
+            },
             journal: spec!(@journal $kind),
             undoable: false,
         }
@@ -55,10 +61,19 @@ pub static SPECS: &[CommandSpec] = &[
     spec!(query "agent.read", "Agent Read", "{range, masked?: bool (default true)} → cells with value, text, formula, private/derivedFromPrivate", read),
     spec!(query "agent.trace", "Where Does This Number Come From", "{cell?, depth?: 1..12 (default 6), masked?: bool} → the calculation tree down to its inputs", trace),
     spec!(query "agent.sensitivity", "Sensitivity", "{cell?, limit?: (default 8), masked?: bool} → output at the low and high end of each input", sensitivity),
+    spec!(query "agent.exportHtml", "Export as Web Page", "{path: \"out.html\", web?: folder with the web build (default $GRIDCRAFT_WEB_BUNDLE, then target/agent-web)} — one HTML file: the workbook in GridCraft for the web, prepared answers and notes read-only", crate::export::export_html),
     spec!(change "agent.exec", "Run Command as Agent", "{command, params?, reason?, source?} — runs a changing command, logged as the agent's", exec),
 ];
 
 // ---------------------------------------------------------------- params
+
+/// A read-only layer (an exported page) refuses every change but marking an answer read.
+fn writable(id: &str, changes: bool) -> Result<()> {
+    if changes && crate::read_only() && id != "agent.seen" {
+        return Err(EngineError::Other("This is a read-only copy: questions go to the agent from the workbook in GridCraft.".into()));
+    }
+    Ok(())
+}
 
 fn bad(cmd: &str, msg: impl Into<String>) -> EngineError {
     EngineError::BadParams { cmd: cmd.into(), msg: msg.into() }

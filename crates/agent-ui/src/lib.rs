@@ -191,7 +191,8 @@ impl UiExtension for AgentUi {
     fn context_menu(&mut self, app: &mut SheetApp, ui: &mut Ui) -> bool {
         ui.separator();
         let item = |ui: &mut Ui, label: &str| ui.add(egui::Button::new(label).frame(false).min_size(vec2(190.0, 20.0))).clicked();
-        if item(ui, "Ask the Agent…") {
+        let read_only = gridcraft_agent::read_only();
+        if !read_only && item(ui, "Ask the Agent…") {
             self.open = true;
             self.tab = Tab::Cell;
             self.focus_draft = true;
@@ -208,7 +209,7 @@ impl UiExtension for AgentUi {
             let cells = gridcraft_agent::analysis::private_cells(&d.wb, &l);
             cells.contains(&(d.wb.active_sheet, d.selection.active))
         });
-        if item(ui, if private { "Unmark Client Data" } else { "Mark as Client Data" }) {
+        if !read_only && item(ui, if private { "Unmark Client Data" } else { "Mark as Client Data" }) {
             app.run_or_alert("agent.private", json!({"on": !private}));
             return true;
         }
@@ -231,9 +232,9 @@ impl AgentUi {
         let t = Tokens::get(ctx);
         let p = palette(&t);
         let (text, color) = if ready > 0 {
-            (format!("● {ready} answer{} ready", if ready == 1 { "" } else { "s" }), p.answered)
+            (format!("{ready} answer{} ready", if ready == 1 { "" } else { "s" }), p.answered)
         } else if waiting > 0 {
-            (format!("◌ {waiting} question{} with the agent", if waiting == 1 { "" } else { "s" }), p.pending)
+            (format!("{waiting} question{} with the agent", if waiting == 1 { "" } else { "s" }), p.pending)
         } else {
             ("Agent".to_string(), t.accent)
         };

@@ -214,3 +214,65 @@ fn mcp_tools_reach_the_commands() {
     let cmds = crate::mcp::call(&mut b, "list_commands", &json!({"search": "bold"})).unwrap();
     assert!(cmds.as_array().unwrap().iter().all(|c| !c["id"].as_str().unwrap().starts_with("agent.")));
 }
+
+#[test]
+fn shared_layer_keeps_answers_and_drops_open_questions() {
+    let mut s = model();
+    let open = s.execute("agent.ask", json!({"range": "B5", "text": "Where do fixed costs come from?"})).unwrap();
+    let asked = s.execute("agent.ask", json!({"range": "B7", "text": "Why is profit negative?"})).unwrap();
+    let id = asked["id"].as_str().unwrap();
+    s.execute("agent.answer", json!({"id": id, "text": "Fixed costs exceed the margin."})).unwrap();
+    s.execute("agent.seen", json!({"id": id})).unwrap();
+    s.execute("agent.note", json!({"range": "B2", "text": "List price.", "kind": "source"})).unwrap();
+    let l = crate::export::shared_layer(&layer::get(s.active().unwrap()));
+    assert_eq!(l.questions.len(), 1);
+    assert_eq!(l.questions[0].id, id);
+    assert!(!l.questions[0].seen, "a prepared answer is new to the recipient");
+    assert_eq!(l.notes.len(), 1);
+    let open_anchor = &layer::get(s.active().unwrap()).questions.iter().find(|q| Some(q.id.as_str()) == open["id"].as_str()).unwrap().anchor.clone();
+    assert!(l.anchor(open_anchor).is_none(), "the open question's anchor goes with it");
+}
+
+#[test]
+fn export_html_embeds_the_workbook_and_the_app() {
+    let mut s = model();
+    let asked = s.execute("agent.ask", json!({"range": "B7", "text": "Why?"})).unwrap();
+    s.execute("agent.answer", json!({"id": asked["id"], "text": "Because."})).unwrap();
+    s.execute("agent.ask", json!({"range": "B5", "text": "Still open"})).unwrap();
+    let dir = std::env::temp_dir().join(format!("gc-agent-export-{}", std::process::id()));
+    let web = dir.join("web");
+    std::fs::create_dir_all(&web).unwrap();
+    std::fs::write(web.join("app.js"), "export default async function () {}").unwrap();
+    std::fs::write(web.join("app_bg.wasm"), b"\0asm").unwrap();
+    let out = dir.join("book.html");
+    let r = s.execute("agent.exportHtml", json!({"path": out.to_str().unwrap(), "web": web.to_str().unwrap()})).unwrap();
+    assert!(r["bytes"].as_u64().unwrap() > 0);
+    let html = std::fs::read_to_string(&out).unwrap();
+    let start = html.find(&format!("id=\"{}\"", crate::export::WORKBOOK_ELEMENT)).unwrap();
+    let body = &html[start..];
+    let b64 = &body[body.find('>').unwrap() + 1..body.find("</script>").unwrap()];
+    let bytes = gridcraft_engine::io::base64_decode(b64).unwrap();
+    let mut r = Session::new();
+    r.execute("file.open", json!({"name": "book.xlsx", "base64": gridcraft_engine::io::base64_encode(&bytes)})).unwrap();
+    let l = layer::get(r.active().unwrap());
+    assert_eq!(l.questions.len(), 1, "only the answered question travels");
+    assert!(s.execute("agent.exportHtml", json!({"path": out.to_str().unwrap(), "web": dir.join("none").to_str().unwrap()})).is_err());
+    assert!(s.execute("agent.exportHtml", json!({})).is_err());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn read_only_layer_refuses_changes() {
+    let mut s = model();
+    let asked = s.execute("agent.ask", json!({"range": "B7", "text": "Why?"})).unwrap();
+    s.execute("agent.answer", json!({"id": asked["id"], "text": "Because."})).unwrap();
+    crate::set_read_only(true);
+    assert!(s.execute("agent.ask", json!({"range": "B7", "text": "Again?"})).is_err());
+    assert!(s.execute("agent.private", json!({"range": "B3"})).is_err());
+    assert!(s.execute("agent.note", json!({"range": "B2", "text": "x"})).is_err());
+    assert!(s.execute("agent.exec", json!({"command": "cell.set", "params": {"cell": "B2", "input": 1}})).is_err());
+    assert!(s.execute("agent.seen", json!({"id": asked["id"]})).is_ok(), "reading an answer is fine");
+    assert!(s.execute("agent.layer", json!({})).is_ok());
+    crate::set_read_only(false);
+    assert!(s.execute("agent.ask", json!({"range": "B7", "text": "Again?"})).is_ok());
+}
