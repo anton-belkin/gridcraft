@@ -34,6 +34,9 @@ GridCraft started you itself (background agent) or sends questions into your ses
 `<channel source="gridcraft" question_id=…>` message), the questions come to you: just answer. On startup also call `list_questions` with status `open`: questions
 asked before you connected are waiting too.
 
+A question with kind `ping` is a connection check: answer it at once with "here", don't
+investigate.
+
 ## For each question
 
 1. `claim_question` at once: the cell shows the user you are on it.

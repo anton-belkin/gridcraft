@@ -87,6 +87,32 @@ pub struct Question {
     /// The reader has opened the answer.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub seen: bool,
+    /// Empty for a reader's question; [`PING`] for a connection check (never shown as a question,
+    /// never saved).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub kind: String,
+}
+
+/// The kind of a connection check ("is anyone there?").
+pub const PING: &str = "ping";
+
+impl Question {
+    pub fn is_ping(&self) -> bool {
+        self.kind == PING
+    }
+}
+
+/// Where the last connection check stands.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Ping {
+    /// Asked at, no answer yet.
+    Waiting {
+        asked_at: u64,
+    },
+    Answered {
+        asked_at: u64,
+        answered_at: u64,
+    },
 }
 
 /// An explanation the agent left on a range: why it is done this way, a prepared answer to a
@@ -309,6 +335,15 @@ impl Layer {
         }
     }
 
+    /// The last connection check, if one was made.
+    pub fn ping(&self) -> Option<Ping> {
+        let q = self.questions.iter().rev().find(|q| q.is_ping())?;
+        Some(match &q.answer {
+            Some(a) => Ping::Answered { asked_at: q.asked_at, answered_at: a.at },
+            None => Ping::Waiting { asked_at: q.asked_at },
+        })
+    }
+
     pub fn is_empty(&self) -> bool {
         self.anchors.is_empty() && self.log.is_empty() && self.safe.is_none() && self.workbook_id.is_empty() && self.links.is_empty()
     }
@@ -405,7 +440,10 @@ pub fn write_into(wb: &mut Workbook, layer: &Layer) {
     p.parts.retain(|q| !ours.contains(&q.name));
     p.rels.retain(|r| !(r.rel_type == REL_CUSTOM_XML && ours.iter().any(|n| n == &r.target || r.target.ends_with(n.as_str()))) && r.id != REL_ID);
     if !layer.is_empty() {
-        let json = serde_json::to_string(layer).unwrap_or_default();
+        // Connection checks belong to this session, not to the file.
+        let mut layer = layer.clone();
+        layer.questions.retain(|q| !q.is_ping());
+        let json = serde_json::to_string(&layer).unwrap_or_default();
         // CDATA can't hold `]]>`; JSON only has it inside strings, where `]` means the same.
         let json = json.replace("]]>", "\\u005d\\u005d>");
         let xml = format!("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<agentLayer xmlns=\"{NS}\"><![CDATA[{json}]]></agentLayer>");

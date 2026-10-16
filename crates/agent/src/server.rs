@@ -13,10 +13,34 @@
 use std::collections::HashSet;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use gridcraft_mcp::{Backend, Remote};
 use serde_json::{Value, json};
+
+/// Open `/events` streams, and channel streams (`GET /mcp`) of clients that take channel events.
+static EVENT_STREAMS: AtomicUsize = AtomicUsize::new(0);
+static CHANNEL_STREAMS: AtomicUsize = AtomicUsize::new(0);
+
+/// Counts an open stream while it lives.
+struct Open(&'static AtomicUsize);
+impl Open {
+    fn new(c: &'static AtomicUsize) -> Open {
+        c.fetch_add(1, Ordering::Relaxed);
+        Open(c)
+    }
+}
+impl Drop for Open {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::Relaxed);
+    }
+}
+
+/// Listeners connected to this server now: (`/events` streams, channel streams).
+pub fn streams() -> (usize, usize) {
+    (EVENT_STREAMS.load(Ordering::Relaxed), CHANNEL_STREAMS.load(Ordering::Relaxed))
+}
 
 /// Default port of the agent server.
 pub const DEFAULT_PORT: u16 = 7980;
@@ -43,6 +67,7 @@ pub fn start(port: u16, control: String) -> std::io::Result<u16> {
 struct Request {
     method: String,
     path: String,
+    query: String,
     headers: Vec<(String, String)>,
     body: Vec<u8>,
 }
@@ -73,7 +98,9 @@ fn read_request(r: &mut BufReader<TcpStream>) -> Option<Request> {
     let mut lines = head.lines();
     let mut first = lines.next()?.split_whitespace();
     let method = first.next()?.to_string();
-    let path = first.next()?.split('?').next().unwrap_or("/").to_string();
+    let target = first.next()?;
+    let (path, query) = target.split_once('?').unwrap_or((target, ""));
+    let (path, query) = (path.to_string(), query.to_string());
     let headers: Vec<(String, String)> = lines.filter_map(|l| l.split_once(':').map(|(k, v)| (k.trim().to_string(), v.trim().to_string()))).collect();
     let len = headers.iter().find(|(k, _)| k.eq_ignore_ascii_case("content-length")).and_then(|(_, v)| v.parse::<usize>().ok()).unwrap_or(0);
     if len > MAX_BODY {
@@ -81,7 +108,7 @@ fn read_request(r: &mut BufReader<TcpStream>) -> Option<Request> {
     }
     let mut body = vec![0; len];
     r.read_exact(&mut body).ok()?;
-    Some(Request { method, path, headers, body })
+    Some(Request { method, path, query, headers, body })
 }
 
 fn respond(w: &mut TcpStream, status: &str, ctype: &str, body: &[u8]) -> std::io::Result<()> {
@@ -114,7 +141,9 @@ fn serve(stream: TcpStream, control: &str) {
         let result = match (req.method.as_str(), req.path.as_str()) {
             ("POST", "/mcp") => post_mcp(&mut w, &req, control, &mut backend),
             ("GET", "/mcp") => {
-                channel_stream(w, control);
+                // The stdio server says which client it serves: only Claude Code takes channel events.
+                let client = req.query.split('&').find_map(|kv| kv.strip_prefix("client=")).unwrap_or("").to_string();
+                channel_stream(w, control, &client);
                 return;
             }
             ("DELETE", "/mcp") => respond(&mut w, "200 OK", "text/plain", b""),
@@ -168,7 +197,10 @@ pub(crate) fn handle_any(b: &mut dyn Backend, msg: &Value) -> Option<Value> {
 
 /// The `GET /mcp` stream: in "my session" mode, each new pending question as a channel event.
 /// Questions that wait while the mode is off are sent when it is switched on.
-fn channel_stream(mut w: TcpStream, control: &str) {
+fn channel_stream(mut w: TcpStream, control: &str, client: &str) {
+    // Claude Desktop and Cowork don't take channel events: their stdio servers aren't listeners.
+    let listens = client.is_empty() || client.to_ascii_lowercase().contains("claude-code");
+    let _open = listens.then(|| Open::new(&CHANNEL_STREAMS));
     if w.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n: connected\n\n")
         .is_err()
     {
@@ -213,6 +245,7 @@ fn channel_stream(mut w: TcpStream, control: &str) {
 
 /// Streams new pending questions, one JSON object per line, until the client goes away.
 fn events(mut w: TcpStream, control: &str) {
+    let _open = Open::new(&EVENT_STREAMS);
     if w.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: application/x-ndjson\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n").is_err() {
         return;
     }
@@ -220,8 +253,13 @@ fn events(mut w: TcpStream, control: &str) {
     let mut seen: HashSet<String> = HashSet::new();
     let mut slot: Option<Remote> = None;
     loop {
-        if let Ok(b) = backend(&mut slot, control) {
-            match b.call("engine.execute", json!({"command": "agent.questions", "params": {"status": "pending", "actor": "agent", "masked": true}})) {
+        if crate::runner::mode() != crate::runner::Mode::Off
+            && let Ok(b) = backend(&mut slot, control)
+        {
+            match b.call(
+                "engine.execute",
+                json!({"command": "agent.questions", "params": {"status": "pending", "actor": "agent", "masked": true, "wait": true}}),
+            ) {
                 Ok(Value::Array(list)) => {
                     for q in list {
                         let Some(id) = q.get("id").and_then(Value::as_str).map(str::to_string) else { continue };
@@ -231,6 +269,7 @@ fn events(mut w: TcpStream, control: &str) {
                         let line = json!({
                             "event": "question",
                             "id": id,
+                            "kind": q.get("kind").cloned().unwrap_or_else(|| json!("question")),
                             "range": q.get("range"),
                             "label": q.get("label"),
                             "question": q.get("text"),

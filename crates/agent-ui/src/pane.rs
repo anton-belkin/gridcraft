@@ -429,7 +429,7 @@ fn short_cell(a1: &str) -> String {
 }
 
 fn questions_tab(app: &SheetApp, ui: &mut Ui, l: &Layer, t: &Tokens, p: &Palette, acts: &mut Vec<Act>) {
-    if l.questions.is_empty() {
+    if !l.questions.iter().any(|q| !q.is_ping()) {
         ui.label(
             RichText::new(if gridcraft_agent::read_only() {
                 "No prepared answers in this copy."
@@ -446,7 +446,7 @@ fn questions_tab(app: &SheetApp, ui: &mut Ui, l: &Layer, t: &Tokens, p: &Palette
         (QuestionStatus::Pending, _) => 2,
         _ => 3,
     };
-    let mut list: Vec<&Question> = l.questions.iter().collect();
+    let mut list: Vec<&Question> = l.questions.iter().filter(|q| !q.is_ping()).collect();
     list.sort_by_key(|q| (order(q), std::cmp::Reverse(q.asked_at)));
     for q in list {
         question_card(app, ui, l, q, t, p, acts, true);

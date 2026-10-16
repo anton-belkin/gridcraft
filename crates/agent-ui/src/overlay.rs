@@ -226,7 +226,7 @@ pub(crate) fn paint(st: &mut AgentUi, app: &SheetApp, ui: &Ui, painter: &Painter
         }
         badge(painter, r, q.status, q.seen, &p, ui.input(|i| i.time));
     }
-    if l.questions.iter().any(|q| q.status == QuestionStatus::Working) {
+    if l.questions.iter().any(|q| q.status == QuestionStatus::Working && !q.is_ping()) {
         ui.ctx().request_repaint_after(std::time::Duration::from_millis(120));
     }
 

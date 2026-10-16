@@ -22,6 +22,7 @@ Change the workbook only with run_command, giving a reason and a source. PRIVACY
 hold client data; you see stand-in values with the same sign and magnitude, and everything computed from them is computed \
 from the stand-ins. Never present those numbers as real; reason about the model's mechanics instead. You cannot write to \
 private cells. \
+PING: a question with kind \"ping\" is a connection check: answer it at once with \"here\", don't investigate. \
 CHANNEL: when GridCraft sends questions to this session, each arrives as <channel source=\"gridcraft\" question_id=\"q3\" \
 range=\"Sheet1!B7\">question text</channel>: claim_question with that id, investigate, answer_question. Keep it short; \
 the user is waiting in the spreadsheet.";
@@ -198,7 +199,18 @@ pub fn tools() -> Vec<Value> {
     ]
 }
 
+/// Refusal when the agent is off in GridCraft (the mode, as the app reports it).
+pub fn gate(mode: Option<&str>) -> Result<(), String> {
+    if mode == Some("off") {
+        return Err("The agent is off in GridCraft (Agent tab ▸ Connection ▸ Mode). Ask the user to choose a mode first.".into());
+    }
+    Ok(())
+}
+
 fn exec(b: &mut dyn Backend, command: &str, mut params: Value) -> Result<Value, String> {
+    // The app decides whether an agent may work at all (also for the stdio server, a separate process).
+    let mode = b.call("engine.execute", json!({"command": "agent.agentMode", "params": {}})).ok();
+    gate(mode.as_ref().and_then(|m| m.get("mode")).and_then(Value::as_str))?;
     if let Value::Object(o) = &mut params {
         o.insert("actor".into(), json!("agent"));
         o.insert("masked".into(), json!(true));
@@ -227,7 +239,7 @@ pub fn call(b: &mut dyn Backend, name: &str, args: &Value) -> Result<Value, Stri
             let secs = args.get("timeout_seconds").and_then(Value::as_f64).unwrap_or(25.0).clamp(0.0, 50.0);
             let mut polls = (secs * 2.0) as u32;
             loop {
-                let v = exec(b, "agent.questions", json!({"status": "pending"}))?;
+                let v = exec(b, "agent.questions", json!({"status": "pending", "wait": true}))?;
                 if v.as_array().is_some_and(|a| !a.is_empty()) || polls == 0 {
                     return Ok(v);
                 }
