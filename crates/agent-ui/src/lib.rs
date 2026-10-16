@@ -80,7 +80,7 @@ pub fn set_goto(target: String) {
     }
 }
 
-/// Opens (or closes) the Agent pane on a tab (`selection`, `overview`, `history`; `variants` and
+/// Opens (or closes) the Agent pane on a tab (`selection`, `overview`, `history`, `file`; `variants` and
 /// `risk` open the selection's analysis)
 /// with a heat map (`off`, `confidence`, `impact`), from the next frame.
 pub fn request_pane(open: bool, tab: &str, heat: &str) {
@@ -100,6 +100,8 @@ pub(crate) enum Tab {
     Selection,
     Overview,
     History,
+    /// The file's own context (the button beside the tabs).
+    FileContext,
 }
 
 /// What the Overview lists.
@@ -140,6 +142,8 @@ pub(crate) struct AgentUi {
     pub share_discussion: bool,
     /// The proposal option previewed on the sheet: (topic, option).
     pub preview: Option<(String, String)>,
+    /// The link under the pointer in the pane: its target is highlighted on the sheet.
+    pub hover_link: Option<String>,
     pub overlay: overlay::State,
     pub pane: pane::State,
     #[cfg(not(target_arch = "wasm32"))]
@@ -337,6 +341,7 @@ impl UiExtension for AgentUi {
             self.tab = match tab.as_str() {
                 "overview" | "questions" | "notes" => Tab::Overview,
                 "history" => Tab::History,
+                "file" | "filecontext" | "file-context" => Tab::FileContext,
                 _ => Tab::Selection,
             };
             self.pane.analysis_open = matches!(tab.as_str(), "variants" | "risk" | "analysis");
@@ -400,8 +405,9 @@ impl UiExtension for AgentUi {
     }
 
     fn side_panel(&mut self, app: &mut SheetApp, ui: &mut Ui) {
-        // The pane says which proposal to preview, while it shows one.
+        // The pane says which proposal to preview and which link is hovered, while it shows them.
         self.preview = None;
+        self.hover_link = None;
         if self.open {
             pane::show(self, app, ui);
         }

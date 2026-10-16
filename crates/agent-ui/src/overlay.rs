@@ -90,6 +90,11 @@ impl State {
     }
 }
 
+/// A place of the topic holds this cell.
+pub(crate) fn topic_has_cell(d: &DocState, l: &Layer, t: &layer::Topic, sheet: usize, c: CellRef) -> bool {
+    t.places.iter().any(|p| l.anchor(&p.anchor).and_then(|a| anchor::resolve(&d.wb, a)).is_some_and(|x| x.sheet == sheet && x.range.contains(c)))
+}
+
 pub(crate) fn is_formula_number(d: &DocState, sheet: usize, c: CellRef) -> bool {
     d.wb.sheet(sheet).and_then(|s| s.cell(c)).is_some_and(|x| x.formula.is_some() && matches!(x.value, Value::Number(_)))
 }
@@ -263,6 +268,12 @@ pub(crate) fn paint(st: &mut AgentUi, app: &SheetApp, ui: &Ui, painter: &Painter
     let n = topics::numbering(&d.wb, &l);
     let mut by_cell: Vec<(CellRef, Vec<(String, Color32, bool, String, String)>)> = vec![];
     let mut pulsing = false;
+    // The active cell inside a place lights up its topic: every place outlined, markers ringed.
+    let lit: Vec<String> = if d.selection.current().is_single() {
+        n.order.iter().filter(|id| l.topic(id).is_some_and(|t| topic_has_cell(d, &l, t, si, d.selection.active))).cloned().collect()
+    } else {
+        vec![]
+    };
     for id in &n.order {
         let Some(tp) = l.topic(id) else { continue };
         let color = p.status(tp.status.status);
@@ -270,7 +281,9 @@ pub(crate) fn paint(st: &mut AgentUi, app: &SheetApp, ui: &Ui, painter: &Painter
         let unread = topics::unread(&l, id);
         for place in &tp.places {
             let Some(pl) = on_sheet(&place.anchor) else { continue };
-            if !pl.range.is_single() {
+            if lit.contains(id) {
+                painter.rect_stroke(cells.rect(pl.range), 0.0, Stroke::new(2.0, color), StrokeKind::Inside);
+            } else if !pl.range.is_single() {
                 painter.rect_stroke(cells.rect(pl.range), 0.0, Stroke::new(1.0, color.gamma_multiply(0.55)), StrokeKind::Inside);
             }
             let fill = if working {
@@ -311,6 +324,9 @@ pub(crate) fn paint(st: &mut AgentUi, app: &SheetApp, ui: &Ui, painter: &Painter
                 Some(mut x) => {
                     for (e, w) in list.iter().zip(sizes) {
                         let r = Rect::from_min_size(pos2(x - w, cell.top() + 1.0), vec2(w, h));
+                        if lit.contains(&e.3) {
+                            painter.rect_stroke(r.expand(1.5), r.height() / 2.0 + 1.5, Stroke::new(1.5, e.1), StrokeKind::Outside);
+                        }
                         marker(painter, r, &e.0, e.1, e.2, &t);
                         markers.push((r, e.3.clone(), e.4.clone()));
                         x -= w + 1.0;
@@ -334,12 +350,85 @@ pub(crate) fn paint(st: &mut AgentUi, app: &SheetApp, ui: &Ui, painter: &Painter
         ui.ctx().request_repaint_after(std::time::Duration::from_millis(120));
     }
 
+    hover_link(st, ui, painter, d, &l, cells, &t);
     hover(st, app, ui, d, &l, cells, &t, &p);
 }
 
 fn marker_width(painter: &Painter, label: &str, h: f32) -> f32 {
     let galley = painter.layout_no_wrap(label.to_string(), theme::ui_bold(h - 1.5), Color32::WHITE);
     (galley.size().x + 4.0).max(h)
+}
+
+/// The target of the link under the pointer in the pane, outlined on the sheet without moving the
+/// selection or the view: a cell or range, a topic's places, a place; a removed place shows the
+/// neighbours it was between. Off screen, an edge hint says where ("↓ B40").
+#[allow(clippy::too_many_arguments)]
+fn hover_link(st: &AgentUi, ui: &Ui, painter: &Painter, d: &DocState, l: &Layer, cells: &CellGeometry, t: &Tokens) {
+    let Some(href) = st.hover_link.as_deref() else { return };
+    let si = cells.sheet_index;
+    let resolve = |id: &str| l.anchor(id).and_then(|a| anchor::resolve(&d.wb, a));
+    // (place, removed: shown as a neighbour)
+    let mut targets: Vec<(anchor::Place, bool)> = vec![];
+    let place_or_neighbours = |id: &str, out: &mut Vec<(anchor::Place, bool)>| match resolve(id) {
+        Some(p) => out.push((p, false)),
+        None => {
+            if let Some(w) = l.whereabouts.iter().rev().find(|w| w.anchor == id) {
+                out.extend([w.before.as_deref(), w.after.as_deref()].into_iter().flatten().filter_map(resolve).map(|p| (p, true)));
+            }
+        }
+    };
+    if let Some(target) = href.strip_prefix("cell:") {
+        if let Some(p) = anchor::parse_place(&d.wb, target, d.wb.active_sheet) {
+            targets.push((p, false));
+        }
+    } else if let Some(r) = href.strip_prefix("topic:") {
+        if let Some(t) = topics::find_topic(&d.wb, l, r).and_then(|id| l.topic(&id).cloned()) {
+            for p in &t.places {
+                place_or_neighbours(&p.anchor, &mut targets);
+            }
+        }
+    } else if let Some(r) = href.strip_prefix("place:")
+        && let Some((_, a)) = topics::find_place(&d.wb, l, r)
+    {
+        place_or_neighbours(&a, &mut targets);
+    }
+    let view = cells.cells();
+    let mut hints: Vec<(egui::Pos2, Align2, String)> = vec![];
+    for (p, removed) in &targets {
+        let label = textlinks::address(p, si);
+        if p.sheet != si {
+            hints.push((pos2(view.right() - 8.0, view.top() + 8.0), Align2::RIGHT_TOP, format!("→ {label}")));
+            continue;
+        }
+        let r = cells.rect(p.range);
+        if r.intersects(view) {
+            let color = if *removed { t.text_dim } else { crate::BLUE };
+            painter.rect_filled(r, 0.0, color.gamma_multiply(0.10));
+            painter.rect_stroke(r, 0.0, Stroke::new(2.0, color), StrokeKind::Outside);
+            continue;
+        }
+        // Off screen: a hint on the edge it lies beyond.
+        let (at, align, arrow) = if r.bottom() < view.top() {
+            (pos2(r.center().x.clamp(view.left() + 40.0, view.right() - 40.0), view.top() + 6.0), Align2::CENTER_TOP, "↑")
+        } else if r.top() > view.bottom() {
+            (pos2(r.center().x.clamp(view.left() + 40.0, view.right() - 40.0), view.bottom() - 6.0), Align2::CENTER_BOTTOM, "↓")
+        } else if r.right() < view.left() {
+            (pos2(view.left() + 6.0, r.center().y.clamp(view.top() + 12.0, view.bottom() - 12.0)), Align2::LEFT_CENTER, "←")
+        } else {
+            (pos2(view.right() - 6.0, r.center().y.clamp(view.top() + 12.0, view.bottom() - 12.0)), Align2::RIGHT_CENTER, "→")
+        };
+        hints.push((at, align, format!("{arrow} {label}")));
+    }
+    for (at, align, text) in hints {
+        let g = painter.layout_no_wrap(text, theme::ui_bold(11.0), Color32::WHITE);
+        let size = g.size() + vec2(12.0, 6.0);
+        let rect = align.anchor_size(at, size);
+        painter.rect_filled(rect, size.y / 2.0, crate::BLUE);
+        painter.galley(rect.min + vec2(6.0, 3.0), g, Color32::WHITE);
+    }
+    if !targets.is_empty() {
+        ui.ctx().request_repaint();
+    }
 }
 
 /// A topic marker: a small pill with the number (`3`, `3.2`); an unread answer adds a dot.

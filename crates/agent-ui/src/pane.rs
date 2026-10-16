@@ -34,11 +34,16 @@ pub(crate) struct State {
     /// The option shown per topic, and a reject comment being typed.
     option: HashMap<String, String>,
     reject_text: HashMap<String, String>,
+    /// The file context: the entry being edited (id, title, kind, text), and a new one.
+    fc_edit: Option<(String, String, String, String)>,
+    fc_new: (String, String, String),
 }
 
 /// Something the user clicked, acted on once drawing is done (drawing borrows the app).
 enum Act {
     Follow(String),
+    /// The pointer is on a link: highlight its target (no click, no focus change).
+    Hover(String),
     Run(&'static str, Json),
     Topic(String),
 }
@@ -56,6 +61,10 @@ pub(crate) fn show(st: &mut AgentUi, app: &mut SheetApp, ui: &mut Ui) {
         .resizable(true)
         .frame(egui::Frame::NONE.fill(t.ribbon).inner_margin(10))
         .show(ui, |ui| {
+            // One point larger than the app's text: the pane is for reading.
+            for f in ui.style_mut().text_styles.values_mut() {
+                f.size += 1.0;
+            }
             ui.horizontal(|ui| {
                 ui.label(RichText::new("Agent").font(theme::ui_bold(15.0)));
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -79,6 +88,16 @@ pub(crate) fn show(st: &mut AgentUi, app: &mut SheetApp, ui: &mut Ui) {
                         st.tab = tab;
                     }
                 }
+                let n = l.file_context.len();
+                let label = if n > 0 { format!("File context ({n})") } else { "File context".to_string() };
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    let r = ui
+                        .selectable_label(st.tab == Tab::FileContext, RichText::new(label).small())
+                        .on_hover_text("Context about the whole workbook: what it is, for whom, house rules, background");
+                    if r.clicked() {
+                        st.tab = if st.tab == Tab::FileContext { Tab::Selection } else { Tab::FileContext };
+                    }
+                });
             });
             ui.separator();
             if st.tab == Tab::Selection {
@@ -97,6 +116,7 @@ pub(crate) fn show(st: &mut AgentUi, app: &mut SheetApp, ui: &mut Ui) {
                 Tab::Selection => selection_tab(st, app, ui, &l, &t, &p, &mut acts),
                 Tab::Overview => overview_tab(st, app, ui, &l, &t, &p, &mut acts),
                 Tab::History => history_tab(app, ui, &l, &t, &p, &mut acts),
+                Tab::FileContext => file_context_tab(st, app, ui, &l, &t, &p, &mut acts),
             });
         });
     if close {
@@ -105,6 +125,7 @@ pub(crate) fn show(st: &mut AgentUi, app: &mut SheetApp, ui: &mut Ui) {
     let ctx = ui.ctx().clone();
     for a in acts {
         match a {
+            Act::Hover(href) => st.hover_link = Some(href),
             Act::Follow(href) => follow(st, app, &ctx, &href),
             Act::Run(id, params) => app.run_or_alert(id, params),
             Act::Topic(id) => {
@@ -143,7 +164,11 @@ fn rich(ui: &mut Ui, segs: &[Seg], acts: &mut Vec<Act>, tips: &[Link], style: im
                         .find(|k| &k.href == href && !k.summary.is_empty())
                         .map_or_else(|| href.strip_prefix("cell:").unwrap_or(href).to_string(), |k| k.summary.clone());
                     let color = ui.visuals().hyperlink_color;
-                    if ui.link(style(RichText::new(label)).color(color)).on_hover_text(tip).clicked() {
+                    let r = ui.link(style(RichText::new(label)).color(color)).on_hover_text(tip);
+                    if r.hovered() {
+                        acts.push(Act::Hover(href.clone()));
+                    }
+                    if r.clicked() {
                         acts.push(Act::Follow(href.clone()));
                     }
                 }
@@ -165,6 +190,9 @@ fn links(ui: &mut Ui, list: &[Link], acts: &mut Vec<Act>) {
         for k in list {
             let mut r = ui.link(format!("» {}", k.label));
             r = if k.summary.is_empty() { r.on_hover_text(&k.href) } else { r.on_hover_text(&k.summary) };
+            if r.hovered() {
+                acts.push(Act::Hover(k.href.clone()));
+            }
             if r.clicked() {
                 acts.push(Act::Follow(k.href.clone()));
             }
@@ -173,7 +201,13 @@ fn links(ui: &mut Ui, list: &[Link], acts: &mut Vec<Act>) {
 }
 
 fn card(ui: &mut Ui, t: &Tokens, stripe: Color32, add: impl FnOnce(&mut Ui)) -> egui::Rect {
-    let r = egui::Frame::NONE.fill(t.window).corner_radius(6.0).inner_margin(8.0).stroke(egui::Stroke::new(1.0, t.separator)).show(ui, |ui| {
+    card_lit(ui, t, stripe, false, add)
+}
+
+/// A card; `lit`: the topic the active cell is in (outlined in its colour).
+fn card_lit(ui: &mut Ui, t: &Tokens, stripe: Color32, lit: bool, add: impl FnOnce(&mut Ui)) -> egui::Rect {
+    let stroke = if lit { egui::Stroke::new(1.6, stripe) } else { egui::Stroke::new(1.0, t.separator) };
+    let r = egui::Frame::NONE.fill(t.window).corner_radius(6.0).inner_margin(8.0).stroke(stroke).show(ui, |ui| {
         ui.set_width(ui.available_width());
         let top = ui.cursor().min;
         add(ui);
@@ -215,7 +249,9 @@ fn topic_card(st: &mut AgentUi, app: &SheetApp, ui: &mut Ui, l: &Layer, n: &Numb
     let working = topics::working(l, &tp.id);
     let unread = topics::unread(l, &tp.id);
     let focused = st.focus_topic.as_deref() == Some(tp.id.as_str());
-    let rect = card(ui, t, p.status(status), |ui| {
+    // The active cell is inside one of its places: the card lights up, like its markers.
+    let lit = d.selection.current().is_single() && crate::overlay::topic_has_cell(d, l, tp, d.wb.active_sheet, d.selection.active);
+    let rect = card_lit(ui, t, p.status(status), lit, |ui| {
         ui.horizontal_wrapped(|ui| {
             pill(ui, &num.to_string(), p.status(status), unread, t);
             ui.label(RichText::new(format!("Topic {num}")).strong());
@@ -298,7 +334,11 @@ fn topic_card(st: &mut AgentUi, app: &SheetApp, ui: &mut Ui, l: &Layer, n: &Numb
                 match &live {
                     Some(pl) => {
                         ui.label(RichText::new(label.as_str()).small().strong().color(p.status(status)));
-                        if ui.link(RichText::new(textlinks::address(pl, wb.active_sheet)).small()).clicked() {
+                        let r = ui.link(RichText::new(textlinks::address(pl, wb.active_sheet)).small());
+                        if r.hovered() {
+                            acts.push(Act::Hover(format!("cell:{}", pl.a1())));
+                        }
+                        if r.clicked() {
                             acts.push(Act::Follow(format!("cell:{}", pl.a1())));
                         }
                     }
@@ -880,6 +920,120 @@ fn trace_node(ui: &mut Ui, n: &Json, t: &Tokens, p: &Palette, acts: &mut Vec<Act
                 trace_node(ui, c, t, p, acts, depth + 1);
             }
         });
+}
+
+/// "just now", "5 min ago", "3 h ago", "2 days ago".
+fn ago(at: u64) -> String {
+    let s = gridcraft_agent::now_ms().saturating_sub(at) / 1000;
+    match s {
+        0..60 => "just now".into(),
+        60..3_600 => format!("{} min ago", s / 60),
+        3_600..86_400 => format!("{} h ago", s / 3_600),
+        _ => format!("{} day{} ago", s / 86_400, if s / 86_400 == 1 { "" } else { "s" }),
+    }
+}
+
+const FC_KINDS: [(&str, &str); 5] =
+    [("about", "About"), ("audience", "Audience"), ("rules", "House rules"), ("background", "Background"), ("fact", "Fact")];
+
+fn fc_kind_label(k: &str) -> &str {
+    FC_KINDS.iter().find(|(id, _)| *id == k).map_or(k, |(_, l)| l)
+}
+
+/// The file's own context: what the workbook is, for whom, house rules, background, facts. The
+/// agent gets a summary with every question; it goes along when the workbook is sent.
+fn file_context_tab(st: &mut AgentUi, app: &SheetApp, ui: &mut Ui, l: &Layer, t: &Tokens, p: &Palette, acts: &mut Vec<Act>) {
+    let Some(d) = app.session.active() else { return };
+    let wb = &d.wb;
+    let editable = !gridcraft_agent::read_only();
+    ui.label(RichText::new("File context").strong());
+    ui.label(
+        RichText::new("About the whole workbook: what it is, for whom, house rules, background, facts. The agent gets a summary with every question; it goes along when the workbook is sent.")
+            .small()
+            .color(t.text_dim),
+    );
+    ui.add_space(6.0);
+    if l.file_context.is_empty() {
+        ui.label(RichText::new("Nothing yet.").small().italics().color(t.text_dim));
+    }
+    for f in &l.file_context {
+        let editing = st.pane.fc_edit.as_ref().is_some_and(|e| e.0 == f.id);
+        card(ui, t, p.note, |ui| {
+            if editing {
+                if let Some((_, title, kind, text)) = st.pane.fc_edit.as_mut() {
+                    ui.add(egui::TextEdit::singleline(title).hint_text("Title").desired_width(f32::INFINITY));
+                    kind_picker(ui, kind);
+                    ui.add(egui::TextEdit::multiline(text).desired_rows(3).desired_width(f32::INFINITY));
+                }
+                ui.horizontal(|ui| {
+                    if ui.button("Save").clicked()
+                        && let Some((id, title, kind, text)) = st.pane.fc_edit.take()
+                    {
+                        acts.push(Act::Run("agent.updateFileContext", json!({"id": id, "title": title, "kind": kind, "text": text})));
+                    }
+                    if ui.button("Cancel").clicked() {
+                        st.pane.fc_edit = None;
+                    }
+                });
+                return;
+            }
+            ui.horizontal_wrapped(|ui| {
+                ui.label(RichText::new(if f.title.is_empty() { fc_kind_label(&f.kind) } else { &f.title }).strong());
+                ui.label(RichText::new(fc_kind_label(&f.kind)).small().color(p.note));
+                let who = if f.by == Actor::Agent { "the agent" } else { "you" };
+                ui.label(RichText::new(format!("· {who}, {}", ago(f.at))).small().color(t.text_dim));
+            });
+            text(ui, wb, l, &f.text, acts, &[], |r| r);
+            if editable {
+                ui.horizontal(|ui| {
+                    if ui.small_button("Edit").clicked() {
+                        st.pane.fc_edit = Some((f.id.clone(), f.title.clone(), f.kind.clone(), textlinks::plain(wb, l, &f.text, wb.active_sheet)));
+                    }
+                    if ui.small_button("Remove").on_hover_text("Undo brings it back").clicked() {
+                        acts.push(Act::Run("agent.removeFileContext", json!({"id": f.id})));
+                    }
+                });
+            }
+        });
+    }
+    if !editable {
+        return;
+    }
+    ui.add_space(4.0);
+    egui::CollapsingHeader::new(RichText::new("Add context").strong()).id_salt("agent_fc_add").default_open(l.file_context.is_empty()).show(
+        ui,
+        |ui| {
+            let (title, kind, body) = &mut st.pane.fc_new;
+            if kind.is_empty() {
+                *kind = "about".into();
+            }
+            ui.add(egui::TextEdit::singleline(title).hint_text("Title, e.g. \"What this is\"").desired_width(f32::INFINITY));
+            kind_picker(ui, kind);
+            ui.add(
+                egui::TextEdit::multiline(body)
+                    .hint_text("Acme's 2026 budget for the board. Figures in thousands.")
+                    .desired_rows(3)
+                    .desired_width(f32::INFINITY),
+            );
+            let can = !body.trim().is_empty();
+            if ui.add_enabled(can, egui::Button::new("Add")).clicked() {
+                acts.push(Act::Run("agent.addFileContext", json!({"title": title.trim(), "kind": kind, "text": body.trim()})));
+                *title = String::new();
+                *body = String::new();
+            }
+        },
+    );
+}
+
+fn kind_picker(ui: &mut Ui, kind: &mut String) {
+    ui.horizontal_wrapped(|ui| {
+        ui.spacing_mut().item_spacing.x = 4.0;
+        for (id, label) in FC_KINDS {
+            if ui.selectable_label(kind == id, RichText::new(label).small()).clicked() {
+                *kind = id.to_string();
+            }
+        }
+    });
 }
 
 /// Readiness for sign-off: (agreed, to decide, revise, open, for information).

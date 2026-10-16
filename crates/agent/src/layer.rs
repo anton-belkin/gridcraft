@@ -449,6 +449,24 @@ pub struct Topic {
     pub edits: Option<EditProposal>,
 }
 
+/// An entry of the file's context, not tied to any place.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct FileContext {
+    pub id: String,
+    #[serde(default)]
+    pub title: String,
+    /// `about`, `audience`, `rules`, `background`, `fact` (free).
+    #[serde(default)]
+    pub kind: String,
+    /// With links inside, as stored (anchors).
+    #[serde(default)]
+    pub text: String,
+    #[serde(default)]
+    pub by: Actor,
+    #[serde(default)]
+    pub at: u64,
+}
+
 /// Where a topic's proposed edits stand.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -579,6 +597,10 @@ pub struct Layer {
     /// Where deleted places and links were.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub whereabouts: Vec<Whereabouts>,
+    /// The file's own context: what the document is, for whom, house rules, background, facts.
+    /// Kept when the document is sent.
+    #[serde(default, rename = "fileContext", skip_serializing_if = "Vec::is_empty")]
+    pub file_context: Vec<FileContext>,
     /// What the agent knows about this document (the Agent tab's Context): chosen per document.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context: Option<AgentContext>,
@@ -627,6 +649,7 @@ impl Layer {
             && self.workbook_id.is_empty()
             && self.links.is_empty()
             && self.context.is_none()
+            && self.file_context.is_empty()
     }
 
     pub fn topic(&self, id: &str) -> Option<&Topic> {
@@ -725,6 +748,9 @@ impl Layer {
             for p in &t.places {
                 scan(&p.reason);
             }
+        }
+        for f in &self.file_context {
+            scan(&f.text);
         }
         let used = |id: &str| {
             in_text.contains(id)

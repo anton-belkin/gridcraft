@@ -1827,3 +1827,49 @@ fn a_rejected_proposal_tells_the_agent_why() {
     assert!(crate::export::shared_layer(&l, false).topics.iter().all(|t| t.edits.is_none()));
     assert!(crate::export::shared_layer(&l, true).topics.iter().any(|t| t.edits.is_some()));
 }
+
+// ---------------------------------------------------------------- the file's own context
+
+#[test]
+fn file_context_reaches_the_agent_stays_in_the_file_and_undoes() {
+    let mut b = McpLocal(model());
+    let call = |b: &mut McpLocal, name: &str, args: Value| crate::mcp::call(b, name, &args);
+    // The agent adds what it learned; the person adds a house rule.
+    let id = call(
+        &mut b,
+        "add_file_context",
+        json!({"title": "What this is", "kind": "about", "text": "Acme's 2026 budget for the board; profit is in B7."}),
+    )
+    .unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let depth = b.0.active().unwrap().undo.len();
+    b.0.execute("agent.addFileContext", json!({"title": "House rule", "kind": "rules", "text": "Round to thousands in answers."})).unwrap();
+    assert_eq!(b.0.active().unwrap().undo.len(), depth + 1, "the person's edit is undoable; the agent's isn't on their stack");
+    let all = call(&mut b, "get_file_context", json!({})).unwrap();
+    assert_eq!(all.as_array().unwrap().len(), 2);
+    assert_eq!(all[0]["by"], json!("agent"));
+    assert!(all[0]["text"].as_str().unwrap().contains("[B7](cell:Sheet1!B7)"));
+    // A short summary with get_context and with every question.
+    let ctx = call(&mut b, "get_context", json!({})).unwrap();
+    assert!(ctx["fileContext"].as_str().unwrap().contains("What this is: Acme's 2026 budget"), "{}", ctx["fileContext"]);
+    b.0.execute("agent.ask", json!({"range": "B7", "text": "Why?"})).unwrap();
+    let w = call(&mut b, "wait_for_questions", json!({"timeout_seconds": 0})).unwrap();
+    assert!(w[0]["fileContext"].as_str().unwrap().contains("House rule: Round to thousands"));
+    // Edited and removed.
+    call(&mut b, "update_file_context", json!({"id": id, "text": "Acme's 2026 budget for the board."})).unwrap();
+    assert_eq!(call(&mut b, "get_file_context", json!({})).unwrap()[0]["text"], json!("Acme's 2026 budget for the board."));
+    let mut s = b.0;
+    // The person's add undone, then redone.
+    let rule = layer::get(s.active().unwrap()).file_context.iter().find(|f| f.title == "House rule").unwrap().id.clone();
+    s.execute("agent.removeFileContext", json!({"id": rule})).unwrap();
+    s.execute("edit.undo", json!({})).unwrap();
+    assert_eq!(layer::get(s.active().unwrap()).file_context.len(), 2);
+    // Kept in the file, and when the workbook is sent.
+    let l = layer::get(s.active().unwrap());
+    let mut wb = (*s.active().unwrap().wb).clone();
+    layer::write_into(&mut wb, &l);
+    assert_eq!(layer::read_from(&wb).file_context, l.file_context);
+    assert_eq!(crate::export::shared_layer(&l, false).file_context, l.file_context);
+}

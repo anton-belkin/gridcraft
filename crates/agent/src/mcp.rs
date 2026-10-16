@@ -35,6 +35,9 @@ range=\"Sheet1!B7\">question text</channel>: claim_question with that id, invest
 the user is waiting in the spreadsheet. \
 VOICE: a spoken question links what the user pointed at while speaking (see refs); resolve \"this\", \"that one\", \"это\" \
 from those and the context. \
+FILE CONTEXT: what the document is, for whom, its house rules and background live in the file's context \
+(get_file_context; a summary comes with get_context and every question). Add what you learn about the document as a whole \
+with add_file_context; keep it current with update_file_context. \
 TOPICS: every question belongs to a topic (its places, a status, notes and the discussion); questions carry their topic. \
 Write links inside your text: [B1](cell:Sheet1!B1), [topic 3](topic:3), [the source](https://…); they follow the cells when \
 rows move. When a change here affects other cells, add_places to the topic with a reason each; widen_place when the answer is \
@@ -272,6 +275,28 @@ pub fn tools() -> Vec<Value> {
             false,
         ),
         tool(
+            "get_file_context",
+            "The file's own context: what the document is, for whom, house rules, background, facts gathered. Not tied to any place; get_context and every question carry a short summary.",
+            json!({}),
+            &[],
+            true,
+        ),
+        tool(
+            "add_file_context",
+            "Add context about the whole document (what it is, for whom, house rules, background, a fact you gathered). Kept in the file and when it is sent. Links inside the text. Returns its id.",
+            json!({"title": s("Short title"), "kind": {"type": "string", "enum": ["about", "audience", "rules", "background", "fact"]}, "text": s("The context, links inside")}),
+            &["title", "text"],
+            false,
+        ),
+        tool(
+            "update_file_context",
+            "Edit an entry of the file's context.",
+            json!({"id": s("Entry id"), "title": s("New title"), "text": s("New text")}),
+            &["id"],
+            false,
+        ),
+        tool("remove_file_context", "Remove an entry of the file's context.", json!({"id": s("Entry id")}), &["id"], false),
+        tool(
             "describe_option",
             "Name an option of a topic's proposal and say why (links inside the text). Shown to the person beside the option.",
             json!({"topic": s("Topic id or number"), "option": s("Option letter"), "title": s("Short title, e.g. \"Lower fixed costs\""), "why": s("Why this option")}),
@@ -381,6 +406,10 @@ fn call_tool(b: &mut dyn Backend, name: &str, args: &Value) -> Result<Value, Str
         "risk_matrix" => exec(b, "agent.risk", pick(args, &["cell"])),
         "use_alternative" => exec(b, "agent.useVariant", pick(args, &["id", "option"])),
         "run_command" => exec(b, "agent.exec", pick(args, &["command", "params", "reason", "source", "topic", "option"])),
+        "get_file_context" => exec(b, "agent.fileContext", json!({})),
+        "add_file_context" => exec(b, "agent.addFileContext", pick(args, &["title", "kind", "text"])),
+        "update_file_context" => exec(b, "agent.updateFileContext", pick(args, &["id", "title", "text"])),
+        "remove_file_context" => exec(b, "agent.removeFileContext", pick(args, &["id"])),
         "describe_option" => exec(b, "agent.describeOption", pick(args, &["topic", "option", "title", "why"])),
         "discard_proposal" => exec(b, "agent.discardProposal", pick(args, &["topic", "option"])),
         "list_commands" => {

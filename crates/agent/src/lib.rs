@@ -27,6 +27,7 @@ pub mod context;
 pub mod cowork;
 pub mod docs;
 pub mod export;
+pub mod filecontext;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod hub;
 pub mod layer;

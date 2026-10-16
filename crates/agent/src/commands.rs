@@ -50,6 +50,7 @@ pub static ALL: &[&[CommandSpec]] = &[
     crate::docs::SPECS,
     crate::topics::SPECS,
     crate::proposals::SPECS,
+    crate::filecontext::SPECS,
     crate::variants::SPECS,
     crate::stress::SPECS,
     crate::safe::SPECS,
@@ -433,6 +434,10 @@ fn question_json(s: &Session, l: &Layer, q: &Question, wb: &Workbook) -> Json {
         let n = crate::topics::numbering(wb, l);
         o["topic"] = json!({"id": t.id, "number": n.topic.get(&t.id), "status": t.status.status.id(), "statusText": crate::textlinks::render(wb, l, &t.status.text, home)});
     }
+    // The file's own context, in short.
+    if !l.file_context.is_empty() {
+        o["fileContext"] = json!(crate::filecontext::summary(wb, l));
+    }
     // Pending proposals on the same cells, so the answer doesn't contradict them.
     if matches!(q.status, QuestionStatus::Pending | QuestionStatus::Working)
         && let Ok(d) = s.doc()
@@ -732,6 +737,7 @@ fn context(s: &mut Session, p: &Json) -> Result<Json> {
         "safeFile": l.safe.as_ref().map(|x| json!({"on": true, "locked": x.sealed.is_some()})),
         "openQuestions": l.questions.iter().filter(|q| matches!(q.status, QuestionStatus::Pending | QuestionStatus::Working) && !q.is_ping()).count(),
         "notes": l.notes.len(),
+        "fileContext": crate::filecontext::summary(&wb, &l),
         "log": l.log.iter().rev().take(20).collect::<Vec<_>>(),
     }))
 }

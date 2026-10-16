@@ -272,6 +272,21 @@ upstream. Each one accepted upstream removes its lines from the patch.
   follow-up question in the topic. Events `proposal_applied`, `proposal_rejected` (with the
   comment) and `proposal_outdated` on `/events` and the channel. Drafts are cached per workbook
   version; proposals stay home when the workbook is sent, unless the discussion goes too.
+- **Pane and topics** (brief part E).
+  - *The active cell inside a place lights up its topic*: every place of the topic outlined in its
+    status colour, its markers ringed, its card outlined on the Selection tab (no click needed).
+  - *The pane's text is one point larger* than the app's.
+  - *The file's own context* (`filecontext.rs`, `Layer.file_context`, saved as `fileContext`):
+    entries with a title, a kind (about, audience, house rules, background, fact), text with links
+    inside, who added each and when. MCP `get_file_context`, `add_file_context` → id,
+    `update_file_context`, `remove_file_context`; `get_context` and every question carry a short
+    summary (`fileContext`). Kept in the file and when it is sent. A **File context** button beside
+    the pane's tabs shows it; the person adds, edits and removes entries there, each an undo step
+    (`Part::FileContext`); the agent's aren't on the person's stack.
+  - *Hovering a link in the pane highlights its target* on the sheet, without moving the
+    selection or the view: a cell or range (outlined), a topic's places (`topic:`), a place
+    (`place:`); a removed place outlines the neighbours it was between. A target off screen or on
+    another sheet gets an edge hint ("↓ C40", "→ Sheet2!B4").
 - **Analysis is deterministic.** The trace and the sensitivity are computed by the engine (the
   dependency graph, recalculation of a scratch copy). The agent explains them; it doesn't make them up.
 - **Several inputs at once, bounded.** The worst and best combination moves 3–12 inputs inside
@@ -387,7 +402,8 @@ Rules that keep it this way:
 Prototype. Done for GridCraft: topics (TOPICS.md v1: places with whereabouts, statuses with
 sign-off, links inside text that follow the cells, numbered markers, Selection / Overview pane,
 person actions on ⌘Z, layer format v2), the Context group (what the agent knows, per document,
-with the Ready lamp and Get ready), question queue with live markers, agent notes with links, privacy
+with the Ready lamp and Get ready), proposals instead of direct edits (options, preview, apply as
+one step), the file's own context, link hover, question queue with live markers, agent notes with links, privacy
 gate, the calculation tree, sensitivity with reasoned ranges (tornado on hover, Impact heat map),
 the confidence heat map, decision history and audit trail, in-app MCP and event stream, storage
 in the `.xlsx`; export to a self-contained web page (WASM, prepared answers only, read-only); alternatives in the document ("A or B?", switch and recalculate) and

@@ -252,6 +252,8 @@ pub enum Part {
     Safe(Option<SafeFile>),
     /// What the agent knows (the Agent tab's Context).
     Context(Option<layer::AgentContext>),
+    /// The file's own context.
+    FileContext(Vec<layer::FileContext>),
 }
 
 impl Part {
@@ -293,6 +295,7 @@ impl Part {
             Part::Inputs(v) => l.inputs.clone_from(v),
             Part::Safe(v) => l.safe.clone_from(v),
             Part::Context(v) => l.context.clone_from(v),
+            Part::FileContext(v) => l.file_context.clone_from(v),
         }
     }
 }

@@ -3,7 +3,7 @@
 //! `cargo run -p gridcraft-agent-ui --example agent_snapshot -- --in book.xlsx [--cmd id=json]… (`$q`/`$t`: latest question/topic)
 //!  [--pane selection|overview|history|analysis] [--heat off|confidence|impact] [--hover B23]
 //!  [--size 1440x900] [--dark] [--tab Agent] [--ping checking|answered|noanswer] [--signal wait]
-//!  [--click <label>]… [--listener <label>] [--voice off|small|turbo]
+//!  [--click <label>]… [--hover-label <label>] [--listener <label>] [--voice off|small|turbo]
 //!  [--voice-recording 4:Sheet1!C5,Sheet1!D7] [--voice-download 42] out.png`
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
@@ -22,6 +22,7 @@ fn main() {
     let (mut voice, mut voice_rec, mut voice_dl): (Option<String>, Option<String>, Option<u64>) = (None, None, None);
     let (mut ping, mut signal, mut listener): (Option<String>, Option<String>, Option<String>) = (None, None, None);
     let mut click: Vec<String> = vec![];
+    let mut hover_label: Option<String> = None;
     let mut it = args.into_iter();
     while let Some(a) = it.next() {
         match a.as_str() {
@@ -38,6 +39,7 @@ fn main() {
             "--ping" => ping = it.next(),
             "--signal" => signal = it.next(),
             "--click" => click.extend(it.next()),
+            "--hover-label" => hover_label = it.next(),
             "--listener" => listener = it.next(),
             "--size" => {
                 if let Some((w, h)) = it.next().as_deref().and_then(|s| s.split_once('x').map(|(w, h)| (w.to_string(), h.to_string()))) {
@@ -171,6 +173,14 @@ fn main() {
         match harness.query_by_label(label) {
             Some(node) => node.click(),
             None => harness.get_by_label_contains(label).click(),
+        }
+        harness.run_steps(8);
+    }
+    // Rest the pointer on a widget of the pane (a link) by its label.
+    if let Some(label) = &hover_label {
+        match harness.query_by_label(label) {
+            Some(node) => node.hover(),
+            None => harness.get_by_label_contains(label).hover(),
         }
         harness.run_steps(8);
     }
