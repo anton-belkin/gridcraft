@@ -7,13 +7,16 @@
 //!   a number down to its inputs, alternatives, the risk matrix, the history;
 //! - the Agent tab on the ribbon: the pane and what waits, client data, the connection (modes,
 //!   Cowork), the heat maps, sharing;
-//! - context-menu items: Ask the Agent, Where Does This Come From, Mark as Client Data.
+//! - context-menu items: Ask the Agent, Where Does This Come From, Mark as Client Data;
+//! - voice questions (native): hold ⌥ or click the microphone, speak, click the cells you mean.
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 #![forbid(unsafe_code)]
 
 mod overlay;
 mod pane;
 mod ribbon;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod voice;
 
 use std::sync::OnceLock;
 
@@ -30,6 +33,11 @@ static SERVER: OnceLock<String> = OnceLock::new();
 /// Registers the agent UI (call once, on the UI thread, before the first frame).
 pub fn install() {
     gridcraft_agent::install();
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        static ONCE: std::sync::Once = std::sync::Once::new();
+        ONCE.call_once(|| gridcraft_engine::ext::register_commands(voice::SPECS));
+    }
     gridcraft_ui_egui::ext::register(Box::new(AgentUi::default()));
 }
 
@@ -91,12 +99,17 @@ pub(crate) struct AgentUi {
     pub highlight_note: Option<String>,
     pub overlay: overlay::State,
     pub pane: pane::State,
+    #[cfg(not(target_arch = "wasm32"))]
+    pub voice: voice::Voice,
 }
 
 /// The agent layer's colours (not in the theme: they mean the same in light and dark).
 pub(crate) struct Palette {
     pub pending: Color32,
     pub working: Color32,
+    /// A spoken question turning into text; one whose transcription failed.
+    pub transcribing: Color32,
+    pub failed: Color32,
     pub answered: Color32,
     pub seen: Color32,
     pub note: Color32,
@@ -116,6 +129,8 @@ pub(crate) fn palette(t: &Tokens) -> Palette {
     Palette {
         pending: Color32::from_rgb(0xE0, 0x8A, 0x00),
         working: t.accent,
+        transcribing: Color32::from_rgb(0x6B, 0x7C, 0x93),
+        failed: Color32::from_rgb(0xD9, 0x30, 0x25),
         answered: Color32::from_rgb(0x1E, 0x9E, 0x5A),
         seen: t.text_disabled,
         note: Color32::from_rgb(0x7B, 0x4F, 0xD6),
@@ -127,6 +142,16 @@ pub(crate) fn palette(t: &Tokens) -> Palette {
         slide: Color32::from_rgb(0xC2, 0x41, 0x0C),
         material: Color32::from_rgb(0xD9, 0x6A, 0x00),
     }
+}
+
+/// A number in a filled circle (a cell pointed at while speaking), its top-left corner at `at`.
+pub(crate) fn voice_bubble(painter: &egui::Painter, at: egui::Pos2, n: u32, color: Color32) -> egui::Rect {
+    let galley = painter.layout_no_wrap(n.to_string(), gridcraft_ui_egui::theme::ui_bold(9.5), Color32::WHITE);
+    let w = (galley.size().x + 6.0).max(14.0);
+    let r = egui::Rect::from_min_size(at, vec2(w, 14.0));
+    painter.rect_filled(r, 7.0, color);
+    painter.galley(r.center() - galley.size() / 2.0, galley, Color32::WHITE);
+    r
 }
 
 /// A short, readable number: 1,234,567 · 12.5k · 0.073.
@@ -162,6 +187,16 @@ pub(crate) fn fmt_at(wb: &gridcraft_engine::model::Workbook, k: (usize, gridcraf
 
 /// Follows a link: `cell:Sheet1!B5` selects it, `note:n3` shows the note, a URL opens.
 pub(crate) fn follow(ui_state: &mut AgentUi, app: &mut SheetApp, ctx: &egui::Context, href: &str) {
+    #[cfg(not(target_arch = "wasm32"))]
+    if let Some(id) = href.strip_prefix("voice-retry:") {
+        ui_state.voice.retry(app, ctx, id);
+        return;
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    if let Some(id) = href.strip_prefix("voice-dismiss:") {
+        ui_state.voice.dismiss(app, id);
+        return;
+    }
     if let Some(target) = href.strip_prefix("cell:") {
         go_to(app, target);
     } else if let Some(id) = href.strip_prefix("note:") {
@@ -207,6 +242,11 @@ impl UiExtension for AgentUi {
             self.pane.trace_open = true;
         }
         self.launcher(app, ctx);
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            self.voice.frame(app, ctx);
+            voice::indicator(&self.voice, app, ctx);
+        }
         // Copy Link to Cells: Cmd+Alt+C (Ctrl+Alt+C), not while typing in a cell.
         if app.editor.is_none()
             && !ctx.egui_wants_keyboard_input()
@@ -245,6 +285,8 @@ impl UiExtension for AgentUi {
 
     fn paint_cells(&mut self, app: &SheetApp, ui: &Ui, painter: &egui::Painter, cells: &CellGeometry) {
         overlay::paint(self, app, ui, painter, cells);
+        #[cfg(not(target_arch = "wasm32"))]
+        voice::bubbles(&self.voice, app, painter, cells);
     }
 
     fn ribbon_tabs(&self) -> Vec<&'static str> {
@@ -302,7 +344,7 @@ impl AgentUi {
         let Some(d) = app.session.active() else { return };
         let l = layer::get(d);
         let ready = l.questions.iter().filter(|q| q.status == QuestionStatus::Answered && !q.seen).count();
-        let waiting = l.questions.iter().filter(|q| q.status != QuestionStatus::Answered).count();
+        let waiting = l.questions.iter().filter(|q| matches!(q.status, QuestionStatus::Pending | QuestionStatus::Working)).count();
         let t = Tokens::get(ctx);
         let p = palette(&t);
         let (text, color) = if ready > 0 {

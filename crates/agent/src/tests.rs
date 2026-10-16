@@ -864,3 +864,76 @@ fn connect_cowork_adds_one_entry_and_keeps_the_rest() {
     cowork::set_thread_overrides(None, None);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// A spoken question: on the cells at once, with the agent only when its text is ready, the
+/// cells pointed at expanded (and masked) for the agent, never saved while it is a draft.
+#[test]
+fn spoken_question_with_pointing() {
+    let mut s = model();
+    s.execute("agent.private", json!({"range": "B3"})).unwrap();
+    let q = s
+        .execute("agent.ask", json!({"range": "B7", "transcribing": true, "refs": [{"n": 1, "range": "B6"}, {"n": 2, "range": "Sheet1!B3"}]}))
+        .unwrap();
+    let id = q["id"].as_str().unwrap().to_string();
+    // Not the agent's yet: no text.
+    assert!(s.execute("agent.questions", json!({"status": "pending"})).unwrap().as_array().unwrap().is_empty());
+    assert!(s.execute("agent.questions", json!({})).unwrap().as_array().unwrap().is_empty());
+    assert_eq!(s.execute("agent.context", json!({})).unwrap()["openQuestions"], json!(0));
+    // A draft is never written into the file.
+    let b64 = s.execute("file.saveBytes", json!({})).unwrap()["base64"].as_str().unwrap().to_string();
+    let mut t = Session::new();
+    t.execute("file.open", json!({"name": "book.xlsx", "base64": b64})).unwrap();
+    assert!(layer::get(t.active().unwrap()).questions.is_empty());
+    // A row inserted while transcribing moves the pointed cells too.
+    s.execute("selection.set", json!({"range": "A1"})).unwrap();
+    s.execute("home.insertRows", json!({})).unwrap();
+    // Failed, then retried, then done.
+    s.execute("agent.spoken", json!({"id": id, "error": "no speech"})).unwrap();
+    assert_eq!(layer::get(s.active().unwrap()).questions[0].status, layer::QuestionStatus::Failed);
+    s.execute("agent.spoken", json!({"id": id})).unwrap();
+    s.execute("agent.spoken", json!({"id": id, "text": "Why is ⟦1⟧ so much higher than ⟦2⟧ times the price?"})).unwrap();
+    let pending = s.execute("agent.questions", json!({"status": "pending"})).unwrap();
+    let p = &pending[0];
+    assert_eq!(p["range"], json!("Sheet1!B8"));
+    assert_eq!(p["spokenText"], json!("Why is ⟦1⟧ so much higher than ⟦2⟧ times the price?"));
+    let text = p["text"].as_str().unwrap();
+    assert!(text.starts_with("Why is ⟦1: Sheet1!B7 · Revenue = "), "{text}");
+    assert!(text.contains("⟦2: Sheet1!B4 · Volume = "), "{text}");
+    // The volume is client data: the agent sees a stand-in, never 5000.
+    assert!(!text.contains("5000") && !text.contains("5,000"), "{text}");
+    assert_eq!(p["refs"][1]["range"], json!("Sheet1!B4"));
+    assert_eq!(p["refs"][0]["label"], json!("Revenue"));
+    // With the agent now: no longer a draft.
+    assert!(s.execute("agent.spoken", json!({"id": id, "text": "again"})).is_err());
+    assert!(s.execute("agent.removeQuestion", json!({"id": id})).is_err());
+    // The events stream, the channel and the background agent all read this text.
+    let note = crate::channel::notification(p);
+    assert!(note["params"]["content"].as_str().unwrap().contains("⟦1: Sheet1!B7"), "{note}");
+    // Saved now, refs and all.
+    let b64 = s.execute("file.saveBytes", json!({})).unwrap()["base64"].as_str().unwrap().to_string();
+    let mut t = Session::new();
+    t.execute("file.open", json!({"name": "book.xlsx", "base64": b64})).unwrap();
+    let l = layer::get(t.active().unwrap());
+    assert_eq!(l.questions[0].refs.len(), 2);
+    assert!(l.questions[0].spoken);
+}
+
+#[test]
+fn a_failed_spoken_question_can_be_dismissed() {
+    let mut s = model();
+    let id = s.execute("agent.ask", json!({"range": "B7", "transcribing": true, "refs": [{"n": 1, "range": "B5"}]})).unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    s.execute("agent.spoken", json!({"id": id, "error": ""})).unwrap();
+    assert_eq!(layer::get(s.active().unwrap()).questions[0].error, "The transcription failed");
+    s.execute("agent.removeQuestion", json!({"id": id})).unwrap();
+    let l = layer::get(s.active().unwrap());
+    assert!(l.questions.is_empty());
+    // Its anchors went with it.
+    assert!(l.anchors.is_empty(), "{:?}", l.anchors);
+    // Bad refs are errors, not panics.
+    assert!(s.execute("agent.ask", json!({"text": "x", "refs": [{"range": "B5"}]})).is_err());
+    assert!(s.execute("agent.ask", json!({"text": "x", "refs": [{"n": 1, "range": "not a cell!"}]})).is_err());
+    assert!(s.execute("agent.ask", json!({"text": "", "refs": []})).is_err());
+}

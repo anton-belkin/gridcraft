@@ -2,7 +2,8 @@
 //!
 //! `cargo run -p gridcraft-agent-ui --example agent_snapshot -- --in book.xlsx [--cmd id=json]…
 //!  [--pane cell|questions|notes|history|connect] [--heat off|confidence|impact] [--hover B23]
-//!  [--size 1440x900] [--dark] [--tab Agent] out.png`
+//!  [--size 1440x900] [--dark] [--tab Agent] [--voice off|small|turbo]
+//!  [--voice-recording 4:Sheet1!C5,Sheet1!D7] [--voice-download 42] out.png`
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use gridcraft_engine::Session;
@@ -16,6 +17,7 @@ fn main() {
     let mut size = (1440.0f32, 900.0f32);
     let mut out = "agent.png".to_string();
     let mut tab: Option<String> = None;
+    let (mut voice, mut voice_rec, mut voice_dl): (Option<String>, Option<String>, Option<u64>) = (None, None, None);
     let mut it = args.into_iter();
     while let Some(a) = it.next() {
         match a.as_str() {
@@ -26,6 +28,9 @@ fn main() {
             "--hover" => hover = it.next(),
             "--dark" => dark = true,
             "--tab" => tab = it.next(),
+            "--voice" => voice = it.next(),
+            "--voice-recording" => voice_rec = it.next(),
+            "--voice-download" => voice_dl = it.next().and_then(|x| x.parse().ok()),
             "--size" => {
                 if let Some((w, h)) = it.next().as_deref().and_then(|s| s.split_once('x').map(|(w, h)| (w.to_string(), h.to_string()))) {
                     size = (w.parse().unwrap_or(1440.0), h.parse().unwrap_or(900.0));
@@ -35,6 +40,10 @@ fn main() {
         }
     }
     gridcraft_agent_ui::install();
+    // Never the reader's own voice setting.
+    let settings = std::env::temp_dir().join(format!("gridcraft-snapshot-voice-{}.json", std::process::id()));
+    let _ = std::fs::remove_file(&settings);
+    gridcraft_agent_ui::voice::set_settings_path(Some(settings));
     gridcraft_agent_ui::set_server_url("http://127.0.0.1:7980/mcp".into());
     let mut session = Session::new();
     match &input {
@@ -50,6 +59,20 @@ fn main() {
         if let Err(e) = session.execute(&id, p) {
             eprintln!("{id}: {e}");
         }
+    }
+    if let Some(m) = &voice {
+        session.execute("agent.voiceModel", json!({"model": m})).expect("voice model");
+    }
+    if voice_rec.is_some() || voice_dl.is_some() {
+        let recording = voice_rec.as_deref().map(|r| {
+            let (secs, places) = r.split_once(':').unwrap_or(("3", r));
+            (secs.parse().unwrap_or(3.0), places.split(',').filter(|p| !p.is_empty()).map(str::to_string).collect())
+        });
+        let downloading = voice_dl.map(|pct| {
+            let total = craft_voice_total(voice.as_deref());
+            (total * pct.min(100) / 100, total)
+        });
+        gridcraft_agent_ui::voice::preview(gridcraft_agent_ui::voice::Preview { recording, downloading });
     }
     if let Some(tab) = &pane {
         gridcraft_agent_ui::request_pane(true, tab, &heat);
@@ -85,4 +108,8 @@ fn main() {
     let img = harness.render().expect("render");
     img.save(&out).expect("save png");
     eprintln!("wrote {out} ({}x{})", img.width(), img.height());
+}
+
+fn craft_voice_total(model: Option<&str>) -> u64 {
+    if model == Some("turbo") { 574_041_195 } else { 190_085_487 }
 }

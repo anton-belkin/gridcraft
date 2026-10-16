@@ -283,7 +283,7 @@ fn seed(l: &layer::Layer) -> String {
         let who = if e.actor == layer::Actor::Agent { "agent" } else { "reader" };
         s.push_str(&format!("- {who} {}: {}\n", e.kind, short(&e.text, 200)));
     }
-    let open = l.questions.iter().filter(|q| q.status != QuestionStatus::Answered).count();
+    let open = l.questions.iter().filter(|q| matches!(q.status, QuestionStatus::Pending | QuestionStatus::Working)).count();
     s.push_str(&format!("{open} question(s) are open. Call get_context before anything else.\n"));
     s
 }
