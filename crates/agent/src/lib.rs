@@ -24,6 +24,7 @@ pub mod layer;
 pub mod mcp;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod server;
+pub mod stress;
 pub mod variants;
 
 use std::sync::Arc;

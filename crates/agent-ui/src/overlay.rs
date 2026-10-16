@@ -6,6 +6,7 @@ use egui::{Align2, Color32, Painter, Rect, Stroke, StrokeKind, Ui, pos2, vec2};
 use gridcraft_agent::analysis::{self, Swing};
 use gridcraft_agent::anchor;
 use gridcraft_agent::layer::{self, Layer, QuestionStatus, VariantKind};
+use gridcraft_agent::stress::{self, Stress};
 use gridcraft_agent::variants::{self, Comparison};
 use gridcraft_engine::DocState;
 use gridcraft_engine::core::{CellRef, RangeRef, Value};
@@ -30,6 +31,7 @@ pub(crate) struct State {
     hover: Option<(usize, CellRef, f64)>,
     cache: HashMap<(u64, usize, u64, usize, CellRef), Sens>,
     comparisons: Option<((u64, usize, u64), Vec<Comparison>)>,
+    stress: Option<((u64, usize, u64), usize, CellRef, Option<Stress>)>,
 }
 
 /// Version of what an analysis depends on: the document, its workbook and its layer.
@@ -53,6 +55,22 @@ impl State {
         s
     }
 
+    /// The worst and best combination of the inputs of a cell, cached until something changes.
+    pub(crate) fn stress(&mut self, d: &DocState, l: &Layer, sheet: usize, c: CellRef) -> Option<Stress> {
+        let ver = version(d, l);
+        if let Some((v, s, k, r)) = &self.stress
+            && *v == ver
+            && *s == sheet
+            && *k == c
+        {
+            return r.clone();
+        }
+        let dims = stress::pick_dims(&d.wb, &d.calc, l, (sheet, c), &[]);
+        let r = stress::search(&d.wb, &d.calc, (sheet, c), dims, 2_000);
+        self.stress = Some((ver, sheet, c, r.clone()));
+        r
+    }
+
     /// Every set of alternatives and calculation methods compared, cached until something changes.
     pub(crate) fn comparisons(&mut self, d: &DocState, l: &Layer) -> Vec<Comparison> {
         let ver = version(d, l);
@@ -67,7 +85,7 @@ impl State {
     }
 }
 
-fn is_formula_number(d: &DocState, sheet: usize, c: CellRef) -> bool {
+pub(crate) fn is_formula_number(d: &DocState, sheet: usize, c: CellRef) -> bool {
     d.wb.sheet(sheet).and_then(|s| s.cell(c)).is_some_and(|x| x.formula.is_some() && matches!(x.value, Value::Number(_)))
 }
 

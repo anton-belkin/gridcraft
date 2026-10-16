@@ -38,7 +38,7 @@ macro_rules! spec {
 pub(crate) use spec;
 
 /// Every command of the layer, by module.
-pub static ALL: &[&[CommandSpec]] = &[SPECS, crate::variants::SPECS];
+pub static ALL: &[&[CommandSpec]] = &[SPECS, crate::variants::SPECS, crate::stress::SPECS];
 
 pub static SPECS: &[CommandSpec] = &[
     // the reader's side

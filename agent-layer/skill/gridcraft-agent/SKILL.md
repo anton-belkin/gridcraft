@@ -59,6 +59,12 @@ asked before you connected are waiting too.
   `compare_alternatives` tells you where the difference is material (above `threshold`, 1% by
   default): say so in your answer, and that the simple one is fine where it isn't.
 
+## What to check first
+
+- `worst_case` moves 3–12 inputs together inside their reasoned ranges and returns the lowest and
+  highest value of an output with where each input sits there. Mention when an input sits at the
+  "wrong" end in the worst case (an interaction), and the gap to `oneAtATime`.
+
 ## Privacy — non-negotiable
 
 `get_context.privateRanges` hold client data. You see stand-in values there (same sign and

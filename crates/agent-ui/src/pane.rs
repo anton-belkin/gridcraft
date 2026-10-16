@@ -5,6 +5,7 @@ use egui::{Color32, RichText, Ui, vec2};
 use gridcraft_agent::analysis;
 use gridcraft_agent::anchor::{self, Place};
 use gridcraft_agent::layer::{self, Actor, Layer, Link, Note, Question, QuestionStatus, VariantKind, VariantSet};
+use gridcraft_agent::stress::{self, Stress};
 use gridcraft_agent::variants::Comparison;
 use gridcraft_engine::core::{CellRef, RangeRef};
 use gridcraft_ui_egui::SheetApp;
@@ -320,6 +321,16 @@ fn cell_tab(st: &mut AgentUi, app: &SheetApp, ui: &mut Ui, l: &Layer, t: &Tokens
             });
         }
     }
+    if is_formula
+        && overlay::is_formula_number(d, si, c)
+        && let Some(r) = st.overlay.stress(d, l, si, c)
+    {
+        let n = r.dims.len();
+        egui::CollapsingHeader::new(RichText::new(format!("Worst and best case · {n} input{} together", if n == 1 { "" } else { "s" })).strong())
+            .id_salt("agent_stress")
+            .default_open(true)
+            .show(ui, |ui| stress_view(ui, d, &r, t, p, acts));
+    }
     ui.add_space(8.0);
     ui.separator();
     ui.horizontal_wrapped(|ui| {
@@ -568,6 +579,92 @@ fn variants_tab(st: &mut AgentUi, app: &SheetApp, ui: &mut Ui, l: &Layer, t: &To
             }
         }
     }
+}
+
+/// The range an output can take with its inputs moved together, against each input alone, and
+/// where each input sits at the two extremes.
+fn stress_view(ui: &mut Ui, d: &gridcraft_engine::DocState, r: &Stress, t: &Tokens, p: &Palette, acts: &mut Vec<Act>) {
+    let target = r.target;
+    let f = |v: f64| fmt_at(&d.wb, target, v);
+    ui.label(RichText::new(format!("With every input inside its range: {} … {} (now {})", f(r.lowest.value), f(r.highest.value), f(r.base))).small());
+    // The bar: each input alone (light) inside all of them together (strong).
+    let width = ui.available_width().min(420.0);
+    let (rect, _) = ui.allocate_exact_size(vec2(width, 34.0), egui::Sense::hover());
+    let painter = ui.painter_at(rect);
+    let lo = r.lowest.value.min(r.additive_low).min(r.base);
+    let hi = r.highest.value.max(r.additive_high).max(r.base);
+    let span = (hi - lo).max(f64::EPSILON);
+    let x = |v: f64| rect.left() + 4.0 + ((v - lo) / span) as f32 * (rect.width() - 8.0);
+    let down = Color32::from_rgb(0xC8, 0x3E, 0x3E);
+    let up = Color32::from_rgb(0x2E, 0x8B, 0x57);
+    let y0 = rect.top() + 4.0;
+    let band = |a: f64, b: f64, y: f32, h: f32, alpha: f32| {
+        painter.rect_filled(egui::Rect::from_min_max(egui::pos2(x(a.min(r.base)), y), egui::pos2(x(r.base), y + h)), 1.0, down.gamma_multiply(alpha));
+        painter.rect_filled(egui::Rect::from_min_max(egui::pos2(x(r.base), y), egui::pos2(x(b.max(r.base)), y + h)), 1.0, up.gamma_multiply(alpha));
+    };
+    band(r.lowest.value, r.highest.value, y0, 10.0, 0.9);
+    band(r.additive_low, r.additive_high, y0 + 13.0, 6.0, 0.35);
+    painter.line_segment([egui::pos2(x(r.base), y0 - 2.0), egui::pos2(x(r.base), y0 + 21.0)], egui::Stroke::new(1.2, t.text));
+    painter.text(egui::pos2(rect.left() + 4.0, rect.bottom() - 1.0), egui::Align2::LEFT_BOTTOM, "together", theme::ui_font(9.5), t.text_dim);
+    painter.text(
+        egui::pos2(rect.right() - 4.0, rect.bottom() - 1.0),
+        egui::Align2::RIGHT_BOTTOM,
+        "light: each input alone",
+        theme::ui_font(9.5),
+        t.text_dim,
+    );
+    let alone = (r.additive_high - r.additive_low).abs();
+    let together = (r.highest.value - r.lowest.value).abs();
+    if alone > 0.0 && (together / alone - 1.0).abs() > 0.05 {
+        let k = together / alone - 1.0;
+        let text = if k > 0.0 {
+            format!("Together the inputs reach {:.0}% further than each alone: they amplify each other.", k * 100.0)
+        } else {
+            format!("Together the range is {:.0}% narrower than the single moves add up to: they partly offset.", -k * 100.0)
+        };
+        ui.label(RichText::new(text).small().color(p.material));
+    }
+    egui::Grid::new("agent_stress_grid").num_columns(3).spacing(vec2(12.0, 2.0)).striped(true).show(ui, |ui| {
+        ui.label(RichText::new("Input").small().strong().color(t.text_dim));
+        ui.label(RichText::new("Lowest").small().strong().color(down));
+        ui.label(RichText::new("Highest").small().strong().color(up));
+        ui.end_row();
+        for (i, dim) in r.dims.iter().enumerate() {
+            let place = Place {
+                sheet: dim.key.0,
+                sheet_name: d.wb.sheet(dim.key.0).map(|x| x.name.clone()).unwrap_or_default(),
+                range: RangeRef::cell(dim.key.1),
+            };
+            let name = if dim.label.is_empty() { place.range.a1() } else { clip(&dim.label, 22) };
+            let link = ui.link(RichText::new(name).small()).on_hover_text(format!(
+                "{} · range {} … {}{}",
+                place.a1(),
+                fmt_at(&d.wb, dim.key, dim.low),
+                fmt_at(&d.wb, dim.key, dim.high),
+                if dim.reasoned { "" } else { " (default ±10%)" }
+            ));
+            if link.clicked() {
+                acts.push(Act::Follow(format!("cell:{}", place.a1())));
+            }
+            for e in [&r.lowest, &r.highest] {
+                let v = e.setting.get(i).copied().unwrap_or(dim.base);
+                let mark = match stress::position(dim, v) {
+                    "low" => "▼ ",
+                    "high" => "▲ ",
+                    "base" => "· ",
+                    _ => "◆ ",
+                };
+                ui.label(RichText::new(format!("{mark}{}", fmt_at(&d.wb, dim.key, v))).small());
+            }
+            ui.end_row();
+        }
+    });
+    let how = if r.all_corners { format!("all {} corners", r.corners) } else { format!("{} of the corners", r.corners) };
+    ui.label(
+        RichText::new(format!("{how} and points inside checked · {} evaluations · ▼ low end ▲ high end ◆ inside", r.evaluations))
+            .small()
+            .color(t.text_dim),
+    );
 }
 
 fn history_tab(app: &SheetApp, ui: &mut Ui, l: &Layer, t: &Tokens, p: &Palette, acts: &mut Vec<Act>) {

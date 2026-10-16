@@ -296,3 +296,70 @@ fn calculation_method_flags_material_differences() {
     assert_eq!(c[0]["current"], Value::Null);
     assert!(s.execute("agent.method", json!({"cell": "B6", "exact": "=B2*B3*0.9"})).is_err());
 }
+
+/// Profit = price × volume × (1 − churn)² − fixed: the worst case needs every input at its bad
+/// end at once, and churn interacts with price and volume.
+fn stress_model() -> Session {
+    let mut s = model();
+    s.execute("cell.set", json!({"cell": "A8", "input": "Churn"})).unwrap();
+    s.execute("cell.set", json!({"cell": "B8", "input": 0.1})).unwrap();
+    s.execute("cell.set", json!({"cell": "B7", "input": "=B6*(1-B8)^2-B3*B4-B5"})).unwrap();
+    for (cell, low, high) in [("B2", 100, 140), ("B3", 4000, 6000), ("B4", 60, 80)] {
+        s.execute("agent.input", json!({"cell": cell, "low": low, "high": high, "actor": "agent"})).unwrap();
+    }
+    s.execute("agent.input", json!({"cell": "B8", "low": 0.05, "high": 0.2, "actor": "agent"})).unwrap();
+    s
+}
+
+#[test]
+fn stress_finds_the_worst_combination() {
+    let mut s = stress_model();
+    let base = num(&s, "B7");
+    let r = s.execute("agent.stress", json!({"cell": "B7", "masked": false})).unwrap();
+    assert_eq!(r["inputs"].as_array().unwrap().len(), 4);
+    assert_eq!(r["allCorners"], json!(true));
+    // Brute force over a grid agrees with the search.
+    let f = |p: f64, v: f64, c: f64, ch: f64| p * v * (1.0 - ch).powi(2) - v * c - 100000.0;
+    let mut lo = f64::INFINITY;
+    let mut hi = f64::NEG_INFINITY;
+    for p in [100.0, 140.0] {
+        for v in [4000.0, 6000.0] {
+            for c in [60.0, 80.0] {
+                for ch in [0.05, 0.2] {
+                    lo = lo.min(f(p, v, c, ch));
+                    hi = hi.max(f(p, v, c, ch));
+                }
+            }
+        }
+    }
+    let lowest = r["lowest"]["value"].as_f64().unwrap();
+    let highest = r["highest"]["value"].as_f64().unwrap();
+    assert!((lowest - lo).abs() < 1e-6, "{lowest} vs {lo}");
+    assert!((highest - hi).abs() < 1e-6, "{highest} vs {hi}");
+    // The inputs interact: with price low and churn high each unit loses money, so the worst
+    // case has volume at its *high* end, though alone a lower volume hurts; and the single moves
+    // added up miss the real worst case.
+    let at = |c: &str| r["lowest"]["inputs"].as_array().unwrap().iter().find(|i| i["cell"] == json!(c)).unwrap()["at"].clone();
+    assert_eq!(at("Sheet1!B2"), json!("low"));
+    assert_eq!(at("Sheet1!B8"), json!("high"));
+    assert_eq!(at("Sheet1!B3"), json!("high"));
+    assert!((lowest - r["oneAtATime"]["lowest"].as_f64().unwrap()).abs() > 1.0);
+    // Deterministic, capped, and the real model is untouched.
+    let again = s.execute("agent.stress", json!({"cell": "B7", "masked": false})).unwrap();
+    assert_eq!(r, again);
+    assert_eq!(num(&s, "B7"), base);
+    let small = s.execute("agent.stress", json!({"cell": "B7", "masked": false, "maxEvals": 5})).unwrap();
+    assert!(small["evaluations"].as_u64().unwrap() <= 10);
+}
+
+#[test]
+fn stress_finds_an_interior_peak() {
+    // Revenue = price × demand, with demand falling linearly in price: the highest value is inside
+    // the price range, not at either end.
+    let mut s = model();
+    s.execute("cell.set", json!({"cell": "B3", "input": "=10000-50*B2"})).unwrap();
+    s.execute("agent.input", json!({"cell": "B2", "low": 50, "high": 150})).unwrap();
+    let r = s.execute("agent.stress", json!({"cell": "B6", "masked": false, "inputs": ["B2"]})).unwrap();
+    assert_eq!(r["highest"]["value"], json!(500000.0));
+    assert_eq!(r["highest"]["inputs"][0]["at"], json!("inside"));
+}

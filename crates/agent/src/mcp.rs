@@ -15,7 +15,8 @@ investigate with get_context / read_range / trace_number / sensitivity, then ans
 sources you used (href \"cell:Sheet1!B5\", \"note:n3\" or https URLs). Leave prepared explanations with add_note, \
 mark inputs with reasoned ranges (set_input_range), say how sure you are (set_confidence) and log decisions (log_decision). \
 When the model rests on a choice, put both sides in the document (add_alternatives) instead of picking one; when a readable \
-formula approximates, add the exact one beside it (add_calculation_method) and say where the difference matters. \
+formula approximates, add the exact one beside it (add_calculation_method) and say where the difference matters. Use \
+worst_case to find what to check first. \
 Change the workbook only with run_command, giving a reason and a source. PRIVACY: ranges listed in get_context.privateRanges \
 hold client data; you see stand-in values with the same sign and magnitude, and everything computed from them is computed \
 from the stand-ins. Never present those numbers as real; reason about the model's mechanics instead. You cannot write to \
@@ -161,6 +162,13 @@ pub fn tools() -> Vec<Value> {
             &["id", "option"],
             false,
         ),
+        tool(
+            "worst_case",
+            "Move several inputs together (3-12, each inside its reasoned range from set_input_range) and find the lowest and highest value of an output, with where each input sits there. Deterministic, bounded search (all corners when few enough, points inside, coordinate refinement) on a copy of the model. oneAtATime shows what the single moves add up to: the gap is the inputs' interaction.",
+            json!({"cell": s("Output cell"), "inputs": {"type": "array", "items": {"type": "string"}, "description": "Input cells (default: the marked inputs it depends on)"}, "maxEvals": n("Most model evaluations (default 3000, max 20000)")}),
+            &["cell"],
+            true,
+        ),
         tool("get_layer", "The whole agent layer: anchors, questions, notes, inputs, private ranges, confidence, history.", json!({}), &[], true),
         tool(
             "run_command",
@@ -226,6 +234,7 @@ pub fn call(b: &mut dyn Backend, name: &str, args: &Value) -> Result<Value, Stri
         "add_alternatives" => exec(b, "agent.variants", pick(args, &["range", "title", "options", "current", "outputs"])),
         "add_calculation_method" => exec(b, "agent.method", pick(args, &["cell", "exact", "simple", "threshold", "note", "title", "outputs"])),
         "compare_alternatives" => exec(b, "agent.compareVariants", pick(args, &["id"])),
+        "worst_case" => exec(b, "agent.stress", pick(args, &["cell", "inputs", "maxEvals"])),
         "use_alternative" => exec(b, "agent.useVariant", pick(args, &["id", "option"])),
         "run_command" => exec(b, "agent.exec", pick(args, &["command", "params", "reason", "source"])),
         "list_commands" => {
