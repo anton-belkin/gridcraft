@@ -182,7 +182,12 @@ upstream. Each one accepted upstream removes its lines from the patch.
     matching of "this"/"это": the agent resolves it. The question keeps `refs: [{n, anchor}]`
     beside its main `anchor` (old files load as before). Agent-facing reads expand the markers:
     `⟦1: Sheet1!C16 · Revenue · FY2028 = 1,234⟧`, values masked like every other read; the raw
-    text is `spokenText`. The skill has one line about it.
+    text is `spokenText`. The skill has one line about it. A click's place is read a frame after
+    the button comes up (the extension hook runs before the grid handles the frame's input, so
+    reading it at once gave the cell selected before), a drag counts once with its final range,
+    and the same place pointed at again within a second adds no marker. Each transcription is
+    logged with its segments' times and the pointers' times (text only), so a marker that lands
+    in the wrong place can be explained afterwards.
   - *Drafts never reach the file or the agent.* `transcribing` and `failed` questions are kept out
     of `agent.questions` (and so out of MCP, `/events`, the channel and the background agent) and
     out of the saved layer.

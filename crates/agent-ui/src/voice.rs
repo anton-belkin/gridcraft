@@ -70,11 +70,65 @@ struct Recording {
     doc: u64,
     /// The selection when it started: the question's main place.
     anchor: Anchor,
-    pointers: Vec<Pointer<Anchor>>,
-    /// The selection last seen, and when a click in the grid began (seconds into the recording).
-    last: (usize, RangeRef),
-    press: Option<f32>,
+    pointing: Pointing,
     by_key: bool,
+}
+
+/// Pointing while recording, frame by frame: every click in the grid and every other selection
+/// change becomes a pointer at the moment it began.
+#[derive(Debug, Default)]
+pub(crate) struct Pointing {
+    pub pointers: Vec<Pointer<Anchor>>,
+    /// The selection last seen.
+    last: Option<(usize, RangeRef)>,
+    /// When a click in the grid began (seconds into the recording), and whether a frame has
+    /// passed since the button came up.
+    press: Option<f32>,
+    settled: bool,
+}
+
+/// Pointing at the same place again within this long adds no marker (a double click, a click on
+/// a cell that was just selected).
+const SAME_PLACE: f32 = 1.0;
+
+impl Pointing {
+    pub(crate) fn new(selection: (usize, RangeRef)) -> Pointing {
+        Pointing { last: Some(selection), ..Pointing::default() }
+    }
+
+    /// One frame. Extension frames run before the grid handles this frame's input, so a click's
+    /// selection is read a frame after the button comes up, never the one before it.
+    pub(crate) fn observe(&mut self, now: f32, pressed_in_grid: bool, down: bool, selection: (usize, RangeRef), place: impl FnOnce() -> Anchor) {
+        if pressed_in_grid {
+            self.press = Some(now);
+            self.settled = false;
+        }
+        if down {
+            return;
+        }
+        if let Some(t) = self.press {
+            if !self.settled {
+                self.settled = true;
+                return;
+            }
+            self.add(t, place());
+            self.press = None;
+            self.last = Some(selection);
+            return;
+        }
+        // The selection moved some other way (keys, the Name Box).
+        if self.last != Some(selection) {
+            self.add(now, place());
+            self.last = Some(selection);
+        }
+    }
+
+    fn add(&mut self, at: f32, anchor: Anchor) {
+        if self.pointers.iter().any(|p| p.anchor == anchor && (p.at - at).abs() < SAME_PLACE) {
+            return;
+        }
+        self.pointers.push(Pointer { at, anchor });
+    }
 }
 
 /// A question waiting for its text.
@@ -242,7 +296,7 @@ impl Voice {
     /// The cells pointed at so far, numbered (while recording).
     pub(crate) fn pointed(&self) -> Vec<(u32, String)> {
         let Some(r) = &self.rec else { return vec![] };
-        numbered(&r.pointers)
+        numbered(&r.pointing.pointers)
     }
 
     /// The reader picked a model (or off) on the ribbon.
@@ -401,9 +455,10 @@ impl Voice {
             preview_secs: secs,
             doc: d.uid,
             anchor: anchor::Place { sheet: si, sheet_name: name, range: sel }.a1(),
-            pointers: places.into_iter().enumerate().map(|(i, a)| Pointer { at: secs * (i as f32 + 0.5) / n, anchor: a }).collect(),
-            last: (si, sel),
-            press: None,
+            pointing: Pointing {
+                pointers: places.into_iter().enumerate().map(|(i, a)| Pointer { at: secs * (i as f32 + 0.5) / n, anchor: a }).collect(),
+                ..Pointing::new((si, sel))
+            },
             by_key: true,
         });
     }
@@ -435,9 +490,7 @@ impl Voice {
                     preview_secs: 0.0,
                     doc,
                     anchor: place.a1(),
-                    pointers: vec![],
-                    last: (si, sel),
-                    press: None,
+                    pointing: Pointing::new((si, sel)),
                     by_key,
                 });
                 // Load the model while the reader speaks.
@@ -467,39 +520,20 @@ impl Voice {
         }
         let at = r.recorder.as_ref().map_or(r.preview_secs, Recorder::position);
         let (pressed, down, pos) = ctx.input(|i| (i.pointer.primary_pressed(), i.pointer.primary_down(), i.pointer.interact_pos()));
-        if pressed
-            && let (Some(cells), Some(p)) = (app.grid.cells_rect, pos)
-            && cells.contains(p)
-        {
-            r.press = Some(at);
-        }
+        let in_grid = pressed && matches!((app.grid.cells_rect, pos), (Some(cells), Some(p)) if cells.contains(p));
         let si = d.wb.active_sheet;
         let sel = d.selection.current();
-        let here = || {
+        let place = || {
             let name = d.wb.sheet(si).map(|s| s.name.clone()).unwrap_or_default();
             anchor::Place { sheet: si, sheet_name: name, range: sel }.a1()
         };
-        match r.press {
-            // A click (or a drag) ended: what it selected, at the moment it began.
-            Some(t) if !down => {
-                r.pointers.push(Pointer { at: t, anchor: here() });
-                r.press = None;
-                r.last = (si, sel);
-            }
-            Some(_) => {}
-            // The selection moved some other way (keys, the Name Box).
-            None if r.last != (si, sel) => {
-                r.pointers.push(Pointer { at, anchor: here() });
-                r.last = (si, sel);
-            }
-            None => {}
-        }
+        r.pointing.observe(at, in_grid, down, (si, sel), place);
     }
 
     /// Key up: the question goes on the cells now, its text follows.
     fn finish(&mut self, app: &mut SheetApp, ctx: &egui::Context) {
         let Some(r) = self.rec.take() else { return };
-        let (doc, main, pointers) = (r.doc, r.anchor, r.pointers);
+        let (doc, main, pointers) = (r.doc, r.anchor, r.pointing.pointers);
         let Some(recorder) = r.recorder else { return };
         let audio = match recorder.stop() {
             Ok(a) => a,
@@ -577,7 +611,7 @@ impl Voice {
                         let _ = on_doc(&mut app.session, doc, "agent.spoken", json!({"id": q, "error": error}));
                     }
                 }
-                Event::Text { id: ticket, transcript, .. } => {
+                Event::Text { id: ticket, transcript, secs } => {
                     self.last_used = now;
                     let Some(i) = self.jobs.iter().position(|j| j.ticket == ticket) else { continue };
                     let Some(j) = self.jobs.get_mut(i) else { continue };
@@ -588,6 +622,11 @@ impl Voice {
                         continue;
                     }
                     let text = craft_voice::splice(&transcript, &j.pointers).text;
+                    // When and where: enough to see why a marker landed where it did (text and
+                    // times only, never audio).
+                    let segs: Vec<String> = transcript.segments.iter().map(|g| format!("{:.2}–{:.2} {}", g.start, g.end, g.text)).collect();
+                    let ptrs: Vec<String> = j.pointers.iter().map(|p| format!("{:.2} {}", p.at, p.anchor)).collect();
+                    log::info!("voice {q}: {secs:.2} s, {} · segments [{}] · pointers [{}]", transcript.language, segs.join(" | "), ptrs.join(", "));
                     match on_doc(&mut app.session, doc, "agent.spoken", json!({"id": q, "text": text})) {
                         // With the agent now; the audio goes.
                         Ok(_) => {
@@ -702,6 +741,55 @@ mod tests {
     use super::*;
     use gridcraft_agent::layer::{self, QuestionStatus};
 
+    fn cell(c: &str) -> (usize, RangeRef) {
+        (0, RangeRef::parse(c).unwrap())
+    }
+
+    /// Frames of pointing: (time, pressed in the grid, button down, selection).
+    fn run(frames: &[(f32, bool, bool, &str)]) -> Vec<(f32, String)> {
+        let mut p = Pointing::new(cell("A1"));
+        for &(t, pressed, down, sel) in frames {
+            p.observe(t, pressed, down, cell(sel), || format!("Sheet1!{sel}"));
+        }
+        p.pointers.into_iter().map(|x| (x.at, x.anchor)).collect()
+    }
+
+    #[test]
+    fn a_quick_click_points_at_the_cell_clicked_not_the_one_before() {
+        // Press and release in one frame: the grid selects B9 only after this frame's extension
+        // hook ran, so the selection still says A1 here.
+        let got = run(&[(1.0, true, false, "A1"), (1.06, false, false, "B9"), (1.12, false, false, "B9")]);
+        assert_eq!(got, vec![(1.0, "Sheet1!B9".to_string())]);
+        // Then a click on B16: B9 isn't pointed at again.
+        let got = run(&[(1.0, true, false, "A1"), (1.06, false, false, "B9"), (3.0, true, false, "B9"), (3.06, false, false, "B16")]);
+        assert_eq!(got, vec![(1.0, "Sheet1!B9".to_string()), (3.0, "Sheet1!B16".to_string())]);
+    }
+
+    #[test]
+    fn a_drag_points_at_the_range_when_it_began() {
+        let got = run(&[
+            (2.0, true, true, "B2"),
+            (2.1, false, true, "B2:B3"),
+            (2.3, false, true, "B2:B5"),
+            (2.4, false, false, "B2:B5"),
+            (2.5, false, false, "B2:B5"),
+        ]);
+        assert_eq!(got, vec![(2.0, "Sheet1!B2:B5".to_string())]);
+    }
+
+    #[test]
+    fn keys_point_too_and_the_same_cell_within_a_second_counts_once() {
+        // Arrow keys: each new selection, at the moment it changed.
+        let got = run(&[(1.0, false, false, "A2"), (1.5, false, false, "A3")]);
+        assert_eq!(got, vec![(1.0, "Sheet1!A2".to_string()), (1.5, "Sheet1!A3".to_string())]);
+        // A double click on B9 (selection unchanged the second time): one pointer.
+        let got = run(&[(1.0, true, false, "A1"), (1.05, false, false, "B9"), (1.3, true, false, "B9"), (1.35, false, false, "B9")]);
+        assert_eq!(got.len(), 1);
+        // Back to B9 later: pointed at again.
+        let got = run(&[(1.0, true, false, "A1"), (1.05, false, false, "B9"), (3.0, true, false, "B9"), (3.05, false, false, "B9")]);
+        assert_eq!(got.len(), 2);
+    }
+
     #[test]
     fn numbering_matches_the_splice() {
         let ps = vec![
@@ -757,16 +845,15 @@ mod tests {
 
     /// Speech made by macOS `say` (none elsewhere).
     fn say(text: &str) -> Option<Audio> {
+        say_as("Samantha", text)
+    }
+
+    fn say_as(voice: &str, text: &str) -> Option<Audio> {
         let dir = std::env::temp_dir().join(format!("gridcraft-voice-say-{}", std::process::id()));
         std::fs::create_dir_all(&dir).ok()?;
-        let wav = dir.join("q.wav");
-        let ok = std::process::Command::new("say")
-            .args(["-v", "Samantha", "-o"])
-            .arg(&wav)
-            .args(["--data-format=LEI16@16000", text])
-            .status()
-            .ok()?
-            .success();
+        let wav = dir.join(format!("q-{}.wav", text.len()));
+        let ok =
+            std::process::Command::new("say").args(["-v", voice, "-o"]).arg(&wav).args(["--data-format=LEI16@16000", text]).status().ok()?.success();
         let audio = ok.then(|| std::fs::read(&wav).ok()).flatten().and_then(|b| Audio::from_wav(&b).ok());
         let _ = std::fs::remove_dir_all(&dir);
         audio
@@ -840,5 +927,74 @@ mod tests {
         assert!(!text.contains("870000") && !text.contains("870,000"), "{text}");
         assert_eq!(q["range"], json!("Sheet1!B4"));
         assert_eq!(q["refs"][1]["range"], json!("Sheet1!B3"));
+    }
+
+    /// The rhythm of the first live question: three phrases, a quick click in the middle of each
+    /// (B11 "900", B9 "2.5 million", B16 gross profit). Each cell is pointed at once, in the
+    /// phrase being spoken, and the agent reads three distinct references.
+    #[test]
+    fn three_phrases_three_clicks() {
+        let ready = craft_voice::default_dir().is_some_and(|d| Model::Small.is_ready(&d));
+        let texts =
+            ["А почему здесь девятьсот тысяч?", "Так, а здесь два с половиной миллиона. Почему?", "Валовая прибыль, кажется, выглядит нормально."];
+        let parts: Option<Vec<Audio>> = if ready { texts.iter().map(|t| say_as("Milena", t)).collect() } else { None };
+        let Some(parts) = parts else {
+            eprintln!("skipped: needs the small model in the models folder and macOS `say`");
+            return;
+        };
+        // The phrases with a second's pause between them; a quick click (one frame) in the middle
+        // of each, the grid selecting the cell the frame after.
+        let mut samples = vec![];
+        let mut mids = vec![];
+        for a in &parts {
+            let start = samples.len() as f32 / 16_000.0;
+            samples.extend_from_slice(&a.samples);
+            mids.push(start + a.seconds() / 2.0);
+            samples.extend(std::iter::repeat_n(0.0, 16_000));
+        }
+        let mut p = Pointing::new(cell("B18"));
+        let mut sel = "B18";
+        for (mid, target) in mids.iter().zip(["B11", "B9", "B16"]) {
+            p.observe(*mid, true, false, cell(sel), || format!("Sheet1!{sel}"));
+            sel = target;
+            p.observe(mid + 0.06, false, false, cell(sel), || format!("Sheet1!{sel}"));
+            p.observe(mid + 0.12, false, false, cell(sel), || format!("Sheet1!{sel}"));
+        }
+        assert_eq!(p.pointers.iter().map(|x| x.anchor.as_str()).collect::<Vec<_>>(), vec!["Sheet1!B11", "Sheet1!B9", "Sheet1!B16"]);
+
+        let mut app = app();
+        for (cell, input) in [
+            ("A9", json!("Sales & marketing")),
+            ("B9", json!(2_400_000)),
+            ("A11", json!("G&A")),
+            ("B11", json!(900_000)),
+            ("A16", json!("Gross profit")),
+            ("B16", json!(9_760_674)),
+        ] {
+            app.session.execute("cell.set", json!({"cell": cell, "input": input})).unwrap();
+        }
+        let ctx = egui::Context::default();
+        let mut v = Voice { settings_read: true, ..Voice::default() };
+        v.apply(&mut app, &ctx, Some(Model::Small));
+        let doc = app.session.active().unwrap().uid;
+        v.submit(&mut app, &ctx, doc, "Sheet1!B18".into(), p.pointers, Audio { samples });
+        let t0 = std::time::Instant::now();
+        while status(&app) == QuestionStatus::Transcribing {
+            assert!(t0.elapsed().as_secs() < 300, "timed out");
+            v.frame(&mut app, &ctx);
+            std::thread::sleep(Duration::from_millis(30));
+        }
+        let list = gridcraft_agent::mcp::call(&mut Local(&mut app.session), "list_questions", &json!({"status": "pending"})).unwrap();
+        let spoken = list[0]["spokenText"].as_str().unwrap().to_string();
+        eprintln!("spoken: {spoken}\nagent reads: {}", list[0]["text"]);
+        // Each reference once, in order.
+        assert_eq!(craft_voice::markers_in(&spoken), vec![1, 2, 3], "{spoken}");
+        assert_eq!(list[0]["refs"].as_array().unwrap().len(), 3);
+        // Each in the phrase spoken when its cell was clicked.
+        let lower = spoken.to_lowercase();
+        let at = |w: &str| lower.find(w).unwrap_or_else(|| panic!("no `{w}` in {spoken}"));
+        assert!(at("⟦1⟧") > at("почему") && at("⟦1⟧") < at("так"), "{spoken}");
+        assert!(at("⟦2⟧") > at("так") && at("⟦2⟧") < at("валов"), "{spoken}");
+        assert!(at("⟦3⟧") > at("валов"), "{spoken}");
     }
 }

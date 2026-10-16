@@ -984,12 +984,13 @@ dependencies = [
 [[package]]
 name = "craft-voice"
 version = "0.1.0"
-source = "git+https://github.com/anton-belkin/craft-voice?rev=e31b1490399f01ac4564ea8846362950a06d1dd5#e31b1490399f01ac4564ea8846362950a06d1dd5"
+source = "git+https://github.com/anton-belkin/craft-voice?rev=93f74521c8169c9578b8fd0b04a76d15dc6e2d02#93f74521c8169c9578b8fd0b04a76d15dc6e2d02"
 dependencies = [
  "candle-core",
  "candle-nn",
  "candle-transformers",
  "cpal",
+ "flate2",
  "sha2",
  "ureq",
 ]
@@ -2174,6 +2175,7 @@ dependencies = [
  "gridcraft-engine",
  "gridcraft-mcp",
  "gridcraft-ui-egui",
+ "log",
  "serde_json",
 ]
 
