@@ -31,6 +31,9 @@ pub(crate) struct State {
     trace: Option<((u64, usize, u64), usize, CellRef, Json)>,
     /// A status note being typed, per topic.
     status_text: HashMap<String, String>,
+    /// The option shown per topic, and a reject comment being typed.
+    option: HashMap<String, String>,
+    reject_text: HashMap<String, String>,
 }
 
 /// Something the user clicked, acted on once drawing is done (drawing borrows the app).
@@ -278,6 +281,10 @@ fn topic_card(st: &mut AgentUi, app: &SheetApp, ui: &mut Ui, l: &Layer, n: &Numb
                 text(ui, wb, l, &pr.reasons, acts, &[], |r| r.small());
             });
         }
+        // The agent's proposed edits: options, what they change, Apply or Reject.
+        if let Some(e) = &tp.edits {
+            proposal_block(st, ui, d, l, tp, e, t, p, acts, editable, focused);
+        }
         // Places, in document order.
         ui.add_space(3.0);
         let mut places: Vec<(&String, &layer::TopicPlace)> =
@@ -361,6 +368,143 @@ fn topic_card(st: &mut AgentUi, app: &SheetApp, ui: &mut Ui, l: &Layer, n: &Numb
     if focused && std::mem::take(&mut st.pane.scroll_focus) {
         ui.scroll_to_rect(rect, Some(egui::Align::TOP));
     }
+}
+
+/// A topic's proposal: "The agent proposes N changes", its options, what each changes (old → new),
+/// then Apply option X / Reject; out of date, applied or rejected once settled.
+#[allow(clippy::too_many_arguments)]
+fn proposal_block(
+    st: &mut AgentUi,
+    ui: &mut Ui,
+    d: &gridcraft_engine::DocState,
+    l: &Layer,
+    tp: &Topic,
+    e: &layer::EditProposal,
+    t: &Tokens,
+    p: &Palette,
+    acts: &mut Vec<Act>,
+    editable: bool,
+    focused: bool,
+) {
+    use gridcraft_agent::layer::ProposalState;
+    let wb = &d.wb;
+    let blue = crate::BLUE;
+    egui::Frame::NONE.fill(blue.gamma_multiply(0.08)).corner_radius(4.0).inner_margin(6.0).show(ui, |ui| {
+        ui.set_width(ui.available_width());
+        match e.state {
+            ProposalState::Applied => {
+                let title = e.option(&e.chosen).map(|o| o.title.clone()).unwrap_or_default();
+                ui.label(
+                    RichText::new(format!("Applied option {}{}", e.chosen, if title.is_empty() { String::new() } else { format!(": {title}") }))
+                        .small()
+                        .color(t.text_dim),
+                );
+                return;
+            }
+            ProposalState::Rejected => {
+                ui.label(RichText::new("You rejected the agent's proposal").small().color(t.text_dim));
+                if !e.comment.is_empty() {
+                    ui.label(RichText::new(format!("“{}”", e.comment)).small().italics().color(t.text_dim));
+                }
+                return;
+            }
+            ProposalState::Outdated => {
+                ui.label(RichText::new("The agent's proposal is out of date, ask the agent to redo").small().strong().color(p.open));
+                return;
+            }
+            ProposalState::Pending => {}
+        }
+        let shown = st.pane.option.get(&tp.id).filter(|o| e.option(o).is_some()).cloned().or_else(|| e.options.first().map(|o| o.option.clone()));
+        let Some(shown) = shown else { return };
+        let Some(o) = e.option(&shown) else { return };
+        // The sheet previews it: the card in focus, else the first one shown.
+        if st.preview.is_none() || focused {
+            st.preview = Some((tp.id.clone(), shown.clone()));
+        }
+        let n = o.steps.len();
+        ui.label(RichText::new(format!("The agent proposes {n} change{}", if n == 1 { "" } else { "s" })).small().strong().color(blue));
+        if e.options.len() > 1 {
+            ui.horizontal_wrapped(|ui| {
+                ui.spacing_mut().item_spacing.x = 4.0;
+                for x in &e.options {
+                    let label = if x.title.is_empty() { x.option.clone() } else { format!("{} · {}", x.option, clip(&x.title, 28)) };
+                    if ui.selectable_label(x.option == shown, RichText::new(label).small()).on_hover_text("Show this option on the sheet").clicked() {
+                        st.pane.option.insert(tp.id.clone(), x.option.clone());
+                    }
+                }
+            });
+        } else if !o.title.is_empty() {
+            ui.label(RichText::new(&o.title).small().strong());
+        }
+        if !o.why.is_empty() {
+            text(ui, wb, l, &o.why, acts, &[], |r| r.small());
+        }
+        // What it changes, old → new.
+        match gridcraft_agent::proposals::draft(d, tp, &shown).as_deref() {
+            Some(Ok(dr)) => {
+                let edited: Vec<_> = dr.changes.iter().filter(|c| c.edited).collect();
+                let results = dr.changes.len() - edited.len();
+                for c in edited.iter().take(6) {
+                    let place = Place::of(wb, c.sheet, c.cell);
+                    ui.horizontal_wrapped(|ui| {
+                        ui.spacing_mut().item_spacing.x = 4.0;
+                        if ui.link(RichText::new(textlinks::address(&place, wb.active_sheet)).small()).clicked() {
+                            acts.push(Act::Follow(format!("cell:{}", place.a1())));
+                        }
+                        ui.label(
+                            RichText::new(if c.old.is_empty() { "empty".to_string() } else { clip(&c.old, 24) })
+                                .small()
+                                .strikethrough()
+                                .color(t.text_dim),
+                        );
+                        ui.label(RichText::new("→").small().color(t.text_dim));
+                        ui.label(RichText::new(if c.new.is_empty() { "empty".to_string() } else { clip(&c.new, 24) }).small().strong().color(blue));
+                    });
+                }
+                if edited.len() > 6 {
+                    ui.label(RichText::new(format!("and {} more", edited.len() - 6)).small().color(t.text_dim));
+                }
+                if results > 0 {
+                    ui.label(
+                        RichText::new(if results == 1 {
+                            "1 result recalculates (shown on the sheet)".to_string()
+                        } else {
+                            format!("{results} results recalculate (shown on the sheet)")
+                        })
+                        .small()
+                        .color(t.text_dim),
+                    );
+                }
+            }
+            Some(Err(_)) => {
+                ui.label(RichText::new("Out of date, ask the agent to redo").small().strong().color(p.open));
+                return;
+            }
+            None => {}
+        }
+        if !editable {
+            return;
+        }
+        ui.add_space(2.0);
+        ui.horizontal(|ui| {
+            let apply = egui::Button::new(RichText::new(format!("Apply option {shown}")).color(Color32::WHITE).strong()).fill(blue);
+            if ui.add(apply).on_hover_text("Make these changes in the workbook: one step you can undo").clicked() {
+                acts.push(Act::Run("agent.applyProposal", json!({"topic": tp.id, "option": shown})));
+            }
+            let comment = st.pane.reject_text.entry(tp.id.clone()).or_default();
+            if ui.button("Reject").on_hover_text("Turn the proposal down; your comment (optional) goes to the agent").clicked() {
+                acts.push(Act::Run("agent.rejectProposal", json!({"topic": tp.id, "comment": comment.trim()})));
+                comment.clear();
+            }
+        });
+        let comment = st.pane.reject_text.entry(tp.id.clone()).or_default();
+        ui.add(
+            egui::TextEdit::singleline(comment)
+                .hint_text("Comment for a reject (optional)")
+                .desired_width(f32::INFINITY)
+                .font(egui::TextStyle::Small),
+        );
+    });
 }
 
 /// `3.10` after `3.9`.

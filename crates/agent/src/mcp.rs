@@ -18,7 +18,12 @@ mark inputs with reasoned ranges (set_input_range), say how sure you are (set_co
 When the model rests on a choice, put both sides in the document (add_alternatives) instead of picking one; when a readable \
 formula approximates, add the exact one beside it (add_calculation_method) and say where the difference matters. Use \
 worst_case and risk_matrix to find what to check first. \
-Change the workbook only with run_command, giving a reason and a source. PRIVACY: ranges listed in get_context.privateRanges \
+Change the workbook only with run_command, giving a reason and a source. In a topic, PROPOSE: run_command with \
+`topic` records the change in the topic's proposal without touching the workbook; the person applies it in the document. \
+Don't ask for confirmation in the chat; offer options (option B, C… with describe_option) when there's a real choice. \
+Reads mark cells a pending proposal would change (pending), and questions carry pendingNearby: don't contradict them. \
+Events proposal_applied, proposal_rejected (with the comment, which also arrives as a follow-up question) and \
+proposal_outdated (redo it: discard_proposal, then record again) tell you what happened. PRIVACY: ranges listed in get_context.privateRanges \
 hold client data; you see stand-in values with the same sign and magnitude, and everything computed from them is computed \
 from the stand-ins. Never present those numbers as real; reason about the model's mechanics instead. You cannot write to \
 private cells. \
@@ -78,8 +83,8 @@ pub fn tools() -> Vec<Value> {
         ),
         tool(
             "read_range",
-            "Read cells (values, displayed text, formulas). Private cells and everything computed from them show stand-in values (flagged private / derivedFromPrivate).",
-            json!({"range": s("A1 range, e.g. \"B2:F20\" or \"Model!A1:D9\"")}),
+            "Read cells (values, displayed text, formulas). Private cells and everything computed from them show stand-in values (flagged private / derivedFromPrivate). Cells a pending proposal would change carry pending: [{topic, option, summary}]. With view \"proposal\" and a topic, read that proposal's draft (option A by default) instead of the accepted workbook.",
+            json!({"range": s("A1 range, e.g. \"B2:F20\" or \"Model!A1:D9\""), "view": {"type": "string", "enum": ["proposal"], "description": "Read a proposal's draft"}, "topic": s("Topic id or number (with view proposal)"), "option": s("Option letter, default A")}),
             &["range"],
             true,
         ),
@@ -261,9 +266,23 @@ pub fn tools() -> Vec<Value> {
         tool("get_layer", "The whole agent layer: anchors, questions, notes, inputs, private ranges, confidence, history.", json!({}), &[], true),
         tool(
             "run_command",
-            "Change the workbook with any GridCraft command (cell.set, home.bold, …; see list_commands). Logged as yours with the reason and source. Reading commands are refused: use read_range.",
-            json!({"command": s("Command id"), "params": {"type": "object"}, "reason": s("Why"), "source": s("What it is based on")}),
+            "Change the workbook with any GridCraft command (cell.set, home.bold, …; see list_commands). Logged as yours with the reason and source. Reading commands are refused: use read_range. With `topic` the workbook is NOT changed: the command runs on the topic's draft and is recorded in its proposal (option A by default; give `option` B, C… for alternatives). The person sees the change and applies it in the document.",
+            json!({"command": s("Command id"), "params": {"type": "object"}, "reason": s("Why"), "source": s("What it is based on"), "topic": s("Topic id or number: propose instead of changing"), "option": s("Option letter (A, B, C…), default A")}),
             &["command", "reason"],
+            false,
+        ),
+        tool(
+            "describe_option",
+            "Name an option of a topic's proposal and say why (links inside the text). Shown to the person beside the option.",
+            json!({"topic": s("Topic id or number"), "option": s("Option letter"), "title": s("Short title, e.g. \"Lower fixed costs\""), "why": s("Why this option")}),
+            &["topic", "option", "title"],
+            false,
+        ),
+        tool(
+            "discard_proposal",
+            "Drop one option of a topic's proposal, or the whole proposal (to redo it).",
+            json!({"topic": s("Topic id or number"), "option": s("Option letter; omit to drop them all")}),
+            &["topic"],
             false,
         ),
         tool(
@@ -326,7 +345,7 @@ fn call_tool(b: &mut dyn Backend, name: &str, args: &Value) -> Result<Value, Str
         "attach" => exec(b, "agent.attach", pick(args, &["label"])),
         "detach" => exec(b, "agent.detach", pick(args, &["listener"])),
         "get_context" => exec(b, "agent.context", json!({})),
-        "read_range" => exec(b, "agent.read", pick(args, &["range"])),
+        "read_range" => exec(b, "agent.read", pick(args, &["range", "view", "topic", "option"])),
         "trace_number" => exec(b, "agent.trace", pick(args, &["cell", "depth"])),
         "sensitivity" => exec(b, "agent.sensitivity", pick(args, &["cell", "limit"])),
         "list_questions" => exec(b, "agent.questions", pick(args, &["status"])),
@@ -361,7 +380,9 @@ fn call_tool(b: &mut dyn Backend, name: &str, args: &Value) -> Result<Value, Str
         "worst_case" => exec(b, "agent.stress", pick(args, &["cell", "inputs", "maxEvals"])),
         "risk_matrix" => exec(b, "agent.risk", pick(args, &["cell"])),
         "use_alternative" => exec(b, "agent.useVariant", pick(args, &["id", "option"])),
-        "run_command" => exec(b, "agent.exec", pick(args, &["command", "params", "reason", "source"])),
+        "run_command" => exec(b, "agent.exec", pick(args, &["command", "params", "reason", "source", "topic", "option"])),
+        "describe_option" => exec(b, "agent.describeOption", pick(args, &["topic", "option", "title", "why"])),
+        "discard_proposal" => exec(b, "agent.discardProposal", pick(args, &["topic", "option"])),
         "list_commands" => {
             let all = b.call("engine.commands", json!({}))?;
             let q = args.get("search").and_then(Value::as_str).unwrap_or("").to_lowercase();

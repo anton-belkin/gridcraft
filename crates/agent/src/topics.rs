@@ -184,6 +184,17 @@ pub fn topic_json(wb: &Workbook, l: &Layer, n: &Numbering, t: &Topic, full: bool
     if let Some(p) = &t.proposed {
         o["proposed"] = json!({"status": "agreed", "reasons": textlinks::render(wb, l, &p.reasons, home)});
     }
+    if let Some(e) = &t.edits {
+        let mut pr = crate::proposals::proposal_json(e);
+        if let Some(opts) = pr.get_mut("options").and_then(Json::as_array_mut) {
+            for o in opts.iter_mut() {
+                if let Some(w) = o.get("why").and_then(Json::as_str).map(str::to_string) {
+                    o["why"] = json!(textlinks::render(wb, l, &w, home));
+                }
+            }
+        }
+        o["proposal"] = pr;
+    }
     if full {
         o["discussion"] = json!(
             discussion(l, &t.id)
@@ -252,7 +263,7 @@ impl Part {
         }
     }
 
-    fn apply(&self, l: &mut Layer) {
+    pub(crate) fn apply(&self, l: &mut Layer) {
         match self {
             Part::Topic(id, t) => match (l.topics.iter().position(|x| &x.id == id), t) {
                 (Some(i), Some(t)) => {
@@ -618,6 +629,7 @@ pub fn new_topic(s: &mut Session, place: &Place, status: Status, by: Actor) -> R
             proposed: None,
             hidden: false,
             created_at: now,
+            edits: None,
         });
         id
     }))

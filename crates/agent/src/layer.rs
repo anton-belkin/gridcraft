@@ -444,6 +444,78 @@ pub struct Topic {
     pub hidden: bool,
     #[serde(default)]
     pub created_at: u64,
+    /// The agent's proposed edits: commands recorded on a draft, applied by the person.
+    #[serde(default, rename = "proposal", skip_serializing_if = "Option::is_none")]
+    pub edits: Option<EditProposal>,
+}
+
+/// Where a topic's proposed edits stand.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ProposalState {
+    #[default]
+    Pending,
+    Applied,
+    Rejected,
+    /// A step no longer fits the document (it changed, or an overlapping proposal was applied).
+    Outdated,
+}
+
+impl ProposalState {
+    pub fn id(self) -> &'static str {
+        match self {
+            ProposalState::Pending => "pending",
+            ProposalState::Applied => "applied",
+            ProposalState::Rejected => "rejected",
+            ProposalState::Outdated => "outdated",
+        }
+    }
+}
+
+/// One recorded command of an option.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct ProposalStep {
+    pub command: String,
+    #[serde(default)]
+    pub params: serde_json::Value,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub reason: String,
+}
+
+/// An option of a proposal (A, B, C…): its commands, a title and why.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct ProposalOption {
+    pub option: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub title: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub why: String,
+    #[serde(default)]
+    pub steps: Vec<ProposalStep>,
+}
+
+/// A topic's proposed edits: built on a draft of the accepted workbook, applied as one step.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct EditProposal {
+    #[serde(default)]
+    pub options: Vec<ProposalOption>,
+    #[serde(default)]
+    pub state: ProposalState,
+    /// The option applied.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub chosen: String,
+    /// The person's comment on a reject.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub comment: String,
+    /// When the state last changed.
+    #[serde(default)]
+    pub at: u64,
+}
+
+impl EditProposal {
+    pub fn option(&self, o: &str) -> Option<&ProposalOption> {
+        self.options.iter().find(|x| x.option.eq_ignore_ascii_case(o))
+    }
 }
 
 /// Where deleted cells were: the anchors of their neighbours (before and after the deleted rows or
@@ -591,6 +663,7 @@ impl Layer {
                 proposed: None,
                 hidden: false,
                 created_at: asked.max(1).min(now),
+                edits: None,
             });
             if let Some(q) = self.questions.get_mut(i) {
                 q.topic = id;
@@ -610,6 +683,7 @@ impl Layer {
                 proposed: None,
                 hidden: false,
                 created_at: at,
+                edits: None,
             });
             if let Some(n) = self.notes.get_mut(i) {
                 n.topic = id;
@@ -644,6 +718,12 @@ impl Layer {
             scan(&t.status.text);
             if let Some(p) = &t.proposed {
                 scan(&p.reasons);
+            }
+            for o in t.edits.iter().flat_map(|e| &e.options) {
+                scan(&o.why);
+            }
+            for p in &t.places {
+                scan(&p.reason);
             }
         }
         let used = |id: &str| {

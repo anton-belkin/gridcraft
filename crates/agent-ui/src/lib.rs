@@ -138,6 +138,8 @@ pub(crate) struct AgentUi {
     pub filter: Filter,
     /// The web export takes the discussion along.
     pub share_discussion: bool,
+    /// The proposal option previewed on the sheet: (topic, option).
+    pub preview: Option<(String, String)>,
     pub overlay: overlay::State,
     pub pane: pane::State,
     #[cfg(not(target_arch = "wasm32"))]
@@ -398,6 +400,8 @@ impl UiExtension for AgentUi {
     }
 
     fn side_panel(&mut self, app: &mut SheetApp, ui: &mut Ui) {
+        // The pane says which proposal to preview, while it shows one.
+        self.preview = None;
         if self.open {
             pane::show(self, app, ui);
         }

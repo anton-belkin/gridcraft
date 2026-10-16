@@ -24,6 +24,13 @@ pub const WORKBOOK_ELEMENT: &str = "gridcraft_workbook";
 pub fn shared_layer(l: &Layer, discussion: bool) -> Layer {
     let mut out = l.clone();
     out.topics.retain(|t| !t.hidden);
+    // Proposals belong to the conversation; the author's context setting (and folder) stays home.
+    if !discussion {
+        for t in &mut out.topics {
+            t.edits = None;
+        }
+    }
+    out.context = None;
     out.questions.retain(|q| discussion && q.status == QuestionStatus::Answered && q.answer.is_some() && !q.hidden);
     for q in &mut out.questions {
         q.seen = false;

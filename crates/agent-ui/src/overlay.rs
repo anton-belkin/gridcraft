@@ -213,6 +213,50 @@ pub(crate) fn paint(st: &mut AgentUi, app: &SheetApp, ui: &Ui, painter: &Painter
         }
     }
 
+    // A proposal being looked at: old → new on the cells it changes (stronger where it edits,
+    // lighter where results recalculate), like a heat map over the sheet.
+    if let Some((topic, option)) = &st.preview
+        && let Some(tp) = l.topic(topic)
+        && let Some(dr) = gridcraft_agent::proposals::draft(d, tp, option)
+        && let Ok(dr) = dr.as_ref()
+    {
+        // Cells carrying markers show only the new value (the markers sit where the old one would).
+        let marked: std::collections::HashSet<CellRef> = l
+            .topics
+            .iter()
+            .filter(|t| !t.hidden)
+            .flat_map(|t| t.places.iter())
+            .filter_map(|p| on_sheet(&p.anchor))
+            .map(|p| CellRef { row: p.range.start.row, col: p.range.end.col })
+            .collect();
+        for c in dr.changes.iter().filter(|c| c.sheet == si) {
+            let r = cells.rect(RangeRef::cell(c.cell));
+            if !r.intersects(cells.cells()) {
+                continue;
+            }
+            let clip = painter.with_clip_rect(r.intersect(cells.cells()));
+            clip.rect_filled(r, 0.0, t.window);
+            clip.rect_filled(r, 0.0, crate::BLUE.gamma_multiply(if c.edited { 0.20 } else { 0.08 }));
+            if c.edited {
+                clip.rect_stroke(r, 0.0, Stroke::new(1.2, crate::BLUE), StrokeKind::Inside);
+            }
+            let size = (r.height() * 0.62).clamp(7.0, 15.0);
+            let new = painter.layout_no_wrap(c.new.clone(), theme::ui_bold(size), crate::BLUE);
+            let old = painter.layout_no_wrap(format!("{} → ", c.old), theme::ui_font(size * 0.85), t.text_dim);
+            let y = r.center().y;
+            let right = r.right() - 3.0;
+            clip.galley(pos2(right - new.size().x, y - new.size().y / 2.0), new.clone(), crate::BLUE);
+            // The old value too, when there's room.
+            if !c.old.is_empty() && !marked.contains(&c.cell) && old.size().x + new.size().x + 6.0 < r.width() {
+                let x = right - new.size().x - old.size().x;
+                let oy = y - old.size().y / 2.0;
+                clip.galley(pos2(x, oy), old.clone(), t.text_dim);
+                let strike = painter.layout_no_wrap(c.old.clone(), theme::ui_font(size * 0.85), t.text_dim).size().x;
+                clip.line_segment([pos2(x, y), pos2(x + strike, y)], Stroke::new(1.0, t.text_dim));
+            }
+        }
+    }
+
     // Topics: a numbered circle per place in its top-right cell's top-right corner, in the topic's
     // status colour; several topics on one cell stack leftwards. A range place gets a thin outline.
     let time = ui.input(|i| i.time);
@@ -405,7 +449,13 @@ fn hover(st: &mut AgentUi, app: &SheetApp, ui: &Ui, d: &DocState, l: &Layer, cel
     let slides: Vec<_> = links::uses_at(&d.wb, l, si, Some(&RangeRef::cell(c))).into_iter().map(|(_, u)| u).collect();
     let sens = if is_formula_number(d, si, c) { Some(st.overlay.sensitivity(d, l, si, c)) } else { None };
     let sens = sens.filter(|s| !s.swings.is_empty());
-    if at.is_empty() && !private && input.is_none() && sens.is_none() && slides.is_empty() {
+    let proposed = st.preview.as_ref().and_then(|(topic, option)| {
+        let tp = l.topic(topic)?;
+        let dr = gridcraft_agent::proposals::draft(d, tp, option)?;
+        let ch = dr.as_ref().as_ref().ok()?.changes.iter().find(|x| x.sheet == si && x.cell == c)?.clone();
+        Some((n.topic.get(topic).copied().unwrap_or(0), option.clone(), ch))
+    });
+    if at.is_empty() && !private && proposed.is_none() && input.is_none() && sens.is_none() && slides.is_empty() {
         return;
     }
     let pos = pointer + vec2(18.0, 18.0);
@@ -422,6 +472,18 @@ fn hover(st: &mut AgentUi, app: &SheetApp, ui: &Ui, d: &DocState, l: &Layer, cel
                     for u in slides.iter().take(4) {
                         let title = if u.slide_title.is_empty() { String::new() } else { format!(" · {}", u.slide_title) };
                         ui.label(egui::RichText::new(format!("{} · slide {}{title}", u.deck_title, u.slide)).small());
+                    }
+                    ui.add_space(4.0);
+                }
+                if let Some((num, option, ch)) = &proposed {
+                    ui.label(egui::RichText::new(format!("Proposed in topic {num}, option {option}")).color(crate::BLUE).small().strong());
+                    ui.label(format!(
+                        "{} → {}",
+                        if ch.old.is_empty() { "empty" } else { &ch.old },
+                        if ch.new.is_empty() { "empty" } else { &ch.new }
+                    ));
+                    if !ch.edited {
+                        ui.label(egui::RichText::new("recalculated from the proposed changes").small().color(t.text_dim));
                     }
                     ui.add_space(4.0);
                 }

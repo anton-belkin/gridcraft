@@ -1670,3 +1670,160 @@ fn a_saved_context_never_starts_an_agent_by_itself() {
     assert!(runner::status(uid).is_none(), "nothing started for a file just opened");
     runner::set_mode(Mode::Manual);
 }
+
+// ---------------------------------------------------------------- proposals instead of direct edits
+
+struct McpLocal(Session);
+impl gridcraft_mcp::Backend for McpLocal {
+    fn call(&mut self, method: &str, params: Value) -> Result<Value, String> {
+        match method {
+            "engine.execute" => self.0.run(params["command"].as_str().unwrap_or(""), params["params"].clone()),
+            _ => Err("unknown".into()),
+        }
+    }
+    fn has_ui(&self) -> bool {
+        false
+    }
+    fn describe(&self) -> String {
+        "test".into()
+    }
+}
+
+#[test]
+fn in_a_topic_the_agent_proposes_and_the_person_applies() {
+    let mut s = model();
+    let q = s.execute("agent.ask", json!({"range": "B7", "text": "Can profit reach 200k?"})).unwrap();
+    let t = q["topic"].as_str().unwrap().to_string();
+    let mut b = McpLocal(s);
+    let call = |b: &mut McpLocal, name: &str, args: Value| crate::mcp::call(b, name, &args);
+    // Option A: a lower unit cost; option B: a higher price. The workbook doesn't change.
+    let r =
+        call(&mut b, "run_command", json!({"topic": "1", "command": "cell.set", "params": {"cell": "B4", "input": 60}, "reason": "supplier offer"}))
+            .unwrap();
+    assert_eq!(r["applied"], json!(false));
+    call(&mut b, "describe_option", json!({"topic": "1", "option": "A", "title": "Cheaper supplier", "why": "B4 drops to 60 with the new supplier"}))
+        .unwrap();
+    call(
+        &mut b,
+        "run_command",
+        json!({"topic": "1", "option": "B", "command": "cell.set", "params": {"cell": "B2", "input": 130}, "reason": "price list"}),
+    )
+    .unwrap();
+    call(&mut b, "describe_option", json!({"topic": "1", "option": "B", "title": "Raise the price", "why": "+10 on B2"})).unwrap();
+    assert_eq!(num(&b.0, "B4"), 70.0);
+    assert_eq!(num(&b.0, "B2"), 120.0);
+    // A command that doesn't run is refused and not recorded.
+    assert!(call(&mut b, "run_command", json!({"topic": "1", "command": "cell.set", "params": {"cell": "ZZZZ9"}})).is_err());
+    // The agent sees the proposal: in the topic, in reads of the accepted workbook, in the draft.
+    let topic = call(&mut b, "get_topic", json!({"topic": "1"})).unwrap();
+    assert_eq!(topic["proposal"]["state"], json!("pending"));
+    assert_eq!(topic["proposal"]["options"][0]["title"], json!("Cheaper supplier"));
+    assert_eq!(topic["proposal"]["options"][0]["changes"], json!(1));
+    assert!(topic["proposal"]["options"][0]["why"].as_str().unwrap().contains("[B4](cell:Sheet1!B4)"), "{topic}");
+    let list = call(&mut b, "list_topics", json!({})).unwrap();
+    assert_eq!(list[0]["proposal"]["options"].as_array().unwrap().len(), 2);
+    let read = call(&mut b, "read_range", json!({"range": "B4:B7"})).unwrap();
+    let cell = |r: &Value, a: &str| r["cells"].as_array().unwrap().iter().find(|c| c["cell"] == json!(a)).cloned().unwrap();
+    assert_eq!(cell(&read, "B4")["value"], json!(70.0));
+    assert_eq!(cell(&read, "B4")["pending"][0]["option"], json!("A"));
+    assert_eq!(cell(&read, "B4")["pending"][0]["summary"], json!("Cheaper supplier (1 change)"));
+    // B7 recalculates under both options.
+    assert_eq!(cell(&read, "B7")["pending"].as_array().unwrap().len(), 2);
+    let draft = call(&mut b, "read_range", json!({"range": "B4:B7", "view": "proposal", "topic": "1", "option": "A"})).unwrap();
+    assert_eq!(cell(&draft, "B4")["value"], json!(60.0));
+    assert_eq!(cell(&draft, "B7")["value"], json!(200000.0));
+    // A new question on the same cells carries the pending proposals.
+    let mut s = b.0;
+    s.execute("agent.ask", json!({"range": "B7", "text": "And with both?", "newTopic": true})).unwrap();
+    let w = s.execute("agent.questions", json!({"status": "pending", "actor": "agent"})).unwrap();
+    let last = w.as_array().unwrap().last().unwrap().clone();
+    assert_eq!(last["pendingNearby"].as_array().unwrap().len(), 2, "{last}");
+    // Only the person applies; the change is one undo step with a decision note.
+    assert!(s.execute("agent.applyProposal", json!({"topic": t, "option": "B", "actor": "agent"})).is_err());
+    let depth = s.active().unwrap().undo.len();
+    s.execute("agent.applyProposal", json!({"topic": t, "option": "B"})).unwrap();
+    assert_eq!(num(&s, "B2"), 130.0);
+    assert_eq!(num(&s, "B7"), 200000.0);
+    assert_eq!(s.active().unwrap().undo.len(), depth + 1);
+    let l = layer::get(s.active().unwrap());
+    let e = l.topic(&t).unwrap().edits.clone().unwrap();
+    assert_eq!((e.state, e.chosen.as_str()), (layer::ProposalState::Applied, "B"));
+    assert!(l.notes.iter().any(|n| n.topic == t && n.kind == "decision" && n.text == "chose B: Raise the price"));
+    // Undo takes it all back, workbook and proposal; redo applies it again.
+    s.execute("edit.undo", json!({})).unwrap();
+    assert_eq!(num(&s, "B2"), 120.0);
+    let l = layer::get(s.active().unwrap());
+    assert_eq!(l.topic(&t).unwrap().edits.as_ref().unwrap().state, layer::ProposalState::Pending);
+    assert!(!l.notes.iter().any(|n| n.kind == "decision"));
+    s.execute("edit.redo", json!({})).unwrap();
+    assert_eq!(num(&s, "B2"), 130.0);
+}
+
+#[test]
+fn applying_one_proposal_outdates_the_ones_it_overlaps() {
+    let mut s = model();
+    let a = s.execute("agent.ask", json!({"range": "B4", "text": "Unit cost?"})).unwrap()["topic"].as_str().unwrap().to_string();
+    let b = s.execute("agent.ask", json!({"range": "B5", "text": "Fixed costs?"})).unwrap()["topic"].as_str().unwrap().to_string();
+    let c = s.execute("agent.ask", json!({"range": "B2", "text": "Price?"})).unwrap()["topic"].as_str().unwrap().to_string();
+    let rec = |s: &mut Session, t: &str, cell: &str, v: f64| {
+        s.execute("agent.exec", json!({"topic": t, "command": "cell.set", "params": {"cell": cell, "input": v}, "actor": "agent"})).unwrap();
+    };
+    rec(&mut s, &a, "B4", 65.0);
+    rec(&mut s, &b, "B4", 68.0);
+    rec(&mut s, &c, "C20", 1.0);
+    s.execute("agent.applyProposal", json!({"topic": a})).unwrap();
+    let l = layer::get(s.active().unwrap());
+    let state = |id: &str| l.topic(id).unwrap().edits.as_ref().unwrap().state;
+    assert_eq!(state(&a), layer::ProposalState::Applied);
+    assert_eq!(state(&b), layer::ProposalState::Outdated, "both change B4");
+    assert_eq!(state(&c), layer::ProposalState::Pending, "C20 doesn't overlap");
+    // A step that no longer fits applies nothing: the sheet it wrote to is gone.
+    s.execute("home.insertSheet", json!({})).unwrap();
+    let names: Vec<String> = s.active().unwrap().wb.sheets.iter().map(|x| x.name.clone()).collect();
+    let other = names.iter().find(|n| n.as_str() != "Sheet1").unwrap().clone();
+    let at = |s: &Session, n: &str| s.active().unwrap().wb.sheets.iter().position(|x| x.name == n).unwrap();
+    s.execute("sheet.activate", json!({"sheet": at(&s, "Sheet1")})).unwrap();
+    rec(&mut s, &c, &format!("{other}!B1"), 5.0);
+    s.execute("sheet.activate", json!({"sheet": at(&s, &other)})).unwrap();
+    s.execute("home.deleteSheet", json!({})).unwrap();
+    s.execute("sheet.activate", json!({"sheet": at(&s, "Sheet1")})).unwrap();
+    let c20 = |s: &Session| s.active().unwrap().wb.sheet(0).unwrap().cell(gridcraft_engine::core::CellRef::parse("C20").unwrap()).is_some();
+    let depth = s.active().unwrap().undo.len();
+    let e = s.execute("agent.applyProposal", json!({"topic": c})).unwrap_err().to_string();
+    assert!(e.contains("out of date, ask the agent to redo"), "{e}");
+    // Nothing applied, not even the steps that still fit; nothing on the undo stack.
+    assert!(!c20(&s));
+    assert_eq!(s.active().unwrap().undo.len(), depth);
+    assert_eq!(layer::get(s.active().unwrap()).topic(&c).unwrap().edits.as_ref().unwrap().state, layer::ProposalState::Outdated);
+    // Recording again starts a fresh proposal.
+    rec(&mut s, &c, "C21", 2.0);
+    let e = layer::get(s.active().unwrap()).topic(&c).unwrap().edits.clone().unwrap();
+    assert_eq!((e.state, e.options.len(), e.options[0].steps.len()), (layer::ProposalState::Pending, 1, 1));
+}
+
+#[test]
+fn a_rejected_proposal_tells_the_agent_why() {
+    let mut s = model();
+    let t = s.execute("agent.ask", json!({"range": "B5", "text": "Cut fixed costs?"})).unwrap()["topic"].as_str().unwrap().to_string();
+    s.execute("agent.exec", json!({"topic": t, "command": "cell.set", "params": {"cell": "B5", "input": 80000}, "actor": "agent"})).unwrap();
+    assert!(s.execute("agent.rejectProposal", json!({"topic": t, "actor": "agent"})).is_err());
+    s.execute("agent.rejectProposal", json!({"topic": t, "comment": "Rent can't go down before 2027"})).unwrap();
+    let l = layer::get(s.active().unwrap());
+    let e = l.topic(&t).unwrap().edits.clone().unwrap();
+    assert_eq!((e.state, e.comment.as_str()), (layer::ProposalState::Rejected, "Rent can't go down before 2027"));
+    // The comment reaches the agent as a follow-up in the same topic.
+    let q = l.questions.iter().rev().find(|q| q.topic == t).unwrap();
+    assert!(q.text.contains("Rent can't go down before 2027") && q.status == layer::QuestionStatus::Pending, "{}", q.text);
+    assert_eq!(num(&s, "B5"), 100000.0);
+    // The person's reject is undoable; discarding is the agent's.
+    s.execute("edit.undo", json!({})).unwrap();
+    s.execute("edit.undo", json!({})).unwrap();
+    assert_eq!(layer::get(s.active().unwrap()).topic(&t).unwrap().edits.as_ref().unwrap().state, layer::ProposalState::Pending);
+    s.execute("agent.discardProposal", json!({"topic": t, "actor": "agent"})).unwrap();
+    assert!(layer::get(s.active().unwrap()).topic(&t).unwrap().edits.is_none());
+    // Proposals don't go out with the workbook unless the discussion does.
+    s.execute("agent.exec", json!({"topic": t, "command": "cell.set", "params": {"cell": "B5", "input": 90000}, "actor": "agent"})).unwrap();
+    let l = layer::get(s.active().unwrap());
+    assert!(crate::export::shared_layer(&l, false).topics.iter().all(|t| t.edits.is_none()));
+    assert!(crate::export::shared_layer(&l, true).topics.iter().any(|t| t.edits.is_some()));
+}

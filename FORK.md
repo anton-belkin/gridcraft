@@ -254,6 +254,24 @@ upstream. Each one accepted upstream removes its lines from the patch.
     3 of 5 · 1 revise · 1 open", filters, every topic; also every set of alternatives), History.
     The ribbon's Agent button shows the sign-off count.
   - Deferred (TOPICS.md §6): nested places.
+- **Proposals instead of direct edits** (`proposals.rs`; brief part B, the same MCP in all three
+  apps). In a topic the agent doesn't change the workbook: `run_command {topic, option?}` runs the
+  command on a draft (a copy of the accepted workbook in a scratch session, recalculated),
+  refuses it if it doesn't run, and records it in the topic's proposal (`Topic.edits`, saved as
+  `proposal`; options A–H, up to 200 commands each). `describe_option` names an option and says
+  why; `discard_proposal` drops one or all. Reads of the accepted workbook mark cells a pending
+  proposal changes (`pending: [{topic, option, summary}]`), `read_range {view: "proposal"}` reads
+  a draft, topics show `proposal: {options: [{option, title, why, changes}], state}`, and pending
+  and working questions carry `pendingNearby`. The person sees the option on the sheet (old → new
+  on edited cells, lighter on results that recalculate), switches options on the card, and
+  applies one: the commands are replayed on the workbook with their own history entries set
+  aside, and one custom undo step holds the workbook before and after plus the layer (the
+  proposal applied, a decision note "chose B: …", overlapping pending proposals out of date). A
+  step that doesn't fit restores the workbook and marks the proposal out of date ("out of date,
+  ask the agent to redo"). Reject takes an optional comment, which also goes to the agent as a
+  follow-up question in the topic. Events `proposal_applied`, `proposal_rejected` (with the
+  comment) and `proposal_outdated` on `/events` and the channel. Drafts are cached per workbook
+  version; proposals stay home when the workbook is sent, unless the discussion goes too.
 - **Analysis is deterministic.** The trace and the sensitivity are computed by the engine (the
   dependency graph, recalculation of a scratch copy). The agent explains them; it doesn't make them up.
 - **Several inputs at once, bounded.** The worst and best combination moves 3–12 inputs inside

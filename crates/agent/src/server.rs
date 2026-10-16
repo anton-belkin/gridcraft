@@ -243,6 +243,8 @@ fn channel_stream(mut w: TcpStream, control: &str, client: &str) {
     let _ = w.flush();
     let mut seen: HashSet<String> = HashSet::new();
     let mut gone: HashSet<String> = HashSet::new();
+    let mut told: HashSet<String> = HashSet::new();
+    let since = crate::now_ms();
     let mut slot: Option<Remote> = None;
     let mut quiet = 0u32;
     loop {
@@ -279,6 +281,27 @@ fn channel_stream(mut w: TcpStream, control: &str, client: &str) {
                         return;
                     }
                 }
+                // What happened to proposals: applied, rejected (with the comment), out of date.
+                for e in proposal_events(b, None, &mut told, since) {
+                    let kind = e.get("event").and_then(Json::as_str).unwrap_or("").to_string();
+                    let topic = e.get("topic").and_then(Json::as_str).unwrap_or("").to_string();
+                    let comment = e.get("comment").and_then(Json::as_str).unwrap_or("");
+                    let content = match kind.as_str() {
+                        "proposal_applied" => {
+                            format!("Your proposal in topic {topic} was applied (option {}).", e.get("option").and_then(Json::as_str).unwrap_or("A"))
+                        }
+                        "proposal_rejected" if !comment.is_empty() => format!("Your proposal in topic {topic} was rejected: {comment}"),
+                        "proposal_rejected" => format!("Your proposal in topic {topic} was rejected."),
+                        _ => format!("Your proposal in topic {topic} is out of date: discard_proposal, read again and propose again."),
+                    };
+                    let n = json!({"jsonrpc": "2.0", "method": "notifications/claude/channel", "params": {
+                        "content": content,
+                        "meta": {"kind": kind, "topic": topic},
+                    }});
+                    if w.write_all(format!("event: message\ndata: {n}\n\n").as_bytes()).and_then(|()| w.flush()).is_err() {
+                        return;
+                    }
+                }
             }
         }
         std::thread::sleep(Duration::from_millis(800));
@@ -291,6 +314,46 @@ fn channel_stream(mut w: TcpStream, control: &str, client: &str) {
             }
         }
     }
+}
+
+/// Proposals applied, rejected or out of date since `since` (each once): the event lines.
+fn proposal_events(b: &mut Remote, document: Option<&str>, seen: &mut HashSet<String>, since: u64) -> Vec<Json> {
+    let params = json!({"actor": "agent", "masked": true});
+    let call = match document {
+        Some(d) => json!({"command": "agent.onDocument", "params": {"document": d, "command": "agent.topics", "params": params, "actor": "agent"}}),
+        None => json!({"command": "agent.topics", "params": params}),
+    };
+    let Ok(Json::Array(list)) = b.call("engine.execute", call) else { return vec![] };
+    let mut out = vec![];
+    for t in list {
+        let Some(pr) = t.get("proposal") else { continue };
+        let state = pr.get("state").and_then(Json::as_str).unwrap_or("pending");
+        let at = pr.get("at").and_then(Json::as_u64).unwrap_or(0);
+        let event = match state {
+            "applied" => "proposal_applied",
+            "rejected" => "proposal_rejected",
+            "outdated" => "proposal_outdated",
+            _ => continue,
+        };
+        let id = t.get("id").and_then(Json::as_str).unwrap_or("");
+        if at < since || !seen.insert(format!("{}#{id}#{state}#{at}", document.unwrap_or(""))) {
+            continue;
+        }
+        let mut line = json!({"event": event, "topic": id, "number": t.get("number"), "document": document});
+        match event {
+            "proposal_applied" => {
+                line["option"] = pr.get("chosen").cloned().unwrap_or(Json::Null);
+                line["hint"] = json!("the person applied this option: it is in the workbook now");
+            }
+            "proposal_rejected" => {
+                line["comment"] = pr.get("comment").cloned().unwrap_or(json!(""));
+                line["hint"] = json!("the person turned the proposal down; a comment also arrives as a follow-up question in the topic");
+            }
+            _ => line["hint"] = json!("a step no longer fits the workbook: discard_proposal, read again, and propose again"),
+        }
+        out.push(line);
+    }
+    out
 }
 
 /// Questions withdrawn since the last look (each once): (id, document).
@@ -330,6 +393,8 @@ fn events(mut w: TcpStream, control: &str, query: &str) {
     let _ = w.flush();
     let mut seen: HashSet<String> = HashSet::new();
     let mut gone: HashSet<String> = HashSet::new();
+    let mut told: HashSet<String> = HashSet::new();
+    let since = crate::now_ms();
     let mut slot: Option<Remote> = None;
     loop {
         if crate::runner::mode() != crate::runner::Mode::Off
@@ -376,6 +441,11 @@ fn events(mut w: TcpStream, control: &str, query: &str) {
             if let Some(b) = slot.as_mut() {
                 for (id, doc) in withdrawn(b, document.as_deref(), &mut gone) {
                     let line = json!({"event": "withdrawn", "id": id, "document": doc, "hint": "the user took this question back: drop it"});
+                    if writeln!(w, "{line}").and_then(|()| w.flush()).is_err() {
+                        return;
+                    }
+                }
+                for line in proposal_events(b, document.as_deref(), &mut told, since) {
                     if writeln!(w, "{line}").and_then(|()| w.flush()).is_err() {
                         return;
                     }

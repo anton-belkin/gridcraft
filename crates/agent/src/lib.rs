@@ -33,6 +33,7 @@ pub mod layer;
 pub mod links;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod mcp;
+pub mod proposals;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod registry;
 #[cfg(not(target_arch = "wasm32"))]

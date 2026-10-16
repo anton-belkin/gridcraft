@@ -49,6 +49,7 @@ pub static ALL: &[&[CommandSpec]] = &[
     SPECS,
     crate::docs::SPECS,
     crate::topics::SPECS,
+    crate::proposals::SPECS,
     crate::variants::SPECS,
     crate::stress::SPECS,
     crate::safe::SPECS,
@@ -84,7 +85,7 @@ pub static SPECS: &[CommandSpec] = &[
     spec!(query "agent.trace", "Where Does This Number Come From", "{cell?, depth?: 1..12 (default 6), masked?: bool} → the calculation tree down to its inputs", trace),
     spec!(query "agent.sensitivity", "Sensitivity", "{cell?, limit?: (default 8), masked?: bool} → output at the low and high end of each input", sensitivity),
     spec!(query "agent.exportHtml", "Export as Web Page", "{path: \"out.html\", includeDiscussion?: bool (default false: topics with status and notes only), web?: folder with the web build (default $GRIDCRAFT_WEB_BUNDLE, then target/agent-web)} — one HTML file: the workbook in GridCraft for the web, prepared answers and notes read-only", crate::export::export_html),
-    spec!(change "agent.exec", "Run Command as Agent", "{command, params?, reason?, source?} — runs a changing command, logged as the agent's", exec),
+    spec!(change "agent.exec", "Run Command as Agent", "{command, params?, reason?, source?, topic?, option?} — runs a changing command, logged as the agent's; with `topic` it goes into the topic's proposal (option A by default) and the workbook isn't changed", exec),
 ];
 
 // ---------------------------------------------------------------- params
@@ -432,6 +433,18 @@ fn question_json(s: &Session, l: &Layer, q: &Question, wb: &Workbook) -> Json {
         let n = crate::topics::numbering(wb, l);
         o["topic"] = json!({"id": t.id, "number": n.topic.get(&t.id), "status": t.status.status.id(), "statusText": crate::textlinks::render(wb, l, &t.status.text, home)});
     }
+    // Pending proposals on the same cells, so the answer doesn't contradict them.
+    if matches!(q.status, QuestionStatus::Pending | QuestionStatus::Working)
+        && let Ok(d) = s.doc()
+    {
+        let mut ids: Vec<&str> = vec![q.anchor.as_str()];
+        ids.extend(q.refs.iter().map(|r| r.anchor.as_str()));
+        if let Some(t) = l.topic(&q.topic) {
+            ids.extend(t.places.iter().map(|p| p.anchor.as_str()));
+        }
+        let places: Vec<Place> = ids.iter().filter_map(|id| l.anchor(id).and_then(|a| anchor::resolve(&d.wb, a))).collect();
+        o["pendingNearby"] = crate::proposals::nearby(d, l, &places);
+    }
     o
 }
 
@@ -724,26 +737,54 @@ fn context(s: &mut Session, p: &Json) -> Result<Json> {
 }
 
 fn read(s: &mut Session, p: &Json) -> Result<Json> {
-    let place = place_p(s, p, "agent.read")?;
+    const CMD: &str = "agent.read";
+    let place = place_p(s, p, CMD)?;
     let d = s.doc()?;
     let l = layer::get(d);
     let masked = masked_p(p);
-    let (wb, calc) = if masked { analysis::masked(d, &l) } else { ((*d.wb).clone(), d.calc.clone()) };
+    // `view: "proposal"`: the draft of a topic's proposal instead of the accepted workbook.
+    let proposal = str_p(p, "view") == Some("proposal");
+    let held;
+    let src = if proposal {
+        let r = text_p(p, "topic", CMD)?;
+        let id = crate::topics::find_topic(&d.wb, &l, &r).ok_or_else(|| bad(CMD, format!("no topic `{r}`")))?;
+        let t = l.topic(&id).ok_or_else(|| bad(CMD, format!("no topic `{r}`")))?;
+        let option = str_p(p, "option").map(|o| o.trim().to_ascii_uppercase()).filter(|o| !o.is_empty()).unwrap_or_else(|| "A".into());
+        held = crate::proposals::draft(d, t, &option).ok_or_else(|| bad(CMD, format!("topic `{r}` has no option {option}")))?;
+        match held.as_ref() {
+            Ok(dr) => dr.doc().ok_or_else(|| bad(CMD, "no draft"))?,
+            Err((i, e)) => return Err(bad(CMD, format!("the proposal is out of date: step {} doesn't run any more ({e})", i + 1))),
+        }
+    } else {
+        d
+    };
+    let (wb, calc) = if masked { analysis::masked(src, &l) } else { ((*src.wb).clone(), src.calc.clone()) };
     let private = analysis::private_cells(&wb, &l);
     let derived = analysis::derived_from(&calc, &private);
-    let Some(sh) = wb.sheet(place.sheet) else { return Err(bad("agent.read", "no such sheet")) };
+    let Some(sh) = wb.sheet(place.sheet) else { return Err(bad(CMD, "no such sheet")) };
     if place.range.count() > 20_000 {
-        return Err(bad("agent.read", "range too large (20,000 cells max): read it in parts"));
+        return Err(bad(CMD, "range too large (20,000 cells max): read it in parts"));
     }
+    // What pending proposals would change here (the accepted workbook only).
+    let pending = if proposal { vec![] } else { crate::proposals::pending(d, &l) };
+    let numbers = crate::topics::numbering(&d.wb, &l);
     let mut cells = vec![];
     for c in place.range.iter() {
-        let Some(cell) = sh.cell(c) else { continue };
-        if cell.value.is_empty() && cell.formula.is_none() {
+        let touched: Vec<Json> = pending
+            .iter()
+            .filter(|(_, _, _, cells)| cells.contains(&(place.sheet, c)))
+            .map(|(t, o, sm, _)| json!({"topic": t, "number": numbers.topic.get(t), "option": o, "summary": sm}))
+            .collect();
+        let cell = sh.cell(c);
+        if cell.is_none_or(|x| x.value.is_empty() && x.formula.is_none()) && touched.is_empty() {
             continue;
         }
-        let mut o = json!({"cell": c.a1(), "value": analysis::value_json(&cell.value), "text": gridcraft_engine::display::cell_text(&wb, sh, c)});
-        if let Some(f) = &cell.formula {
-            o["formula"] = json!(format!("={}", f.text.trim_start_matches('=')));
+        let mut o = json!({"cell": c.a1(), "text": gridcraft_engine::display::cell_text(&wb, sh, c)});
+        if let Some(cell) = cell {
+            o["value"] = analysis::value_json(&cell.value);
+            if let Some(f) = &cell.formula {
+                o["formula"] = json!(format!("={}", f.text.trim_start_matches('=')));
+            }
         }
         if private.contains(&(place.sheet, c)) {
             o["private"] = json!(true);
@@ -751,9 +792,16 @@ fn read(s: &mut Session, p: &Json) -> Result<Json> {
         if derived.contains(&(place.sheet, c)) {
             o["derivedFromPrivate"] = json!(true);
         }
+        if !touched.is_empty() {
+            o["pending"] = Json::Array(touched);
+        }
         cells.push(o);
     }
-    Ok(json!({"range": place.a1(), "masked": masked, "cells": cells}))
+    let mut out = json!({"range": place.a1(), "masked": masked, "cells": cells});
+    if proposal {
+        out["view"] = json!("proposal");
+    }
+    Ok(out)
 }
 
 fn trace(s: &mut Session, p: &Json) -> Result<Json> {
@@ -817,6 +865,10 @@ fn exec(s: &mut Session, p: &Json) -> Result<Json> {
         }
     }
     let reason: String = str_p(p, "reason").unwrap_or("").chars().take(4_000).collect();
+    // In a topic the workbook isn't changed: the command goes into the topic's proposal.
+    if p.get("topic").is_some_and(|t| !t.is_null()) {
+        return crate::proposals::record(s, p, &command, params, reason);
+    }
     let source: String = str_p(p, "source").unwrap_or("").chars().take(2_000).collect();
     PENDING_REASON.with(|r| *r.borrow_mut() = Some((reason, source)));
     AGENT_DEPTH.with(|x| x.set(x.get().saturating_add(1)));

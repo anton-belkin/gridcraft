@@ -21,6 +21,11 @@ pub struct Place {
 }
 
 impl Place {
+    /// One cell of a sheet of `wb`.
+    pub fn of(wb: &gridcraft_engine::model::Workbook, sheet: usize, c: gridcraft_engine::core::CellRef) -> Place {
+        Place { sheet, sheet_name: wb.sheet(sheet).map(|x| x.name.clone()).unwrap_or_default(), range: gridcraft_engine::core::RangeRef::cell(c) }
+    }
+
     pub fn a1(&self) -> String {
         format!("{}!{}", quote_sheet(&self.sheet_name), self.range.a1())
     }
