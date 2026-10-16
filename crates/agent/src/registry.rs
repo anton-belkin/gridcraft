@@ -3,7 +3,8 @@
 //! titles, paths and listeners. No content, no client data.
 //!
 //! Written atomically (a temporary file in the same folder, then a rename) when something changes
-//! (at most once a second) and every 10 s as a heartbeat; deleted on exit. Readers treat a file as
+//! (at most once a second, from the UI's frames) and every 10 s as a heartbeat (from its own
+//! thread, so an idle or hidden window stays listed); deleted on exit. Readers treat a file as
 //! stale when its pid isn't alive or its heartbeat is older than 30 s.
 
 use std::path::{Path, PathBuf};
@@ -114,6 +115,8 @@ struct State {
     mcp: String,
     signature: String,
     written: u64,
+    /// The entry last written, for the heartbeat thread.
+    last: Option<Json>,
 }
 
 static STATE: Mutex<Option<State>> = Mutex::new(None);
@@ -121,7 +124,21 @@ static STATE: Mutex<Option<State>> = Mutex::new(None);
 /// Starts announcing this app (its MCP server at `mcp`); clears stale entries left by crashes.
 pub fn enable(mcp: &str) {
     if let Ok(mut g) = STATE.lock() {
-        *g = Some(State { mcp: mcp.to_string(), signature: String::new(), written: 0 });
+        *g = Some(State { mcp: mcp.to_string(), signature: String::new(), written: 0, last: None });
+    }
+    // The heartbeat doesn't wait for frames: an idle or hidden window draws none, and the hub
+    // would take the app for gone after 30 s.
+    static BEATING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    if !cfg!(test) && !BEATING.swap(true, std::sync::atomic::Ordering::SeqCst) {
+        let _ = std::thread::Builder::new().name("aitocraft-heartbeat".into()).spawn(|| {
+            loop {
+                std::thread::sleep(std::time::Duration::from_secs(5));
+                if !beat(crate::now_ms()) {
+                    BEATING.store(false, std::sync::atomic::Ordering::SeqCst);
+                    return;
+                }
+            }
+        });
     }
     if let Some(dir) = folder() {
         sweep(&dir, crate::now_ms());
@@ -171,6 +188,7 @@ pub fn tick(s: &Session) {
         Ok(_) => {
             st.signature = sig;
             st.written = now;
+            st.last = Some(v);
         }
         Err(e) => {
             log::warn!("AItoCraft registry {}: {e}", dir.display());
@@ -179,12 +197,29 @@ pub fn tick(s: &Session) {
     }
 }
 
+/// Rewrites the last entry with a fresh heartbeat when it's due; `false` once the entry is gone.
+fn beat(now: u64) -> bool {
+    let Ok(mut g) = STATE.lock() else { return false };
+    let Some(st) = g.as_mut() else { return false };
+    if now.saturating_sub(st.written) < HEARTBEAT_MS {
+        return true;
+    }
+    let (Some(mut v), Some(dir)) = (st.last.clone(), folder()) else { return true };
+    v["heartbeat"] = serde_json::json!(now);
+    if write(&dir, &file_name(), &v).is_ok() {
+        st.written = now;
+        st.last = Some(v);
+    }
+    true
+}
+
 /// On exit: the entry goes.
 pub fn remove() {
-    if let Some(dir) = folder() {
-        let _ = std::fs::remove_file(dir.join(file_name()));
-    }
+    // The state first: the heartbeat thread stops before the file goes, and doesn't bring it back.
     if let Ok(mut g) = STATE.lock() {
         *g = None;
+    }
+    if let Some(dir) = folder() {
+        let _ = std::fs::remove_file(dir.join(file_name()));
     }
 }

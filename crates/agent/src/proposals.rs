@@ -86,7 +86,14 @@ impl Drop for Draft {
 /// Runs `steps` on a copy of `d`'s workbook: the draft, or the step that failed and why.
 pub fn build(d: &DocState, steps: &[ProposalStep]) -> std::result::Result<Draft, (usize, String)> {
     let mut session = Session::new();
-    session.add_document(DocState::new((*d.wb).clone(), None, d.title.clone()));
+    // The accepted workbook as it is, already calculated: only the steps recalculate (a fresh
+    // DocState would recalculate everything, which on a large model takes seconds per draft).
+    let mut copy = DocState::new(Workbook::default(), None, d.title.clone());
+    copy.wb = d.wb.clone();
+    copy.calc = d.calc.clone();
+    copy.selection = d.selection.clone();
+    copy.saved = d.wb.clone();
+    session.add_document(copy);
     for (i, st) in steps.iter().enumerate() {
         crate::commands::AGENT_DEPTH.with(|x| x.set(x.get().saturating_add(1)));
         let r = session.execute(&st.command, st.params.clone());
