@@ -1,0 +1,490 @@
+//! The Agent pane: the selected cell (ask, answers, notes, where the number comes from, its
+//! sensitivity), all questions, all notes, the history, and how to connect an agent.
+
+use egui::{Color32, RichText, Ui, vec2};
+use gridcraft_agent::analysis;
+use gridcraft_agent::anchor::{self, Place};
+use gridcraft_agent::layer::{self, Actor, Layer, Link, Note, Question, QuestionStatus};
+use gridcraft_engine::core::{CellRef, RangeRef};
+use gridcraft_ui_egui::SheetApp;
+use gridcraft_ui_egui::theme::{self, Tokens};
+use serde_json::{Value as Json, json};
+
+use crate::overlay::{self, clip, kind_label};
+use crate::{AgentUi, Heat, Palette, Tab, fmt_num, follow, palette};
+
+#[derive(Default)]
+pub(crate) struct State {
+    pub trace_open: bool,
+    trace: Option<((u64, usize, u64), usize, CellRef, Json)>,
+}
+
+/// Something the user clicked, acted on once drawing is done (drawing borrows the app).
+enum Act {
+    Follow(String),
+    Run(&'static str, Json),
+}
+
+pub(crate) fn show(st: &mut AgentUi, app: &mut SheetApp, ui: &mut Ui) {
+    let t = Tokens::get(ui.ctx());
+    let p = palette(&t);
+    let max = (ui.available_width() / 2.0).max(320.0);
+    let mut acts: Vec<Act> = vec![];
+    let mut close = false;
+    egui::Panel::right("agent_pane").default_size(340.0).max_size(max).resizable(true).frame(egui::Frame::NONE.fill(t.ribbon).inner_margin(10)).show(
+        ui,
+        |ui| {
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("Agent").font(theme::ui_bold(15.0)));
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if gridcraft_ui_egui::widgets::icon_button(ui, gridcraft_ui_egui::icons::Icon::Close, t.text_dim, "Close", vec2(22.0, 22.0))
+                        .clicked()
+                    {
+                        close = true;
+                    }
+                });
+            });
+            let Some(d) = app.session.active() else { return };
+            let l = layer::get(d);
+            let ready = l.questions.iter().filter(|q| q.status == QuestionStatus::Answered && !q.seen).count();
+            ui.horizontal_wrapped(|ui| {
+                for (tab, name) in [
+                    (Tab::Cell, "Cell".to_string()),
+                    (Tab::Questions, if ready > 0 { format!("Questions ({ready})") } else { "Questions".into() }),
+                    (Tab::Notes, "Notes".into()),
+                    (Tab::History, "History".into()),
+                    (Tab::Connect, "Connect".into()),
+                ] {
+                    if ui.selectable_label(st.tab == tab, name).clicked() {
+                        st.tab = tab;
+                    }
+                }
+            });
+            ui.separator();
+            egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| match st.tab {
+                Tab::Cell => cell_tab(st, app, ui, &l, &t, &p, &mut acts),
+                Tab::Questions => questions_tab(app, ui, &l, &t, &p, &mut acts),
+                Tab::Notes => notes_tab(st, app, ui, &l, &p, &mut acts),
+                Tab::History => history_tab(app, ui, &l, &t, &p, &mut acts),
+                Tab::Connect => connect_tab(ui, &t),
+            });
+        },
+    );
+    if close {
+        st.open = false;
+    }
+    let ctx = ui.ctx().clone();
+    for a in acts {
+        match a {
+            Act::Follow(href) => follow(st, app, &ctx, &href),
+            Act::Run(id, params) => app.run_or_alert(id, params),
+        }
+    }
+}
+
+fn place_of(app: &SheetApp, l: &Layer, anchor_id: &str) -> Option<Place> {
+    let d = app.session.active()?;
+    l.anchor(anchor_id).and_then(|a| anchor::resolve(&d.wb, a))
+}
+
+fn links(ui: &mut Ui, list: &[Link], acts: &mut Vec<Act>) {
+    if list.is_empty() {
+        return;
+    }
+    ui.horizontal_wrapped(|ui| {
+        for k in list {
+            let icon = if k.href.starts_with("cell:") {
+                "↳ "
+            } else if k.href.starts_with("note:") {
+                "¶ "
+            } else {
+                "↗ "
+            };
+            let mut r = ui.link(format!("{icon}{}", k.label));
+            if !k.summary.is_empty() {
+                r = r.on_hover_text(&k.summary);
+            } else {
+                r = r.on_hover_text(&k.href);
+            }
+            if r.clicked() {
+                acts.push(Act::Follow(k.href.clone()));
+            }
+        }
+    });
+}
+
+fn card(ui: &mut Ui, t: &Tokens, stripe: Color32, add: impl FnOnce(&mut Ui)) {
+    egui::Frame::NONE.fill(t.window).corner_radius(6.0).inner_margin(8.0).stroke(egui::Stroke::new(1.0, t.separator)).show(ui, |ui| {
+        ui.set_width(ui.available_width());
+        let top = ui.cursor().min;
+        add(ui);
+        let bottom = ui.min_rect().bottom();
+        ui.painter().line_segment([egui::pos2(top.x - 6.0, top.y), egui::pos2(top.x - 6.0, bottom)], egui::Stroke::new(2.5, stripe));
+    });
+    ui.add_space(6.0);
+}
+
+fn question_card(app: &SheetApp, ui: &mut Ui, l: &Layer, q: &Question, t: &Tokens, p: &Palette, acts: &mut Vec<Act>, show_place: bool) {
+    let (status, color) = match q.status {
+        QuestionStatus::Pending => ("Waiting for the agent", p.pending),
+        QuestionStatus::Working => ("The agent is working on it", p.working),
+        QuestionStatus::Answered if !q.seen => ("Answer ready", p.answered),
+        QuestionStatus::Answered => ("Answered", p.seen),
+    };
+    card(ui, t, color, |ui| {
+        ui.horizontal_wrapped(|ui| {
+            ui.label(RichText::new(status).color(color).small().strong());
+            if show_place
+                && let Some(pl) = place_of(app, l, &q.anchor)
+                && ui.link(RichText::new(pl.a1()).small()).clicked()
+            {
+                acts.push(Act::Follow(format!("cell:{}", pl.a1())));
+            }
+        });
+        ui.label(RichText::new(&q.text).italics());
+        if let Some(a) = &q.answer {
+            ui.add_space(3.0);
+            ui.label(&a.text);
+            links(ui, &a.links, acts);
+            if !q.seen && ui.small_button("Got it").clicked() {
+                acts.push(Act::Run("agent.seen", json!({"id": q.id})));
+            }
+        }
+    });
+}
+
+fn note_card(app: &SheetApp, ui: &mut Ui, l: &Layer, n: &Note, t: &Tokens, p: &Palette, acts: &mut Vec<Act>, show_place: bool, highlight: bool) {
+    let stripe = if highlight { p.answered } else { p.note };
+    card(ui, t, stripe, |ui| {
+        ui.horizontal_wrapped(|ui| {
+            let title = if n.title.is_empty() { kind_label(&n.kind).to_string() } else { format!("{} · {}", kind_label(&n.kind), n.title) };
+            ui.label(RichText::new(title).color(p.note).small().strong());
+            if show_place
+                && let Some(pl) = place_of(app, l, &n.anchor)
+                && ui.link(RichText::new(pl.a1()).small()).clicked()
+            {
+                acts.push(Act::Follow(format!("cell:{}", pl.a1())));
+            }
+        });
+        ui.label(&n.text);
+        links(ui, &n.links, acts);
+    });
+}
+
+fn cell_tab(st: &mut AgentUi, app: &SheetApp, ui: &mut Ui, l: &Layer, t: &Tokens, p: &Palette, acts: &mut Vec<Act>) {
+    let Some(d) = app.session.active() else { return };
+    let si = d.wb.active_sheet;
+    let Some(sh) = d.wb.sheet(si) else { return };
+    let sel = d.selection.current();
+    let c = d.selection.active;
+    let here = Place { sheet: si, sheet_name: sh.name.clone(), range: sel };
+    let label = analysis::label_of(sh, c);
+    let text = gridcraft_engine::display::cell_text(&d.wb, sh, c);
+    ui.horizontal_wrapped(|ui| {
+        ui.label(RichText::new(here.a1()).strong());
+        if !label.is_empty() {
+            ui.label(RichText::new(&label).color(t.text_dim));
+        }
+        if !text.is_empty() {
+            ui.label(RichText::new(format!("= {text}")).color(t.text));
+        }
+    });
+    if let Some(f) = sh.cell(c).and_then(|x| x.formula.as_ref()) {
+        ui.label(RichText::new(format!("={}", f.text.trim_start_matches('='))).monospace().small().color(t.text_dim));
+    }
+    let private_cells = analysis::private_cells(&d.wb, l);
+    let is_private = private_cells.contains(&(si, c));
+    if is_private {
+        ui.label(RichText::new("Client data · your agent sees stand-in values here").color(p.private).small());
+    }
+    ui.add_space(6.0);
+
+    // Ask.
+    ui.label(RichText::new("Ask the agent about this").small().strong());
+    let r = ui.add(
+        egui::TextEdit::multiline(&mut st.draft).hint_text("Why is this growing faster than revenue?").desired_rows(2).desired_width(f32::INFINITY),
+    );
+    if st.focus_draft {
+        r.request_focus();
+        st.focus_draft = false;
+    }
+    let send_key = r.has_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter) && i.modifiers.command);
+    ui.horizontal(|ui| {
+        let can = !st.draft.trim().is_empty();
+        if (ui.add_enabled(can, egui::Button::new("Ask")).clicked() || send_key) && can {
+            acts.push(Act::Run("agent.ask", json!({"range": here.a1(), "text": st.draft.trim()})));
+            st.draft.clear();
+        }
+        ui.label(RichText::new("⌘↩ · keep working, the badge tells you when it's answered").small().color(t.text_dim));
+    });
+    ui.add_space(6.0);
+
+    let hits = |id: &str| l.anchor(id).and_then(|a| anchor::resolve(&d.wb, a)).is_some_and(|pl| pl.sheet == si && pl.range.intersects(&sel));
+    let qs: Vec<&Question> = l.questions.iter().filter(|q| hits(&q.anchor)).collect();
+    for q in &qs {
+        question_card(app, ui, l, q, t, p, acts, false);
+        // Reading it here is reading it.
+        if q.status == QuestionStatus::Answered && !q.seen {
+            acts.push(Act::Run("agent.seen", json!({"id": q.id})));
+        }
+    }
+    for n in l.notes.iter().filter(|n| hits(&n.anchor)) {
+        note_card(app, ui, l, n, t, p, acts, false, false);
+    }
+    if let Some(i) = l.inputs.iter().find(|i| hits(&i.anchor)) {
+        let range = if i.relative {
+            format!("{:+.0}% … {:+.0}%", (i.low - 1.0) * 100.0, (i.high - 1.0) * 100.0)
+        } else {
+            format!("{} … {}", fmt_num(i.low), fmt_num(i.high))
+        };
+        card(ui, t, p.input, |ui| {
+            ui.label(RichText::new(format!("Input · plausible range {range}")).color(p.input).small().strong());
+            if !i.rationale.is_empty() {
+                ui.label(&i.rationale);
+            }
+        });
+    }
+    if let Some(conf) = l.confidence.iter().find(|x| hits(&x.anchor)) {
+        card(ui, t, overlay::heat_color(conf.level, 255), |ui| {
+            ui.label(RichText::new(format!("Agent's confidence {:.0}%", conf.level * 100.0)).small().strong());
+            if !conf.reason.is_empty() {
+                ui.label(&conf.reason);
+            }
+        });
+    }
+
+    // Where does this number come from.
+    let is_formula = sh.cell(c).is_some_and(|x| x.formula.is_some());
+    if is_formula {
+        let ver = overlay::version(d, l);
+        let fresh = st.pane.trace.as_ref().is_some_and(|(v, s, k, _)| *v == ver && *s == si && *k == c);
+        if !fresh {
+            let derived = analysis::derived_from(&d.calc, &private_cells);
+            let tree = analysis::trace(&d.wb, &d.calc, (si, c), 8, &private_cells, &derived);
+            st.pane.trace = Some((ver, si, c, tree));
+        }
+        let open = std::mem::take(&mut st.pane.trace_open);
+        let h = egui::CollapsingHeader::new(RichText::new("Where does this number come from?").strong()).id_salt("agent_trace");
+        let h = if open { h.open(Some(true)) } else { h };
+        h.show(ui, |ui| {
+            if let Some((_, _, _, tree)) = &st.pane.trace {
+                trace_node(ui, tree, t, p, acts, 0);
+            }
+        });
+        // Sensitivity.
+        let s = st.overlay.sensitivity(d, l, si, c);
+        if !s.swings.is_empty() {
+            egui::CollapsingHeader::new(RichText::new("Sensitivity").strong()).id_salt("agent_sens").default_open(true).show(ui, |ui| {
+                overlay::tornado(ui, &s, t, ui.available_width().min(420.0), 8);
+                for w in s.swings.iter().take(8) {
+                    let place = Place {
+                        sheet: w.input.0,
+                        sheet_name: d.wb.sheet(w.input.0).map(|x| x.name.clone()).unwrap_or_default(),
+                        range: RangeRef::cell(w.input.1),
+                    };
+                    ui.horizontal_wrapped(|ui| {
+                        if ui.link(RichText::new(if w.label.is_empty() { place.a1() } else { w.label.clone() }).small()).clicked() {
+                            acts.push(Act::Follow(format!("cell:{}", place.a1())));
+                        }
+                        ui.label(
+                            RichText::new(format!(
+                                "{} … {} → {} … {}",
+                                fmt_num(w.low_input),
+                                fmt_num(w.high_input),
+                                fmt_num(w.at_low),
+                                fmt_num(w.at_high)
+                            ))
+                            .small()
+                            .color(t.text_dim),
+                        );
+                        if !w.reasoned {
+                            ui.label(RichText::new("default ±10%").small().italics().color(t.text_dim));
+                        }
+                    });
+                    if !w.rationale.is_empty() {
+                        ui.label(RichText::new(clip(&w.rationale, 160)).small());
+                    }
+                }
+            });
+        }
+    }
+    ui.add_space(8.0);
+    ui.separator();
+    ui.horizontal_wrapped(|ui| {
+        if ui.button(if is_private { "Unmark client data" } else { "Mark selection as client data" }).clicked() {
+            acts.push(Act::Run("agent.private", json!({"range": here.a1(), "on": !is_private})));
+        }
+    });
+    ui.horizontal_wrapped(|ui| {
+        ui.label(RichText::new("Heat map").small());
+        for (h, name) in [(Heat::Off, "Off"), (Heat::Confidence, "Confidence"), (Heat::Impact, "Impact on this cell")] {
+            if ui.selectable_label(st.heat == h, name).clicked() {
+                st.heat = h;
+            }
+        }
+    });
+}
+
+fn trace_node(ui: &mut Ui, n: &Json, t: &Tokens, p: &Palette, acts: &mut Vec<Act>, depth: usize) {
+    let cell = n.get("cell").and_then(Json::as_str).or_else(|| n.get("range").and_then(Json::as_str)).unwrap_or("");
+    let label = n.get("label").and_then(Json::as_str).unwrap_or("");
+    let text = n.get("text").and_then(Json::as_str).unwrap_or("");
+    let formula = n.get("formula").and_then(Json::as_str);
+    let private = n.get("private").and_then(Json::as_bool).unwrap_or(false);
+    let kind = n.get("kind").and_then(Json::as_str).unwrap_or("");
+    let children: Vec<Json> = n.get("reads").or_else(|| n.get("cells")).and_then(Json::as_array).cloned().unwrap_or_default();
+    let head = |ui: &mut Ui, acts: &mut Vec<Act>| {
+        ui.horizontal_wrapped(|ui| {
+            if ui.link(RichText::new(short_cell(cell)).small().strong()).clicked() {
+                acts.push(Act::Follow(format!("cell:{cell}")));
+            }
+            if !label.is_empty() {
+                ui.label(RichText::new(clip(label, 40)).small());
+            }
+            if !text.is_empty() {
+                ui.label(RichText::new(text).small().color(t.text));
+            }
+            if kind == "input" {
+                ui.label(RichText::new("input").small().color(p.input));
+            }
+            if private {
+                ui.label(RichText::new("client data").small().color(p.private));
+            }
+            if let Some(filled) = n.get("filled").and_then(Json::as_u64) {
+                ui.label(RichText::new(format!("{filled} cells")).small().color(t.text_dim));
+            }
+        });
+        if let Some(f) = formula {
+            ui.label(RichText::new(f).monospace().small().color(t.text_dim));
+        }
+    };
+    if children.is_empty() {
+        ui.indent(("leaf", cell, depth), |ui| head(ui, acts));
+        return;
+    }
+    let id = ui.make_persistent_id(("trace", cell, depth));
+    egui::collapsing_header::CollapsingState::load_with_default_open(ui.ctx(), id, depth < 2)
+        .show_header(ui, |ui| {
+            ui.vertical(|ui| head(ui, acts));
+        })
+        .body(|ui| {
+            for c in &children {
+                trace_node(ui, c, t, p, acts, depth + 1);
+            }
+        });
+}
+
+fn short_cell(a1: &str) -> String {
+    a1.to_string()
+}
+
+fn questions_tab(app: &SheetApp, ui: &mut Ui, l: &Layer, t: &Tokens, p: &Palette, acts: &mut Vec<Act>) {
+    if l.questions.is_empty() {
+        ui.label(RichText::new("No questions yet. Right-click a cell and choose Ask the Agent, or use the Cell tab.").italics());
+        return;
+    }
+    let order = |q: &Question| match (q.status, q.seen) {
+        (QuestionStatus::Answered, false) => 0,
+        (QuestionStatus::Working, _) => 1,
+        (QuestionStatus::Pending, _) => 2,
+        _ => 3,
+    };
+    let mut list: Vec<&Question> = l.questions.iter().collect();
+    list.sort_by_key(|q| (order(q), std::cmp::Reverse(q.asked_at)));
+    for q in list {
+        question_card(app, ui, l, q, t, p, acts, true);
+    }
+}
+
+fn notes_tab(st: &mut AgentUi, app: &SheetApp, ui: &mut Ui, l: &Layer, p: &Palette, acts: &mut Vec<Act>) {
+    let t = Tokens::get(ui.ctx());
+    if l.notes.is_empty() {
+        ui.label(RichText::new("The agent hasn't left notes in this workbook yet.").italics());
+        return;
+    }
+    let target = st.highlight_note.take();
+    for kind in ["explanation", "assumption", "source", "faq"] {
+        let list: Vec<&Note> = l.notes.iter().filter(|n| n.kind == kind).collect();
+        if list.is_empty() {
+            continue;
+        }
+        ui.label(
+            RichText::new(match kind {
+                "faq" => "Prepared answers",
+                "assumption" => "Assumptions",
+                "source" => "Sources",
+                _ => "Explanations",
+            })
+            .strong(),
+        );
+        for n in list {
+            let hl = target.as_deref() == Some(n.id.as_str());
+            note_card(app, ui, l, n, &t, p, acts, true, hl);
+            if hl {
+                ui.scroll_to_cursor(Some(egui::Align::Center));
+            }
+        }
+    }
+}
+
+fn history_tab(app: &SheetApp, ui: &mut Ui, l: &Layer, t: &Tokens, p: &Palette, acts: &mut Vec<Act>) {
+    if l.log.is_empty() {
+        ui.label(RichText::new("No history yet: decisions and changes by you and the agent are recorded here.").italics());
+        return;
+    }
+    for e in l.log.iter().rev().take(300) {
+        let (who, color) = match e.actor {
+            Actor::Agent => ("Agent", p.agent),
+            Actor::Human => ("You", p.person),
+        };
+        ui.horizontal_wrapped(|ui| {
+            ui.label(RichText::new(who).small().strong().color(color));
+            ui.label(RichText::new(if e.kind == "decision" { "decided" } else { "changed" }).small().color(t.text_dim));
+            if let Some(a) = &e.anchor
+                && let Some(pl) = place_of(app, l, a)
+                && ui.link(RichText::new(pl.a1()).small()).clicked()
+            {
+                acts.push(Act::Follow(format!("cell:{}", pl.a1())));
+            }
+        });
+        ui.label(&e.text);
+        if !e.source.is_empty() {
+            if e.source.starts_with("http") {
+                if ui.link(RichText::new(format!("based on {}", e.source)).small()).clicked() {
+                    acts.push(Act::Follow(e.source.clone()));
+                }
+            } else {
+                ui.label(RichText::new(format!("based on {}", e.source)).small().color(t.text_dim));
+            }
+        }
+        ui.add_space(4.0);
+    }
+}
+
+fn connect_tab(ui: &mut Ui, t: &Tokens) {
+    let Some(url) = crate::server_url() else {
+        ui.label("The agent server isn't running. Start GridCraft with --agent-port <port>.");
+        return;
+    };
+    let base = url.trim_end_matches("/mcp");
+    ui.label("Your own agent works on this workbook through MCP. Questions you ask wait in the workbook until it answers.");
+    ui.add_space(6.0);
+    let row = |ui: &mut Ui, title: &str, value: String| {
+        ui.label(RichText::new(title).small().strong());
+        ui.horizontal(|ui| {
+            ui.add(egui::TextEdit::singleline(&mut value.clone()).desired_width(ui.available_width() - 60.0).font(egui::TextStyle::Monospace));
+            if ui.small_button("Copy").clicked() {
+                ui.ctx().copy_text(value.clone());
+            }
+        });
+    };
+    row(ui, "MCP server", url.to_string());
+    row(ui, "Claude Code", format!("claude mcp add --transport http gridcraft {url}"));
+    row(ui, "Background monitor (new questions, one line each)", format!("curl -sN {base}/events"));
+    ui.add_space(6.0);
+    ui.label(
+        RichText::new("Client data you mark stays here: the agent sees stand-in values, with the model recalculated from them.")
+            .small()
+            .color(t.text_dim),
+    );
+}

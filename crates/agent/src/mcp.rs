@@ -1,0 +1,249 @@
+//! The agent's MCP surface: JSON-RPC 2.0 (MCP `2025-06-18`) whose tools map onto `agent.*`
+//! commands of the running app. Every read is masked (private cells show stand-ins); there is no
+//! tool that returns real client values.
+
+use gridcraft_mcp::Backend;
+use serde_json::{Value, json};
+
+pub const PROTOCOL_VERSION: &str = "2025-06-18";
+const SUPPORTED: &[&str] = &[PROTOCOL_VERSION, "2025-03-26", "2024-11-05"];
+
+const INSTRUCTIONS: &str = "You are connected to the GridCraft spreadsheet the user has open, through its agent layer. \
+The user reviews and signs off on this workbook; your job is to make that fast. They ask questions on cells: watch for them \
+(GET http://127.0.0.1:<port>/events streams one line per new question, or call wait_for_questions), claim_question, \
+investigate with get_context / read_range / trace_number / sensitivity, then answer_question with links to the cells and \
+sources you used (href \"cell:Sheet1!B5\", \"note:n3\" or https URLs). Leave prepared explanations with add_note, \
+mark inputs with reasoned ranges (set_input_range), say how sure you are (set_confidence) and log decisions (log_decision). \
+Change the workbook only with run_command, giving a reason and a source. PRIVACY: ranges listed in get_context.privateRanges \
+hold client data; you see stand-in values with the same sign and magnitude, and everything computed from them is computed \
+from the stand-ins. Never present those numbers as real; reason about the model's mechanics instead. You cannot write to \
+private cells.";
+
+fn tool(name: &str, desc: &str, props: Value, required: &[&str], read_only: bool) -> Value {
+    json!({
+        "name": name,
+        "description": desc,
+        "inputSchema": {"type": "object", "properties": props, "required": required, "additionalProperties": false},
+        "annotations": {"readOnlyHint": read_only, "destructiveHint": false, "openWorldHint": false},
+    })
+}
+
+fn s(desc: &str) -> Value {
+    json!({"type": "string", "description": desc})
+}
+fn n(desc: &str) -> Value {
+    json!({"type": "number", "description": desc})
+}
+fn links() -> Value {
+    json!({"type": "array", "description": "Links: {label, href, summary?}. href is https://…, cell:Sheet1!B5 or note:<id>", "items": {
+        "type": "object", "properties": {"label": {"type": "string"}, "href": {"type": "string"}, "summary": {"type": "string"}}, "required": ["label", "href"]}})
+}
+
+pub fn tools() -> Vec<Value> {
+    vec![
+        tool(
+            "get_context",
+            "Overview of the open workbook: sheets, used ranges, formula counts, private (client-data) ranges, marked inputs, open questions, recent decisions.",
+            json!({}),
+            &[],
+            true,
+        ),
+        tool(
+            "read_range",
+            "Read cells (values, displayed text, formulas). Private cells and everything computed from them show stand-in values (flagged private / derivedFromPrivate).",
+            json!({"range": s("A1 range, e.g. \"B2:F20\" or \"Model!A1:D9\"")}),
+            &["range"],
+            true,
+        ),
+        tool(
+            "trace_number",
+            "Where does this number come from: the calculation tree of a cell down to its inputs, with labels taken from the sheet. Deterministic: explain it, don't recompute it.",
+            json!({"cell": s("Cell, e.g. \"Summary!C12\""), "depth": n("Levels to follow (1-12, default 6)")}),
+            &["cell"],
+            true,
+        ),
+        tool(
+            "sensitivity",
+            "How an output moves with its inputs: the output at the low and high end of each input's range (the ranges set with set_input_range, else ±10% defaults flagged reasoned=false).",
+            json!({"cell": s("Output cell"), "limit": n("Most inputs (default 8)")}),
+            &["cell"],
+            true,
+        ),
+        tool(
+            "list_questions",
+            "Questions the user asked on cells. status: pending (new), working (claimed), answered, open (pending+working) or all.",
+            json!({"status": {"type": "string", "enum": ["pending", "working", "answered", "open", "all"]}}),
+            &[],
+            true,
+        ),
+        tool(
+            "wait_for_questions",
+            "Block until there is a pending question (or the timeout passes) and return the pending ones. An alternative to watching /events.",
+            json!({"timeout_seconds": n("Up to 50 (default 25)")}),
+            &[],
+            true,
+        ),
+        tool(
+            "claim_question",
+            "Take a pending question so the user sees it is being worked on.",
+            json!({"id": s("Question id, e.g. \"q3\"")}),
+            &["id"],
+            false,
+        ),
+        tool(
+            "answer_question",
+            "Answer a question; the cell shows \"answer ready\". Link to the cells and sources you used.",
+            json!({"id": s("Question id"), "text": s("The answer (plain text, short paragraphs)"), "links": links()}),
+            &["id", "text"],
+            false,
+        ),
+        tool(
+            "add_note",
+            "Leave a note on a range: why it is done this way (explanation), a prepared answer to a likely question (faq), an assumption, or a source with a summary.",
+            json!({"range": s("Range"), "text": s("Note text"), "title": s("Short title"), "kind": {"type": "string", "enum": ["explanation", "faq", "assumption", "source"]}, "links": links()}),
+            &["range", "text"],
+            false,
+        ),
+        tool(
+            "set_input_range",
+            "Mark a model input with the range it can plausibly take and why (from the nature of the parameter, not a flat ±10%). Use relative=true (multipliers, 0.8 = -20%) for private inputs.",
+            json!({"cell": s("Input cell"), "low": n("Low end"), "high": n("High end"), "relative": {"type": "boolean"}, "rationale": s("Why this range")}),
+            &["cell", "low", "high"],
+            false,
+        ),
+        tool(
+            "set_confidence",
+            "How sure you are about a range: 0 = guess, 1 = checked against a primary source. Shown as a heat map.",
+            json!({"range": s("Range"), "level": n("0..1"), "reason": s("Why")}),
+            &["range", "level"],
+            false,
+        ),
+        tool(
+            "log_decision",
+            "Record a decision in the document's history (why the model is the way it is).",
+            json!({"text": s("The decision and its reason"), "range": s("Where it applies (optional)"), "source": s("What it is based on")}),
+            &["text"],
+            false,
+        ),
+        tool("get_layer", "The whole agent layer: anchors, questions, notes, inputs, private ranges, confidence, history.", json!({}), &[], true),
+        tool(
+            "run_command",
+            "Change the workbook with any GridCraft command (cell.set, home.bold, …; see list_commands). Logged as yours with the reason and source. Reading commands are refused: use read_range.",
+            json!({"command": s("Command id"), "params": {"type": "object"}, "reason": s("Why"), "source": s("What it is based on")}),
+            &["command", "reason"],
+            false,
+        ),
+        tool(
+            "list_commands",
+            "List GridCraft commands that change the workbook (id, label, params).",
+            json!({"search": s("Substring to filter on")}),
+            &[],
+            true,
+        ),
+    ]
+}
+
+fn exec(b: &mut dyn Backend, command: &str, mut params: Value) -> Result<Value, String> {
+    if let Value::Object(o) = &mut params {
+        o.insert("actor".into(), json!("agent"));
+        o.insert("masked".into(), json!(true));
+    }
+    b.call("engine.execute", json!({"command": command, "params": params}))
+}
+
+fn pick(args: &Value, keys: &[&str]) -> Value {
+    let mut o = serde_json::Map::new();
+    for k in keys {
+        if let Some(v) = args.get(*k) {
+            o.insert((*k).to_string(), v.clone());
+        }
+    }
+    Value::Object(o)
+}
+
+pub fn call(b: &mut dyn Backend, name: &str, args: &Value) -> Result<Value, String> {
+    match name {
+        "get_context" => exec(b, "agent.context", json!({})),
+        "read_range" => exec(b, "agent.read", pick(args, &["range"])),
+        "trace_number" => exec(b, "agent.trace", pick(args, &["cell", "depth"])),
+        "sensitivity" => exec(b, "agent.sensitivity", pick(args, &["cell", "limit"])),
+        "list_questions" => exec(b, "agent.questions", pick(args, &["status"])),
+        "wait_for_questions" => {
+            let secs = args.get("timeout_seconds").and_then(Value::as_f64).unwrap_or(25.0).clamp(0.0, 50.0);
+            let mut polls = (secs * 2.0) as u32;
+            loop {
+                let v = exec(b, "agent.questions", json!({"status": "pending"}))?;
+                if v.as_array().is_some_and(|a| !a.is_empty()) || polls == 0 {
+                    return Ok(v);
+                }
+                polls -= 1;
+                std::thread::sleep(std::time::Duration::from_millis(500));
+            }
+        }
+        "claim_question" => exec(b, "agent.claim", pick(args, &["id"])),
+        "answer_question" => exec(b, "agent.answer", pick(args, &["id", "text", "links"])),
+        "add_note" => exec(b, "agent.note", pick(args, &["range", "text", "title", "kind", "links"])),
+        "set_input_range" => exec(b, "agent.input", pick(args, &["cell", "low", "high", "relative", "rationale"])),
+        "set_confidence" => exec(b, "agent.confidence", pick(args, &["range", "level", "reason"])),
+        "log_decision" => exec(b, "agent.decision", pick(args, &["text", "range", "source"])),
+        "get_layer" => exec(b, "agent.layer", json!({})),
+        "run_command" => exec(b, "agent.exec", pick(args, &["command", "params", "reason", "source"])),
+        "list_commands" => {
+            let all = b.call("engine.commands", json!({}))?;
+            let q = args.get("search").and_then(Value::as_str).unwrap_or("").to_lowercase();
+            let list: Vec<Value> = all
+                .as_array()
+                .map(|a| {
+                    a.iter()
+                        .filter(|c| {
+                            let id = c.get("id").and_then(Value::as_str).unwrap_or("");
+                            let label = c.get("label").and_then(Value::as_str).unwrap_or("");
+                            !id.starts_with("agent.")
+                                && !id.starts_with("ui.")
+                                && (q.is_empty() || id.to_lowercase().contains(&q) || label.to_lowercase().contains(&q))
+                        })
+                        .map(|c| pick(c, &["id", "label", "params"]))
+                        .collect()
+                })
+                .unwrap_or_default();
+            Ok(Value::Array(list))
+        }
+        other => Err(format!("unknown tool `{other}`")),
+    }
+}
+
+/// Handles one JSON-RPC message; `None` for notifications.
+pub fn handle(b: &mut dyn Backend, msg: &Value) -> Option<Value> {
+    let id = msg.get("id").cloned();
+    let method = msg.get("method").and_then(Value::as_str).unwrap_or("");
+    let params = msg.get("params").cloned().unwrap_or(Value::Null);
+    let id = id?;
+    let ok = |r: Value| json!({"jsonrpc": "2.0", "id": id, "result": r});
+    let err = |code: i64, m: String| json!({"jsonrpc": "2.0", "id": id, "error": {"code": code, "message": m}});
+    Some(match method {
+        "initialize" => {
+            let asked = params.get("protocolVersion").and_then(Value::as_str).unwrap_or(PROTOCOL_VERSION);
+            let version = if SUPPORTED.contains(&asked) { asked } else { PROTOCOL_VERSION };
+            ok(json!({
+                "protocolVersion": version,
+                "capabilities": {"tools": {"listChanged": false}},
+                "serverInfo": {"name": "gridcraft-agent", "title": "GridCraft agent layer", "version": env!("CARGO_PKG_VERSION")},
+                "instructions": INSTRUCTIONS,
+            }))
+        }
+        "ping" => ok(json!({})),
+        "tools/list" => ok(json!({"tools": tools()})),
+        "tools/call" => {
+            let name = params.get("name").and_then(Value::as_str).unwrap_or("");
+            let args = params.get("arguments").cloned().filter(Value::is_object).unwrap_or_else(|| json!({}));
+            match call(b, name, &args) {
+                Ok(v) => ok(json!({"content": [{"type": "text", "text": serde_json::to_string_pretty(&v).unwrap_or_default()}], "isError": false})),
+                Err(e) => ok(json!({"content": [{"type": "text", "text": e}], "isError": true})),
+            }
+        }
+        "resources/list" => ok(json!({"resources": []})),
+        "prompts/list" => ok(json!({"prompts": []})),
+        "logging/setLevel" => ok(json!({})),
+        other => err(-32601, format!("method not found: {other}")),
+    })
+}
