@@ -46,6 +46,7 @@ pub(crate) use spec;
 /// Every command of the layer, by module.
 pub static ALL: &[&[CommandSpec]] = &[
     SPECS,
+    crate::docs::SPECS,
     crate::variants::SPECS,
     crate::stress::SPECS,
     crate::safe::SPECS,
@@ -164,6 +165,7 @@ fn ask(s: &mut Session, p: &Json) -> Result<Json> {
             answer: None,
             seen: false,
             kind: String::new(),
+            answered_by: String::new(),
         });
         id
     });
@@ -187,6 +189,7 @@ fn ping(s: &mut Session, _p: &Json) -> Result<Json> {
             answer: None,
             seen: true,
             kind: layer::PING.into(),
+            answered_by: String::new(),
         });
         id
     });
@@ -244,6 +247,10 @@ fn remove_note(s: &mut Session, p: &Json) -> Result<Json> {
 fn question_json(s: &Session, l: &Layer, q: &Question, wb: &Workbook) -> Json {
     let mut o = serde_json::to_value(q).unwrap_or(Json::Null);
     o["range"] = where_json(s, l, &q.anchor);
+    if let Ok(d) = s.doc() {
+        o["document"] = json!(crate::docs::doc_id(d.uid));
+        o["documentTitle"] = json!(d.display_title());
+    }
     if let Some(place) = l.anchor(&q.anchor).and_then(|a| anchor::resolve(wb, a))
         && let Some(sh) = wb.sheet(place.sheet)
     {
@@ -265,6 +272,7 @@ pub fn last_wait_ms() -> u64 {
 }
 
 fn questions(s: &mut Session, p: &Json) -> Result<Json> {
+    crate::docs::touch_from(s, p);
     if p.get("wait").and_then(Json::as_bool) == Some(true) && actor_p(p, Actor::Human) == Actor::Agent {
         LAST_WAIT.store(crate::now_ms(), std::sync::atomic::Ordering::Relaxed);
     }
@@ -295,6 +303,7 @@ fn status_matches(q: &Question, want: &str) -> bool {
 }
 
 fn claim(s: &mut Session, p: &Json) -> Result<Json> {
+    crate::docs::touch_from(s, p);
     let id = text_p(p, "id", "agent.claim")?;
     let r = layer::update(s.doc()?, |l| match l.questions.iter_mut().find(|q| q.id == id) {
         Some(q) if q.status == QuestionStatus::Pending => {
@@ -308,6 +317,11 @@ fn claim(s: &mut Session, p: &Json) -> Result<Json> {
 }
 
 fn answer(s: &mut Session, p: &Json) -> Result<Json> {
+    crate::docs::touch_from(s, p);
+    let by = match (str_p(p, "listener"), s.doc()) {
+        (Some(l), Ok(d)) => crate::docs::label_of(d.uid, l).unwrap_or_default(),
+        _ => String::new(),
+    };
     let id = text_p(p, "id", "agent.answer")?;
     let text = text_p(p, "text", "agent.answer")?;
     let links = links_p(p);
@@ -318,8 +332,9 @@ fn answer(s: &mut Session, p: &Json) -> Result<Json> {
         let at = crate::now_ms();
         q.answer = Some(Answer { text, links, at });
         if q.is_ping() {
-            // A connection check: answered in so long, nothing for the history.
+            // A connection check: answered in so long (and by whom), nothing for the history.
             q.seen = true;
+            q.answered_by = by;
             return Some(Some(at.saturating_sub(q.asked_at)));
         }
         let (anchor, qtext) = (q.anchor.clone(), q.text.clone());

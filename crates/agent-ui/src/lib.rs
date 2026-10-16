@@ -236,6 +236,16 @@ impl UiExtension for AgentUi {
                 *g = None;
             }
         }
+        // AItoCraft: keep this app's registry entry current; it goes when the window closes.
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            if ctx.input(|i| i.viewport().close_requested()) {
+                gridcraft_agent::registry::remove();
+            } else {
+                gridcraft_agent::registry::tick(&app.session);
+                ctx.request_repaint_after(std::time::Duration::from_secs(5));
+            }
+        }
         // The background agent: start it on a new question, feed it the questions.
         #[cfg(not(target_arch = "wasm32"))]
         if gridcraft_agent::runner::mode() == gridcraft_agent::runner::Mode::Background {

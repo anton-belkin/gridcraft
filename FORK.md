@@ -161,6 +161,23 @@ upstream. Each one accepted upstream removes its lines from the patch.
   temp file + rename, nothing else touched, a non-JSON file refused). Claude Desktop keeps that file
   in memory and writes it back when it quits, so while it runs GridCraft waits in the background
   for it to quit (`ps -axo comm=`) and writes 1.5 s after.
+- **AItoCraft: one connection for every document of every Craft app** (contract:
+  `~/aitocraft/PROTOCOL.md`, v1). GridCraft announces itself in
+  `ArtCraft/agents/gridcraft-<pid>.json` (`registry.rs`: written atomically on changes, at most once
+  a second, a 10 s heartbeat, removed when the window closes; stale entries of crashed instances
+  swept; titles and paths only, no content). Documents have ids `gridcraft:<pid>:<doc uid>`. Every
+  MCP tool takes `document`: `agent.onDocument` runs the command with that document active for the
+  length of the command and puts the active one back (control-channel commands run between frames,
+  so the switch is never drawn; no engine hook needed). `list_documents`, `attach {label}` →
+  listener, `detach`; question tools take `listener` (refreshed on every call, dropped after 90 s);
+  questions carry `document` and `documentTitle`; `/events?document=` (and `&listener=`) streams
+  one document. The Connection group shows the active document's listener ("Listening: Cowork ·
+  Acme · 20 s ago"), the check's result with who answered, or "Nobody is listening for this
+  document". Modes: Claude Desktop / Cowork (AItoCraft), My Claude Code session (AItoCraft
+  channel), Background agent, Off; the hub's items (phrase for Claude, Install AItoCraft in Claude
+  Desktop, Claude Code: add AItoCraft), the per-app `--agent-stdio` kept under Details. The
+  background agent runs in the neutral `ArtCraft/agent-sessions/` unless "use the document's folder
+  as its project" is on.
 - **Analysis is deterministic.** The trace and the sensitivity are computed by the engine (the
   dependency graph, recalculation of a scratch copy). The agent explains them; it doesn't make them up.
 - **Several inputs at once, bounded.** The worst and best combination moves 3–12 inputs inside

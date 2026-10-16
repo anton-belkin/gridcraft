@@ -23,11 +23,16 @@ pub mod channel;
 pub mod commands;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod cowork;
+pub mod docs;
 pub mod export;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod hub;
 pub mod layer;
 pub mod links;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod mcp;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod registry;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod runner;
 pub mod safe;

@@ -91,6 +91,9 @@ pub struct Question {
     /// never saved).
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub kind: String,
+    /// Who answered (a listener's label), for a connection check.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub answered_by: String,
 }
 
 /// The kind of a connection check ("is anyone there?").
@@ -342,6 +345,11 @@ impl Layer {
             Some(a) => Ping::Answered { asked_at: q.asked_at, answered_at: a.at },
             None => Ping::Waiting { asked_at: q.asked_at },
         })
+    }
+
+    /// Who answered the last connection check (a listener's label), if anyone said.
+    pub fn ping_answered_by(&self) -> Option<String> {
+        self.questions.iter().rev().find(|q| q.is_ping()).map(|q| q.answered_by.clone()).filter(|b| !b.is_empty())
     }
 
     pub fn is_empty(&self) -> bool {

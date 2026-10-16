@@ -708,6 +708,8 @@ fn background_agent_gets_questions_and_resumes_its_session() {
     .unwrap();
     std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
     runner::set_config(Config { command: script.display().to_string(), data_dir: Some(dir.join("data")), ..Config::default() });
+    // The neutral folder lives beside the registry's.
+    crate::registry::set_folder(Some(dir.join("ArtCraft/agents")));
     runner::set_mode(Mode::Background);
     let read = |f: &str| std::fs::read_to_string(rec.join(f)).unwrap_or_default();
     // A question starts the agent in the workbook's folder and is sent to it once.
@@ -745,7 +747,10 @@ fn background_agent_gets_questions_and_resumes_its_session() {
     let mcp: Value = serde_json::from_str(&std::fs::read_to_string(at("--mcp-config")).unwrap()).unwrap();
     assert_eq!(mcp["mcpServers"].as_object().unwrap().len(), 1);
     assert_eq!(mcp["mcpServers"]["gridcraft"]["type"], json!("http"));
-    assert_eq!(read("cwd.txt").trim(), std::fs::canonicalize(&dir).unwrap().display().to_string());
+    // A neutral folder by default: no project's CLAUDE.md or memory joins its context.
+    assert_eq!(read("cwd.txt").trim(), std::fs::canonicalize(dir.join("ArtCraft/agent-sessions")).unwrap().display().to_string());
+    // The question tells it which document it's from.
+    assert!(text.contains(&crate::docs::doc_id(s.active().unwrap().uid)), "{text}");
     // Both messages were answered; the same question isn't sent twice.
     assert!(wait_for(|| runner::status(s.active().unwrap().uid).is_some_and(|x| x.turns == 2 && x.in_flight == 0)));
     runner::tick(&mut s);
@@ -756,9 +761,13 @@ fn background_agent_gets_questions_and_resumes_its_session() {
     assert_eq!(st["running"], json!(false));
     assert!(s.execute("agent.agentMode", json!({"mode": "off", "actor": "agent"})).is_err());
     std::fs::remove_file(rec.join("args.txt")).unwrap();
+    // The document's folder as its project, when asked.
+    s.execute("agent.agentMode", json!({"projectFolder": true})).unwrap();
     s.execute("agent.agentStart", json!({})).unwrap();
     assert!(wait_for(|| read("args.txt").contains("--resume")));
     assert!(read("args.txt").lines().any(|l| l == session));
+    assert!(wait_for(|| read("cwd.txt").trim() == std::fs::canonicalize(&dir).unwrap().display().to_string()));
+    s.execute("agent.agentMode", json!({"projectFolder": false})).unwrap();
     // A new session starts from the document's history.
     std::fs::remove_file(rec.join("stdin.txt")).unwrap();
     s.execute("agent.agentReset", json!({})).unwrap();
@@ -932,6 +941,13 @@ fn presence_says_who_listens() {
     let channel = Signals { channel_streams: 1, ..Default::default() };
     assert_eq!(classify(None, &channel, Mode::Manual, now), Presence::Nobody);
     assert_eq!(classify(None, &channel, Mode::Channel, now), Presence::Listener(vec!["Claude Code channel"]));
+    // An attached conversation names itself.
+    let att = Signals {
+        listeners: vec![("Cowork · Acme".into(), now - 20_000), ("Claude Code".into(), now - 50_000)],
+        event_streams: 1,
+        ..Default::default()
+    };
+    assert_eq!(classify(None, &att, Mode::Manual, now), Presence::Listening { label: "Cowork · Acme".into(), seen_ms: 20_000, more: 1 });
     let bg = Signals { background: true, ..Default::default() };
     assert_eq!(classify(None, &bg, Mode::Background, now), Presence::Listener(vec!["background agent"]));
 }
@@ -945,4 +961,159 @@ fn waiting_for_questions_is_a_signal_and_off_refuses_tools() {
     assert!(crate::mcp::gate(Some("connect")).is_ok());
     assert!(crate::mcp::gate(None).is_ok());
     assert!(crate::mcp::gate(Some("off")).unwrap_err().contains("off in GridCraft"));
+}
+
+/// Two workbooks open: the model (not active) and a blank one (active).
+fn two_documents() -> (Session, String, String) {
+    let mut s = model();
+    s.execute("agent.private", json!({"range": "B1"})).unwrap();
+    let first = crate::docs::doc_id(s.active().unwrap().uid);
+    s.new_workbook();
+    let second = crate::docs::doc_id(s.active().unwrap().uid);
+    (s, first, second)
+}
+
+#[test]
+fn commands_reach_a_document_that_isnt_active() {
+    let (mut s, first, second) = two_documents();
+    assert_ne!(first, second);
+    let active = s.active_index();
+    // Read the model while the blank workbook stays active.
+    let r = s.execute("agent.onDocument", json!({"document": first, "command": "agent.read", "params": {"range": "B6", "masked": false}})).unwrap();
+    assert_eq!(r["cells"][0]["value"], json!(600000.0));
+    assert_eq!(s.active_index(), active);
+    // A question asked there carries its document.
+    s.execute("agent.onDocument", json!({"document": first, "command": "agent.ask", "params": {"range": "B7", "text": "Why?"}})).unwrap();
+    let q = s.execute("agent.onDocument", json!({"document": first, "command": "agent.questions", "params": {"status": "pending"}})).unwrap();
+    assert_eq!(q[0]["document"], json!(first));
+    assert_eq!(q[0]["documentTitle"], json!("Book1"));
+    assert!(s.execute("agent.questions", json!({"status": "pending"})).unwrap().as_array().unwrap().is_empty());
+    // Unknown or closed: the protocol's error.
+    let e = s.execute("agent.onDocument", json!({"document": "gridcraft:1:999", "command": "agent.context"})).unwrap_err().to_string();
+    assert!(e.contains("is not open in GridCraft"), "{e}");
+    // list_documents: ids, titles, frontmost, open questions.
+    let docs = s.execute("agent.listDocuments", json!({})).unwrap();
+    let d1 = docs.as_array().unwrap().iter().find(|d| d["id"] == json!(first)).unwrap().clone();
+    assert_eq!(d1["openQuestions"], json!(1));
+    assert_eq!(d1["frontmost"], json!(false));
+    assert_eq!(d1["path"], Value::Null);
+}
+
+#[test]
+fn listeners_attach_stay_while_seen_and_answer_pings() {
+    let (mut s, first, _second) = two_documents();
+    let a = s.execute("agent.onDocument", json!({"document": first, "command": "agent.attach", "params": {"label": "Cowork · Acme"}})).unwrap();
+    let listener = a["listener"].as_str().unwrap().to_string();
+    assert_eq!(a["document"], json!(first));
+    assert_eq!(a["title"], json!("Book1"));
+    let uid = crate::docs::uid_of(&first).unwrap();
+    assert_eq!(crate::docs::listeners(uid)[0].label, "Cowork · Acme");
+    // Seen through a question call; dropped 90 s after the last one.
+    crate::docs::set_last_seen(uid, &listener, crate::now_ms() - 80_000);
+    s.execute("agent.onDocument", json!({"document": first, "command": "agent.questions", "params": {"listener": listener, "actor": "agent"}}))
+        .unwrap();
+    assert!(crate::now_ms() - crate::docs::listeners(uid)[0].last_seen < 5_000);
+    crate::docs::set_last_seen(uid, &listener, crate::now_ms() - 91_000);
+    assert!(crate::docs::listeners(uid).is_empty());
+    // A ping on that document, answered by a listener: who answered is recorded.
+    let a =
+        s.execute("agent.onDocument", json!({"document": first, "command": "agent.attach", "params": {"label": "Claude Code · gridcraft"}})).unwrap();
+    let listener = a["listener"].as_str().unwrap().to_string();
+    let i = crate::docs::index_of(&s, &first).unwrap();
+    s.set_active(i);
+    let ping = s.execute("agent.ping", json!({})).unwrap()["id"].as_str().unwrap().to_string();
+    s.execute("agent.answer", json!({"id": ping, "text": "here", "listener": listener, "actor": "agent"})).unwrap();
+    assert_eq!(layer::get(s.active().unwrap()).ping_answered_by().as_deref(), Some("Claude Code · gridcraft"));
+    s.execute("agent.detach", json!({"listener": listener})).unwrap();
+    assert!(crate::docs::listeners(uid).is_empty());
+    assert!(s.execute("agent.detach", json!({"listener": listener})).is_err());
+}
+
+#[test]
+fn mcp_routes_by_document_and_listener() {
+    struct Local(Session);
+    impl gridcraft_mcp::Backend for Local {
+        fn call(&mut self, method: &str, params: Value) -> Result<Value, String> {
+            match method {
+                "engine.execute" => self.0.run(params["command"].as_str().unwrap_or(""), params["params"].clone()),
+                _ => Err("unknown".into()),
+            }
+        }
+        fn has_ui(&self) -> bool {
+            false
+        }
+        fn describe(&self) -> String {
+            "test".into()
+        }
+    }
+    let (mut s, first, second) = two_documents();
+    s.execute("agent.onDocument", json!({"document": first, "command": "agent.ask", "params": {"range": "B7", "text": "In the model"}})).unwrap();
+    s.execute("agent.ask", json!({"range": "A1", "text": "In the blank one"})).unwrap();
+    let mut b = Local(s);
+    // Every tool takes `document`; the question tools take `listener`.
+    let tools = crate::mcp::tools();
+    assert!(tools.iter().all(|t| t["inputSchema"]["properties"]["document"].is_object()));
+    let wait = tools.iter().find(|t| t["name"] == json!("wait_for_questions")).unwrap();
+    assert!(wait["inputSchema"]["properties"]["listener"].is_object());
+    let att = crate::mcp::call(&mut b, "attach", &json!({"document": first, "label": "Cowork · Acme"})).unwrap();
+    let listener = att["listener"].as_str().unwrap().to_string();
+    let q = crate::mcp::call(&mut b, "wait_for_questions", &json!({"document": first, "listener": listener, "timeout_seconds": 0})).unwrap();
+    assert_eq!(q.as_array().unwrap().len(), 1);
+    assert_eq!(q[0]["text"], json!("In the model"));
+    assert_eq!(q[0]["document"], json!(first));
+    let q2 = crate::mcp::call(&mut b, "list_questions", &json!({"document": second})).unwrap();
+    assert_eq!(q2[0]["text"], json!("In the blank one"));
+    // Reads of the other document stay masked.
+    let r = crate::mcp::call(&mut b, "read_range", &json!({"document": first, "range": "B1"})).unwrap();
+    assert_ne!(r["cells"][0]["value"], json!("Acme Holding AG"));
+    assert!(crate::mcp::call(&mut b, "get_context", &json!({"document": "gridcraft:0:1"})).unwrap_err().contains("is not open"));
+    let docs = crate::mcp::call(&mut b, "list_documents", &json!({})).unwrap();
+    assert_eq!(docs.as_array().unwrap().len(), 2);
+}
+
+#[test]
+fn registry_entry_contents_staleness_and_removal() {
+    let (mut s, first, _second) = two_documents();
+    let dir = std::env::temp_dir().join(format!("gridcraft-registry-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    crate::registry::set_folder(Some(dir.clone()));
+    s.execute("agent.onDocument", json!({"document": first, "command": "agent.attach", "params": {"label": "Cowork · Acme"}})).unwrap();
+    let now = crate::now_ms();
+    let v = crate::registry::contents(&s, "http://127.0.0.1:7980/mcp", now);
+    assert_eq!(v["protocol"], json!("aitocraft/1"));
+    assert_eq!(v["app"], json!("gridcraft"));
+    assert_eq!(v["pid"], json!(std::process::id()));
+    assert_eq!(v["mcp"], json!("http://127.0.0.1:7980/mcp"));
+    let docs = v["documents"].as_array().unwrap();
+    assert_eq!(docs.len(), 2);
+    assert_eq!(docs.iter().filter(|d| d["frontmost"] == json!(true)).count(), 1);
+    let d1 = docs.iter().find(|d| d["id"] == json!(first)).unwrap();
+    assert_eq!(d1["listeners"][0]["label"], json!("Cowork · Acme"));
+    // No content, no client data.
+    let text = v.to_string();
+    assert!(!text.contains("Acme Holding") && !text.contains("600000"), "{text}");
+    // Written atomically (no temporary file left), then removed.
+    let path = crate::registry::write(&dir, &crate::registry::file_name(), &v).unwrap();
+    assert!(path.exists());
+    assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1);
+    // Staleness: an old heartbeat, or a pid that isn't running.
+    assert!(!crate::registry::is_stale(&v, now + 5_000, |_| true));
+    assert!(crate::registry::is_stale(&v, now + 31_000, |_| true));
+    assert!(crate::registry::is_stale(&v, now, |_| false));
+    // A crash leaves a stale entry: swept; ours stays.
+    let mut dead = v.clone();
+    dead["pid"] = json!(999_999);
+    crate::registry::write(&dir, "gridcraft-999999.json", &dead).unwrap();
+    crate::registry::sweep(&dir, now);
+    assert!(!dir.join("gridcraft-999999.json").exists());
+    assert!(path.exists());
+    // tick writes once enabled; remove deletes.
+    crate::registry::enable("http://127.0.0.1:7980/mcp");
+    std::fs::remove_file(&path).unwrap();
+    crate::registry::tick(&s);
+    assert!(path.exists());
+    crate::registry::remove();
+    assert!(!path.exists());
+    crate::registry::set_folder(None);
+    let _ = std::fs::remove_dir_all(&dir);
 }

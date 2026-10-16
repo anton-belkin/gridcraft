@@ -83,9 +83,9 @@ impl Mode {
     /// The mode's name in the list, and one line of what it means.
     pub fn label(self) -> (&'static str, &'static str) {
         match self {
-            Mode::Manual => ("I connect my agent", "MCP: Claude Code, Cowork, any client"),
-            Mode::Channel => ("Send to my Claude Code session", "Channels: questions arrive in your open session"),
-            Mode::Background => ("Background agent", "GridCraft runs claude itself for this workbook"),
+            Mode::Manual => ("Claude Desktop / Cowork (AItoCraft)", "Start the chat where the work belongs and say which document"),
+            Mode::Channel => ("My Claude Code session (AItoCraft channel)", "Questions arrive in your open Claude Code session"),
+            Mode::Background => ("Background agent", "The app runs Claude on your subscription. It sees only this document. Uses your limits."),
             Mode::Off => ("Off", "No agent: tools refuse, nothing is sent"),
         }
     }
@@ -108,9 +108,11 @@ pub struct Config {
     pub mcp_url: String,
     pub max_turns: u32,
     pub max_budget_usd: f64,
-    /// Where the MCP config and the skill are written, and the agent's folder for a workbook with
-    /// no file yet.
+    /// Where the MCP config and the skill are written.
     pub data_dir: Option<PathBuf>,
+    /// Run in the document's folder (its CLAUDE.md, memory and settings join the context) instead
+    /// of the neutral `ArtCraft/agent-sessions/`.
+    pub project_folder: bool,
 }
 
 impl Default for Config {
@@ -126,8 +128,14 @@ impl Default for Config {
             max_turns: 40,
             max_budget_usd: 3.0,
             data_dir: default_data_dir(),
+            project_folder: false,
         }
     }
+}
+
+/// The neutral folder background sessions run in (and are grouped under in Claude Desktop).
+pub fn sessions_dir() -> Option<PathBuf> {
+    crate::registry::folder().and_then(|f| f.parent().map(|p| p.join("agent-sessions")))
 }
 
 fn default_data_dir() -> Option<PathBuf> {
@@ -328,14 +336,17 @@ pub fn start(s: &Session) -> Result<Status, String> {
     let l = layer::get(d);
     let fresh = agents().as_ref().is_some_and(|a| a.fresh.contains(&uid));
     let (session, resume) = if l.agent_session.is_empty() || fresh { (crate::links::new_uuid(uid), false) } else { (l.agent_session.clone(), true) };
-    // The workbook's folder: its session sits with the deal's files.
-    let cwd = d
-        .path
-        .as_deref()
-        .and_then(|p| std::path::absolute(p).ok())
-        .and_then(|p| p.parent().map(std::path::Path::to_path_buf))
-        .or_else(|| c.data_dir.clone())
-        .unwrap_or_else(std::env::temp_dir);
+    // A neutral, empty folder by default, so no project's CLAUDE.md, memory or settings become its
+    // context (AItoCraft §4); the document's folder only when asked.
+    let doc_folder = d.path.as_deref().and_then(|p| std::path::absolute(p).ok()).and_then(|p| p.parent().map(std::path::Path::to_path_buf));
+    let cwd = match (c.project_folder, doc_folder) {
+        (true, Some(f)) => f,
+        _ => {
+            let n = sessions_dir().unwrap_or_else(std::env::temp_dir);
+            let _ = std::fs::create_dir_all(&n);
+            n
+        }
+    };
     let mut child = Command::new(&c.command)
         .args(args(&c, &session, resume, &mcp, skill.as_deref()))
         .current_dir(&cwd)
@@ -441,7 +452,7 @@ pub fn question_text(s: &Session, q: &Json) -> String {
     if !label.is_empty() {
         t.push_str(&format!(" ({label})"));
     }
-    t.push_str(&format!(":\n\n“{}”\n\nQuestion id: {}.", get("text"), get("id")));
+    t.push_str(&format!(":\n\n“{}”\n\nQuestion id: {}. Document: {}.", get("text"), get("id"), get("document")));
     t.push_str(" Claim it (claim_question), investigate with the gridcraft tools, and answer with answer_question, linking the cells you used.");
     t
 }
@@ -544,7 +555,7 @@ use gridcraft_engine::cmd::CommandSpec;
 use crate::commands::{bad, spec, str_p};
 
 pub static SPECS: &[CommandSpec] = &[
-    spec!(query "agent.agentMode", "Agent Mode", "{mode?: connect|channel|background|off} → the mode (how the agent comes in: you connect it over MCP, into your own Claude Code session, as a background agent per document, or not at all)", mode_cmd),
+    spec!(query "agent.agentMode", "Agent Mode", "{mode?: connect|channel|background|off, projectFolder?: bool (the background agent runs in the document's folder)} → the mode (how the agent comes in: you connect it over MCP, into your own Claude Code session, as a background agent per document, or not at all)", mode_cmd),
     spec!(query "agent.agentStart", "Start Background Agent", "{} — starts (or resumes) the active document's background agent", start_cmd),
     spec!(query "agent.agentStop", "Stop Background Agent", "{}", stop_cmd),
     spec!(query "agent.agentReset", "New Agent Session", "{} — a fresh session for the active document, started from a summary of its history", reset_cmd),
@@ -557,6 +568,7 @@ pub fn status_json(uid: u64, session: &str) -> Json {
     json!({
         "mode": mode().id(),
         "command": config().command,
+        "projectFolder": config().project_folder,
         "running": st.running,
         "sessionId": st.session_id,
         "cwd": st.cwd,
@@ -582,6 +594,10 @@ fn here(s: &Session) -> gridcraft_engine::Result<(u64, String)> {
 }
 
 fn mode_cmd(s: &mut Session, p: &Json) -> gridcraft_engine::Result<Json> {
+    if let Some(on) = p.get("projectFolder").and_then(Json::as_bool) {
+        refuse_agent(p, "agent.agentMode")?;
+        set_config(Config { project_folder: on, ..config() });
+    }
     if let Some(m) = str_p(p, "mode") {
         refuse_agent(p, "agent.agentMode")?;
         set_mode(Mode::parse(m).ok_or_else(|| bad("agent.agentMode", "`mode` is connect, channel, background or off"))?);
@@ -631,6 +647,10 @@ pub struct Signals {
     pub background: bool,
     /// The last call of an agent tool, ms since the epoch.
     pub last_call_ms: u64,
+    /// The document's attached listeners: (label, last seen), most recent first.
+    pub listeners: Vec<(String, u64)>,
+    /// `/events?document=` streams following this document.
+    pub document_streams: usize,
 }
 
 /// What the Agent tab says about the connection.
@@ -648,6 +668,13 @@ pub enum Presence {
     /// A check went unanswered for a minute.
     NoAnswer {
         asked_ms: u64,
+    },
+    /// A conversation is attached to the document: its label, how long since it was seen, and
+    /// how many others listen too.
+    Listening {
+        label: String,
+        seen_ms: u64,
+        more: usize,
     },
     /// No check, but something listens: what.
     Listener(Vec<&'static str>),
@@ -671,7 +698,13 @@ pub fn classify(ping: Option<layer::Ping>, s: &Signals, mode: Mode, now: u64) ->
         }
         _ => {}
     }
+    if let Some((label, seen)) = s.listeners.first() {
+        return Presence::Listening { label: label.clone(), seen_ms: now.saturating_sub(*seen), more: s.listeners.len() - 1 };
+    }
     let mut what = vec![];
+    if s.document_streams > 0 {
+        what.push("document stream");
+    }
     if s.event_streams > 0 {
         what.push("event stream");
     }
@@ -699,6 +732,8 @@ pub fn signals(uid: u64) -> Signals {
         last_wait_ms: crate::commands::last_wait_ms(),
         background: status(uid).is_some_and(|s| s.running),
         last_call_ms: crate::last_agent_call_ms(),
+        listeners: crate::docs::listeners(uid).into_iter().map(|l| (l.label, l.last_seen)).collect(),
+        document_streams: crate::server::document_streams(&crate::docs::doc_id(uid)),
     }
 }
 

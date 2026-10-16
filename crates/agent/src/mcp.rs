@@ -22,12 +22,24 @@ Change the workbook only with run_command, giving a reason and a source. PRIVACY
 hold client data; you see stand-in values with the same sign and magnitude, and everything computed from them is computed \
 from the stand-ins. Never present those numbers as real; reason about the model's mechanics instead. You cannot write to \
 private cells. \
+DOCUMENTS: several workbooks may be open: list_documents, then attach {document, label} binds this conversation to one; \
+pass that document (and your listener) on every call. Questions carry their document. \
 PING: a question with kind \"ping\" is a connection check: answer it at once with \"here\", don't investigate. \
 CHANNEL: when GridCraft sends questions to this session, each arrives as <channel source=\"gridcraft\" question_id=\"q3\" \
 range=\"Sheet1!B7\">question text</channel>: claim_question with that id, investigate, answer_question. Keep it short; \
 the user is waiting in the spreadsheet.";
 
-fn tool(name: &str, desc: &str, props: Value, required: &[&str], read_only: bool) -> Value {
+/// Tools that take a `listener` (AItoCraft): calls refresh it.
+const LISTENER_TOOLS: &[&str] = &["list_questions", "wait_for_questions", "claim_question", "answer_question"];
+
+fn tool(name: &str, desc: &str, mut props: Value, required: &[&str], read_only: bool) -> Value {
+    // Every tool can act on any open document (AItoCraft protocol §2).
+    if let Value::Object(o) = &mut props {
+        o.insert("document".into(), s("Document id from list_documents (default: the active document)"));
+        if LISTENER_TOOLS.contains(&name) {
+            o.insert("listener".into(), s("Your listener id from attach (keeps you listed as listening)"));
+        }
+    }
     json!({
         "name": name,
         "description": desc,
@@ -181,6 +193,21 @@ pub fn tools() -> Vec<Value> {
             &["cell"],
             true,
         ),
+        tool(
+            "list_documents",
+            "The documents open in GridCraft: id, title, path, frontmost, open questions, who listens. Pass an id as `document` to work on that one.",
+            json!({}),
+            &[],
+            true,
+        ),
+        tool(
+            "attach",
+            "Bind this conversation to a document (default: the active one): you are listed as listening to it, with `label` (\"Cowork · Acme\"). Keep the listener id and pass it with `document` on question calls.",
+            json!({"label": s("What the user sees, e.g. \"Cowork · Acme\"")}),
+            &[],
+            false,
+        ),
+        tool("detach", "Stop listening to a document.", json!({"listener": s("The listener id from attach")}), &["listener"], false),
         tool("get_layer", "The whole agent layer: anchors, questions, notes, inputs, private ranges, confidence, history.", json!({}), &[], true),
         tool(
             "run_command",
@@ -211,11 +238,24 @@ fn exec(b: &mut dyn Backend, command: &str, mut params: Value) -> Result<Value, 
     // The app decides whether an agent may work at all (also for the stdio server, a separate process).
     let mode = b.call("engine.execute", json!({"command": "agent.agentMode", "params": {}})).ok();
     gate(mode.as_ref().and_then(|m| m.get("mode")).and_then(Value::as_str))?;
+    let (document, listener) = ROUTE.with(|r| r.borrow().clone());
     if let Value::Object(o) = &mut params {
         o.insert("actor".into(), json!("agent"));
         o.insert("masked".into(), json!(true));
+        if let Some(l) = &listener
+            && matches!(command, "agent.questions" | "agent.claim" | "agent.answer")
+        {
+            o.insert("listener".into(), json!(l));
+        }
     }
-    b.call("engine.execute", json!({"command": command, "params": params}))
+    match document {
+        // On that document, active or not.
+        Some(doc) if command != "agent.listDocuments" && command != "agent.detach" => b.call(
+            "engine.execute",
+            json!({"command": "agent.onDocument", "params": {"document": doc, "command": command, "params": params, "actor": "agent"}}),
+        ),
+        _ => b.call("engine.execute", json!({"command": command, "params": params})),
+    }
 }
 
 fn pick(args: &Value, keys: &[&str]) -> Value {
@@ -228,8 +268,24 @@ fn pick(args: &Value, keys: &[&str]) -> Value {
     Value::Object(o)
 }
 
+thread_local! {
+    /// The document and listener of the call being handled.
+    static ROUTE: std::cell::RefCell<(Option<String>, Option<String>)> = const { std::cell::RefCell::new((None, None)) };
+}
+
 pub fn call(b: &mut dyn Backend, name: &str, args: &Value) -> Result<Value, String> {
+    let get = |k: &str| args.get(k).and_then(Value::as_str).map(str::to_string).filter(|v| !v.is_empty());
+    ROUTE.with(|r| *r.borrow_mut() = (get("document"), get("listener")));
+    let out = call_tool(b, name, args);
+    ROUTE.with(|r| *r.borrow_mut() = (None, None));
+    out
+}
+
+fn call_tool(b: &mut dyn Backend, name: &str, args: &Value) -> Result<Value, String> {
     match name {
+        "list_documents" => exec(b, "agent.listDocuments", json!({})),
+        "attach" => exec(b, "agent.attach", pick(args, &["label"])),
+        "detach" => exec(b, "agent.detach", pick(args, &["listener"])),
         "get_context" => exec(b, "agent.context", json!({})),
         "read_range" => exec(b, "agent.read", pick(args, &["range"])),
         "trace_number" => exec(b, "agent.trace", pick(args, &["cell", "depth"])),

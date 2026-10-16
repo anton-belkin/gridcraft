@@ -207,9 +207,15 @@ enum Act {
     Message(String, String),
     #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     OpenClaude,
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    InstallHub,
 }
 
 pub(crate) fn show(st: &mut AgentUi, app: &mut SheetApp, ui: &mut Ui) {
+    #[cfg(not(target_arch = "wasm32"))]
+    if let Some(msg) = gridcraft_agent::hub::take_result() {
+        app.message = Some(("AItoCraft".into(), msg));
+    }
     let t = Tokens::get(ui.ctx());
     let p = palette(&t);
     let read_only = gridcraft_agent::read_only();
@@ -382,6 +388,14 @@ pub(crate) fn show(st: &mut AgentUi, app: &mut SheetApp, ui: &mut Ui) {
                 let _ = entry;
             }
             Act::Message(title, text) => app.message = Some((title, text)),
+            Act::InstallHub =>
+            {
+                #[cfg(not(target_arch = "wasm32"))]
+                match gridcraft_agent::hub::install_desktop() {
+                    Ok(()) => app.toast = Some(("Installing AItoCraft in Claude Desktop…".into(), gridcraft_ui_egui::now_ms())),
+                    Err(e) => app.message = Some(("AItoCraft".into(), e)),
+                }
+            }
             Act::OpenClaude => {
                 #[cfg(target_os = "macos")]
                 {
@@ -458,6 +472,15 @@ fn span(ms: u64) -> String {
         format!("{} min", s / 60)
     } else {
         format!("{} h", s / 3600)
+    }
+}
+
+/// A menu item that copies one thing (its text on hover).
+#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+fn copy_item(ui: &mut Ui, acts: &mut Vec<Act>, label: &str, tip: &str, text: String) {
+    if ui.button(label).on_hover_text(format!("{tip}\n\n{text}")).clicked() {
+        acts.push(Act::Copy(text));
+        ui.close();
     }
 }
 
@@ -545,36 +568,52 @@ fn connection(app: &SheetApp, ui: &mut Ui, t: &Tokens, p: &crate::Palette, read_
     }
     let presence = runner::presence(&app.session);
     let red = Color32::from_rgb(0xC4, 0x2B, 0x1C);
+    let answered_by = layer::get(d).ping_answered_by();
     let (m, color, line, sub) = match &presence {
         _ if mode == Mode::Off => (Mark::Ring, t.text_disabled, "Agent off".to_string(), "choose a mode to let an agent in".to_string()),
-        Presence::Answering { checked_ms, latency_ms } => {
-            (Mark::Full, p.answered, "Agent answering".to_string(), format!("checked {} ago · answered in {}", span(*checked_ms), span(*latency_ms)))
-        }
+        Presence::Answering { checked_ms, latency_ms } => (
+            Mark::Full,
+            p.answered,
+            match &answered_by {
+                Some(by) => format!("Agent answering: {by}"),
+                None => "Agent answering".to_string(),
+            },
+            format!("checked {} ago · answered in {}", span(*checked_ms), span(*latency_ms)),
+        ),
         Presence::Checking { since_ms } => (Mark::Half, p.pending, "Checking…".to_string(), format!("asked {} ago", span(*since_ms))),
         Presence::NoAnswer { asked_ms } => (Mark::Cross, red, "No answer to check".to_string(), format!("asked {} ago", span(*asked_ms))),
+        Presence::Listening { label, seen_ms, more } => (
+            Mark::Full,
+            p.answered,
+            format!("Listening: {label}"),
+            if *more > 0 { format!("{} ago · and {more} more", span(*seen_ms)) } else { format!("{} ago", span(*seen_ms)) },
+        ),
         Presence::Listener(what) => (Mark::Half, p.pending, "Listener connected".to_string(), format!("not checked · {}", what.join(", "))),
-        Presence::Nobody => (Mark::Ring, t.text_dim, "Nobody is listening".to_string(), "press Check, or connect an agent".to_string()),
+        Presence::Nobody => {
+            (Mark::Ring, t.text_dim, "Nobody is listening for this document".to_string(), "questions still queue here · press Check".to_string())
+        }
     };
-    if matches!(presence, Presence::Checking { .. } | Presence::Answering { .. } | Presence::Listener(_)) {
+    if !matches!(presence, Presence::Nobody) {
         ui.ctx().request_repaint_after(std::time::Duration::from_secs(1));
     }
+    let title = d.display_title();
     column(ui, |ui| {
         status_block(ui, m, color, &line, &sub, &details);
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 2.0;
             if mode != Mode::Off
-                && row_button(ui, Icon::Search, "Check", "Ask \"is anyone there?\": a connection check your agent answers with \"here\"", false).clicked()
+                && row_button(ui, Icon::Search, "Check", "Ask \"is anyone there?\": a connection check this document's listeners answer with \"here\"", false).clicked()
             {
                 acts.push(Act::Run("agent.ping", json!({})));
             }
             // Mode: a simple list.
             let r = row_button(ui, Icon::Settings, &format!("Mode: {}", mode.label().0), "How your agent gets the questions", true);
             egui::Popup::menu(&r).show(|ui| {
-                ui.set_min_width(300.0);
+                ui.set_min_width(330.0);
                 for m in Mode::ALL {
                     let (name, what) = m.label();
                     let on = mode == m;
-                    let resp = ui.add(egui::Button::selectable(on, egui::RichText::new(name).strong()).min_size(vec2(290.0, 18.0)));
+                    let resp = ui.add(egui::Button::selectable(on, egui::RichText::new(name).strong()).min_size(vec2(320.0, 18.0)));
                     ui.label(egui::RichText::new(what).small().color(t.text_dim));
                     if resp.clicked() {
                         if !on {
@@ -585,39 +624,26 @@ fn connection(app: &SheetApp, ui: &mut Ui, t: &Tokens, p: &crate::Palette, read_
                 }
             });
             // Copy: what this mode needs, one thing per item.
-            if mode == Mode::Off {
-                return;
-            }
-            let title = if mode == Mode::Background { "Session" } else { "Copy" };
-            let r = row_button(ui, Icon::Copy, title, "What to paste where, for this mode", true);
+            let menu_title = if mode == Mode::Background { "Session" } else { "Copy" };
+            let r = row_button(ui, Icon::Copy, menu_title, "What to paste where, for this mode", true);
             egui::Popup::menu(&r).show(|ui| {
-                ui.set_min_width(260.0);
-                let exe = std::env::current_exe().map(|x| x.display().to_string()).unwrap_or_else(|_| "gridcraft".into());
-                let mut item = |ui: &mut Ui, label: &str, text: String| {
-                    if ui.button(label).on_hover_text(&text).clicked() {
-                        acts.push(Act::Copy(text));
-                        ui.close();
-                    }
-                };
+                ui.set_min_width(280.0);
                 match mode {
-                    Mode::Manual => {
-                        item(ui, "Claude Code: add MCP server", format!("claude mcp add --transport http gridcraft {url}"));
-                        item(ui, "Monitor command", format!("curl -sN {base}/events"));
-                        let can = entry.is_some() && cowork_state != State::Waiting;
-                        let label = format!("Connect Cowork… ({cowork_text})");
-                        if ui.add_enabled(can, egui::Button::new(label)).on_hover_text("Adds GridCraft to Claude Desktop (Cowork and chats). Claude rewrites its settings when it quits, so while it runs GridCraft waits for you to quit it (⌘Q), then writes.").clicked()
-                            && let Some(e) = entry.clone()
+                    Mode::Manual | Mode::Channel => {
+                        copy_item(ui, acts, "Copy phrase for Claude", "Paste it where the work belongs: a Cowork project, a chat, a Claude Code session", gridcraft_agent::hub::phrase(&title));
+                        if mode == Mode::Manual
+                            && ui.button("Install AItoCraft in Claude Desktop").on_hover_text("One connection for every Craft app in Claude Desktop and Cowork").clicked()
                         {
-                            acts.push(Act::Cowork(e));
+                            acts.push(Act::InstallHub);
                             ui.close();
                         }
-                    }
-                    Mode::Channel => {
-                        item(ui, "1. Add channel server", format!("claude mcp add gridcraft-channel -- '{exe}' --agent-stdio"));
-                        item(ui, "2. Start Claude Code with the channel", "claude --dangerously-load-development-channels server:gridcraft-channel".into());
+                        copy_item(ui, acts, "Claude Code: add AItoCraft", "Once, in a terminal", gridcraft_agent::hub::claude_code_command());
+                        if mode == Mode::Channel {
+                            copy_item(ui, acts, "Start Claude Code with the channel", "Questions arrive in that session as they're asked", gridcraft_agent::hub::CHANNEL_COMMAND.to_string());
+                        }
                     }
                     Mode::Background => {
-                        if ui.button("Open session in Claude Desktop").on_hover_text("Background sessions are in Claude's Code tab, under this workbook's folder").clicked() {
+                        if ui.button("Open session in Claude Desktop").on_hover_text("Background sessions are in Claude's Code tab").clicked() {
                             acts.push(Act::OpenClaude);
                             ui.close();
                         }
@@ -625,14 +651,44 @@ fn connection(app: &SheetApp, ui: &mut Ui, t: &Tokens, p: &crate::Palette, read_
                             acts.push(Act::Run("agent.agentReset", json!({})));
                             ui.close();
                         }
+                        let mut own = runner::config().project_folder;
+                        if ui
+                            .checkbox(&mut own, "Use the document's folder as its project")
+                            .on_hover_text("Its CLAUDE.md, memory and settings then join the agent's context. Off: a neutral, empty folder.")
+                            .changed()
+                        {
+                            acts.push(Act::Run("agent.agentMode", json!({"projectFolder": own})));
+                        }
                     }
                     Mode::Off => {}
                 }
                 ui.separator();
-                if ui.button("Details…").clicked() {
-                    acts.push(Act::Message("Connection".into(), details.clone()));
-                    ui.close();
-                }
+                ui.menu_button("Details", |ui| {
+                    if ui.button("Connection details…").clicked() {
+                        acts.push(Act::Message("Connection".into(), details.clone()));
+                        ui.close();
+                    }
+                    ui.separator();
+                    ui.label(egui::RichText::new("Without AItoCraft (this app only)").small().color(t.text_dim));
+                    let can = entry.is_some() && cowork_state != State::Waiting;
+                    if ui
+                        .add_enabled(can, egui::Button::new(format!("Connect GridCraft to Claude Desktop… ({cowork_text})")))
+                        .on_hover_text("gridcraft --agent-stdio in Claude Desktop's settings. Claude rewrites its settings when it quits, so while it runs GridCraft waits for you to quit it (⌘Q), then writes.")
+                        .clicked()
+                        && let Some(e) = entry.clone()
+                    {
+                        acts.push(Act::Cowork(e));
+                        ui.close();
+                    }
+                    let mut copy = |ui: &mut Ui, label: &str, text: String| {
+                        if ui.button(label).on_hover_text(&text).clicked() {
+                            acts.push(Act::Copy(text));
+                            ui.close();
+                        }
+                    };
+                    copy(ui, "Claude Code: add GridCraft's MCP server", format!("claude mcp add --transport http gridcraft {url}"));
+                    copy(ui, "Monitor command", format!("curl -sN {base}/events"));
+                });
             });
         });
     });

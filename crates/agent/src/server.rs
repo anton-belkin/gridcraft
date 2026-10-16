@@ -37,6 +37,40 @@ impl Drop for Open {
     }
 }
 
+/// `/events?document=` streams open now, by document id.
+static DOC_STREAMS: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+
+struct DocStream(String);
+impl DocStream {
+    fn open(doc: &str) -> DocStream {
+        if let Ok(mut g) = DOC_STREAMS.lock() {
+            g.push(doc.to_string());
+        }
+        DocStream(doc.to_string())
+    }
+}
+impl Drop for DocStream {
+    fn drop(&mut self) {
+        if let Ok(mut g) = DOC_STREAMS.lock()
+            && let Some(i) = g.iter().position(|d| *d == self.0)
+        {
+            g.remove(i);
+        }
+    }
+}
+
+/// Whichever stream is open (held for its lifetime).
+#[allow(dead_code)]
+enum Opened {
+    All(Open),
+    Doc(DocStream),
+}
+
+/// `/events` streams following one document now.
+pub fn document_streams(doc: &str) -> usize {
+    DOC_STREAMS.lock().map(|g| g.iter().filter(|d| *d == doc).count()).unwrap_or(0)
+}
+
 /// Listeners connected to this server now: (`/events` streams, channel streams).
 pub fn streams() -> (usize, usize) {
     (EVENT_STREAMS.load(Ordering::Relaxed), CHANNEL_STREAMS.load(Ordering::Relaxed))
@@ -148,7 +182,7 @@ fn serve(stream: TcpStream, control: &str) {
             }
             ("DELETE", "/mcp") => respond(&mut w, "200 OK", "text/plain", b""),
             ("GET", "/events") => {
-                events(w, control);
+                events(w, control, &req.query);
                 return;
             }
             ("GET", "/health") => respond(&mut w, "200 OK", "text/plain", b"ok"),
@@ -244,8 +278,17 @@ fn channel_stream(mut w: TcpStream, control: &str, client: &str) {
 }
 
 /// Streams new pending questions, one JSON object per line, until the client goes away.
-fn events(mut w: TcpStream, control: &str) {
-    let _open = Open::new(&EVENT_STREAMS);
+fn events(mut w: TcpStream, control: &str, query: &str) {
+    // `?document=<id>` streams only that document's questions; `&listener=` keeps that listener
+    // listed while the stream is open.
+    let param = |k: &str| {
+        query.split('&').find_map(|kv| kv.strip_prefix(&format!("{k}="))).map(|v| v.replace("%3A", ":").replace("%3a", ":")).filter(|v| !v.is_empty())
+    };
+    let (document, listener) = (param("document"), param("listener"));
+    let _open = match &document {
+        Some(d) => Opened::Doc(DocStream::open(d)),
+        None => Opened::All(Open::new(&EVENT_STREAMS)),
+    };
     if w.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: application/x-ndjson\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n").is_err() {
         return;
     }
@@ -256,19 +299,30 @@ fn events(mut w: TcpStream, control: &str) {
         if crate::runner::mode() != crate::runner::Mode::Off
             && let Ok(b) = backend(&mut slot, control)
         {
-            match b.call(
-                "engine.execute",
-                json!({"command": "agent.questions", "params": {"status": "pending", "actor": "agent", "masked": true, "wait": true}}),
-            ) {
+            let mut params = json!({"status": "pending", "actor": "agent", "masked": true, "wait": true});
+            if let Some(l) = &listener {
+                params["listener"] = json!(l);
+            }
+            let call = match &document {
+                Some(d) => {
+                    json!({"command": "agent.onDocument", "params": {"document": d, "command": "agent.questions", "params": params, "actor": "agent"}})
+                }
+                None => json!({"command": "agent.questions", "params": params}),
+            };
+            match b.call("engine.execute", call) {
                 Ok(Value::Array(list)) => {
                     for q in list {
                         let Some(id) = q.get("id").and_then(Value::as_str).map(str::to_string) else { continue };
-                        if !seen.insert(id.clone()) {
+                        // Ids are per document: the active one may change under an unfiltered stream.
+                        let key = format!("{}#{id}", q.get("document").and_then(Value::as_str).unwrap_or(""));
+                        if !seen.insert(key) {
                             continue;
                         }
                         let line = json!({
                             "event": "question",
                             "id": id,
+                            "document": q.get("document"),
+                            "documentTitle": q.get("documentTitle"),
                             "kind": q.get("kind").cloned().unwrap_or_else(|| json!("question")),
                             "range": q.get("range"),
                             "label": q.get("label"),

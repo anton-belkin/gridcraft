@@ -23,7 +23,7 @@ pub fn notification(q: &Json) -> Json {
         return json!({
             "jsonrpc": "2.0",
             "method": "notifications/claude/channel",
-            "params": {"content": get("text"), "meta": {"question_id": get("id"), "kind": kind}},
+            "params": {"content": get("text"), "meta": {"question_id": get("id"), "kind": kind, "document": get("document")}},
         });
     }
     let mut content = format!("Question on {}", get("range"));
@@ -37,7 +37,7 @@ pub fn notification(q: &Json) -> Json {
         "params": {
             "content": content,
             // Keys must be identifiers (letters, digits, underscores).
-            "meta": {"question_id": get("id"), "kind": kind, "range": get("range"), "label": label},
+            "meta": {"question_id": get("id"), "kind": kind, "document": get("document"), "range": get("range"), "label": label},
         },
     })
 }
