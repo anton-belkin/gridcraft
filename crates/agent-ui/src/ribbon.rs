@@ -13,6 +13,9 @@ use crate::{AgentUi, Heat, Tab, palette};
 
 /// The tab's name.
 pub const TAB: &str = "Agent";
+/// Its keytip (Alt, G; F10, G on macOS). WordCraft and DeckCraft use A, which is Data here, as in
+/// Excel.
+pub const KEYTIP: &str = "G";
 /// Height of a group's controls (its caption goes under them).
 const BODY: f32 = 58.0;
 
@@ -43,24 +46,90 @@ fn column(ui: &mut Ui, add: impl FnOnce(&mut Ui)) {
     });
 }
 
-/// A large button that fits a group: icon, label, and a status line in its colour.
-fn tall_button(ui: &mut Ui, icon: Icon, label: &str, status: Option<(&str, Color32)>, on: bool, tip: &str) -> Response {
+/// A large button that fits a group: a drawn icon over one or two label lines and a sub-label in
+/// its colour.
+fn tall_button(
+    ui: &mut Ui,
+    label: &str,
+    sub: Option<(&str, Color32)>,
+    on: bool,
+    enabled: bool,
+    tip: &str,
+    icon: impl FnOnce(&egui::Painter, Rect, Color32),
+) -> Response {
     let t = Tokens::get(ui.ctx());
-    let font = theme::ui_font(11.5);
-    let lw = ui.painter().layout_no_wrap(label.to_string(), font.clone(), t.text).size().x;
-    let sw = status.map_or(0.0, |(s, _)| ui.painter().layout_no_wrap(s.to_string(), theme::ui_font(10.0), t.text).size().x);
-    let (rect, resp) = ui.allocate_exact_size(vec2(lw.max(sw).max(40.0) + 14.0, BODY), Sense::click());
+    let font = theme::ui_font(11.0);
+    let w_of = |s: &str, f: egui::FontId| ui.painter().layout_no_wrap(s.to_string(), f, t.text).size().x;
+    let w = label.split('\n').map(|l| w_of(l, font.clone())).fold(sub.map_or(0.0, |(s, _)| w_of(s, theme::ui_bold(10.0))), f32::max);
+    let (rect, resp) = ui.allocate_exact_size(vec2(w.max(40.0) + 14.0, BODY), if enabled { Sense::click() } else { Sense::hover() });
     if on {
         ui.painter().rect_filled(rect, 5.0, t.pressed);
-    } else if resp.hovered() {
+    } else if resp.hovered() && enabled {
         ui.painter().rect_filled(rect, 5.0, t.hover);
     }
-    icons::paint(ui.painter(), Rect::from_center_size(pos2(rect.center().x, rect.top() + 15.0), vec2(24.0, 24.0)), icon, t.text);
-    ui.painter().text(pos2(rect.center().x, rect.top() + 36.0), Align2::CENTER_CENTER, label, font, t.text);
-    if let Some((s, c)) = status {
-        ui.painter().text(pos2(rect.center().x, rect.top() + 50.0), Align2::CENTER_CENTER, s, theme::ui_bold(10.0), c);
+    let lines: Vec<&str> = label.split('\n').collect();
+    let rows = lines.len() + usize::from(sub.is_some());
+    let icon_h = if rows >= 3 { 20.0 } else { 26.0 };
+    icon(
+        ui.painter(),
+        Rect::from_center_size(pos2(rect.center().x, rect.top() + 2.0 + icon_h / 2.0), vec2(icon_h, icon_h)),
+        if enabled { t.text } else { t.text_disabled },
+    );
+    let mut y = rect.top() + icon_h + 9.0;
+    for l in lines {
+        ui.painter().text(pos2(rect.center().x, y), Align2::CENTER_CENTER, l, font.clone(), if enabled { t.text } else { t.text_disabled });
+        y += 11.5;
+    }
+    if let Some((s, c)) = sub {
+        ui.painter().text(pos2(rect.center().x, y), Align2::CENTER_CENTER, s, theme::ui_bold(10.0), c);
     }
     resp.on_hover_text(tip)
+}
+
+/// The agent's mark, drawn (the interface fonts have no such glyph): a four-pointed star and a
+/// small one, as in WordCraft and DeckCraft.
+fn sparkle(p: &egui::Painter, r: Rect, color: Color32) {
+    let star = |c: egui::Pos2, o: f32, i: f32| {
+        let pts = vec![
+            c + vec2(0.0, -o),
+            c + vec2(i, -i),
+            c + vec2(o, 0.0),
+            c + vec2(i, i),
+            c + vec2(0.0, o),
+            c + vec2(-i, i),
+            c + vec2(-o, 0.0),
+            c + vec2(-i, -i),
+        ];
+        p.add(egui::Shape::convex_polygon(pts, color, Stroke::NONE));
+    };
+    let c = r.center();
+    let o = r.width() * 0.42;
+    star(c, o, r.width() * 0.11);
+    star(c + vec2(o * 0.95, -o * 0.75), r.width() * 0.16, r.width() * 0.05);
+}
+
+/// Claude Desktop's plug: a box with a plus.
+#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+fn plug(p: &egui::Painter, r: Rect, color: Color32) {
+    let b = r.shrink(r.width() * 0.18);
+    p.rect_stroke(b, 3.0, Stroke::new(1.6, color), egui::StrokeKind::Inside);
+    let c = b.center();
+    let s = b.width() * 0.25;
+    p.line_segment([c - vec2(s, 0.0), c + vec2(s, 0.0)], Stroke::new(1.8, color));
+    p.line_segment([c - vec2(0.0, s), c + vec2(0.0, s)], Stroke::new(1.8, color));
+}
+
+/// "just now", "5 min ago", "2 h ago".
+#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+fn ago(ms: u64) -> String {
+    let s = gridcraft_agent::now_ms().saturating_sub(ms) / 1000;
+    if s < 60 {
+        "just now".into()
+    } else if s < 3600 {
+        format!("{} min ago", s / 60)
+    } else {
+        format!("{} h ago", s / 3600)
+    }
 }
 
 /// A compact ribbon row: 14 px icon and a label (three fit over a group's caption).
@@ -127,8 +196,22 @@ pub(crate) fn counts(app: &SheetApp) -> (usize, usize) {
     (ready, waiting)
 }
 
-fn plural(n: usize, one: &str) -> String {
-    if n == 1 { format!("1 {one}") } else { format!("{n} {one}s") }
+/// What the Agent button says under its label: "1 ready", "1 in work", "2 waiting", "idle".
+fn status(app: &SheetApp, t: &Tokens, p: &crate::Palette) -> (String, Color32) {
+    let Some(d) = app.session.active() else { return ("idle".into(), t.text_disabled) };
+    let l = layer::get(d);
+    let ready = l.questions.iter().filter(|q| q.status == QuestionStatus::Answered && !q.seen).count();
+    let working = l.questions.iter().filter(|q| q.status == QuestionStatus::Working).count();
+    let waiting = l.questions.iter().filter(|q| q.status == QuestionStatus::Pending).count();
+    if ready > 0 {
+        (format!("{ready} ready"), p.answered)
+    } else if working > 0 {
+        (format!("{working} in work"), p.working)
+    } else if waiting > 0 {
+        (format!("{waiting} waiting"), p.pending)
+    } else {
+        ("idle".into(), t.text_disabled)
+    }
 }
 
 /// Something the user clicked, done once drawing is finished.
@@ -137,10 +220,11 @@ enum Act {
     Pane(bool, Tab),
     Heat(Heat),
     CopyLink,
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     Copy(String),
-    Cowork,
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    Cowork(serde_json::Value),
     Share(String),
-    OpenClaude,
 }
 
 pub(crate) fn show(st: &mut AgentUi, app: &mut SheetApp, ui: &mut Ui) {
@@ -154,37 +238,20 @@ pub(crate) fn show(st: &mut AgentUi, app: &mut SheetApp, ui: &mut Ui) {
 
     // Agent: the pane and what waits.
     group(ui, "Agent", |ui| {
-        let status = if ready > 0 {
-            (plural(ready, "answer") + " ready", p.answered)
-        } else if waiting > 0 {
-            (format!("{waiting} with the agent"), p.pending)
-        } else {
-            ("idle".to_string(), t.text_dim)
-        };
+        let (sub, color) = status(app, &t, &p);
         if tall_button(
             ui,
-            Icon::Comment,
-            "Agent Pane",
-            Some((&status.0, status.1)),
+            "Agent",
+            Some((&sub, color)),
             st.open,
-            "Questions, answers, notes and analysis of the selected cells",
+            true,
+            "Show or hide the Agent pane: your questions, the agent's answers and notes",
+            |pa, r, _| sparkle(pa, r, p.agent),
         )
         .clicked()
         {
             acts.push(Act::Pane(!st.open, if ready > 0 || waiting > 0 { Tab::Questions } else { Tab::Cell }));
         }
-        column(ui, |ui| {
-            if !read_only && row_button(ui, Icon::Comment, "Ask About Cell", "Ask your agent about the selected cells", false).clicked() {
-                acts.push(Act::Pane(true, Tab::Cell));
-            }
-            let q = if l.questions.is_empty() { "Questions".to_string() } else { format!("Questions ({})", l.questions.len()) };
-            if row_button(ui, Icon::Note, &q, "Every question and answer in this workbook", false).clicked() {
-                acts.push(Act::Pane(true, Tab::Questions));
-            }
-            if row_button(ui, Icon::Book, "History", "Decisions and changes by you and the agent", false).clicked() {
-                acts.push(Act::Pane(true, Tab::History));
-            }
-        });
     });
 
     // Client data: what the agent sees as stand-ins, and what a saved file holds.
@@ -319,20 +386,16 @@ pub(crate) fn show(st: &mut AgentUi, app: &mut SheetApp, ui: &mut Ui) {
                 ctx.copy_text(text);
                 app.toast = Some(("Copied".into(), gridcraft_ui_egui::now_ms()));
             }
-            Act::Cowork => match app.run("agent.connectCowork", json!({})) {
-                Ok(v) => app.message = Some(("Connect Cowork".into(), v.get("message").and_then(|m| m.as_str()).unwrap_or("").to_string())),
-                Err(e) => app.message = Some(("Connect Cowork".into(), e)),
-            },
+            Act::Cowork(entry) => {
+                #[cfg(not(target_arch = "wasm32"))]
+                gridcraft_agent::cowork::connect(entry);
+                #[cfg(target_arch = "wasm32")]
+                let _ = entry;
+            }
             Act::Share(path) => match app.run("agent.exportHtml", json!({"path": path})) {
                 Ok(_) => app.toast = Some((format!("Saved {path}"), gridcraft_ui_egui::now_ms())),
                 Err(e) => app.message = Some(("Export Web Page".into(), e)),
             },
-            Act::OpenClaude => {
-                #[cfg(target_os = "macos")]
-                {
-                    let _ = std::process::Command::new("/usr/bin/open").args(["-a", "Claude"]).spawn();
-                }
-            }
         }
     }
 }
@@ -351,6 +414,7 @@ fn connection(_app: &SheetApp, ui: &mut Ui, t: &Tokens, _p: &crate::Palette, _re
 
 #[cfg(not(target_arch = "wasm32"))]
 fn connection(app: &SheetApp, ui: &mut Ui, t: &Tokens, p: &crate::Palette, read_only: bool, acts: &mut Vec<Act>) {
+    use gridcraft_agent::cowork::{self, Configured, State};
     use gridcraft_agent::runner::{self, Mode};
     if read_only {
         column(ui, |ui| {
@@ -363,25 +427,66 @@ fn connection(app: &SheetApp, ui: &mut Ui, t: &Tokens, p: &crate::Palette, read_
         });
         return;
     }
-    let Some(url) = crate::server_url() else {
-        column(ui, |ui| status_line(ui, "No agent server", p.material, "Start GridCraft without --no-agent"));
-        return;
-    };
     let Some(d) = app.session.active() else { return };
+    // Connect Cowork: GridCraft in Claude Desktop's MCP servers.
+    let entry = crate::stdio_entry();
+    let configured = match (&entry, cowork::config_path()) {
+        (Some(e), Some(path)) => cowork::configured(&path, e),
+        _ => Configured::NoClaude,
+    };
+    let state = cowork::state();
+    let (sub, color) = match (&state, &configured) {
+        (State::Waiting, _) => ("quit Claude (⌘Q)".to_string(), p.pending),
+        (State::Done { .. }, _) => ("open Claude".to_string(), p.answered),
+        (State::Failed(_), _) => ("failed".to_string(), p.material),
+        (_, Configured::Yes) => ("connected".to_string(), p.answered),
+        (_, Configured::Different) => ("other build".to_string(), p.pending),
+        _ => ("not set up".to_string(), t.text_disabled),
+    };
+    let tip = match &state {
+        State::Waiting => "Claude Desktop rewrites its settings when it quits, so GridCraft waits: quit Claude with ⌘Q, GridCraft adds itself, then open Claude again.".to_string(),
+        State::Done { backup } => format!(
+            "Added to Claude Desktop{}. Open Claude (or quit it with ⌘Q and open it again): the gridcraft tools appear in Cowork and chats.",
+            backup.as_ref().map(|b| format!(" (old settings saved as {})", b.display())).unwrap_or_default()
+        ),
+        State::Failed(e) => e.clone(),
+        State::Idle => "Add GridCraft to Claude Desktop, so Cowork and chats there can answer your questions. Other servers in its settings stay as they are.".to_string(),
+    };
+    let can = entry.is_some() && state != State::Waiting;
+    if tall_button(ui, "Connect\nCowork", Some((&sub, color)), configured == Configured::Yes, can, &tip, plug).clicked()
+        && let Some(e) = entry
+    {
+        acts.push(Act::Cowork(e));
+    }
+    column(ui, |ui| {
+        match crate::server_url() {
+            Some(u) => status_line(
+                ui,
+                &format!("Listening · {}", u.trim_start_matches("http://").trim_end_matches("/mcp")),
+                p.answered,
+                "The agent server (MCP over HTTP, this computer only)",
+            ),
+            None => status_line(ui, "Server off", t.text_disabled, "Start GridCraft without --no-agent"),
+        }
+        let last = gridcraft_agent::last_agent_call_ms();
+        let active = last > 0 && gridcraft_agent::now_ms().saturating_sub(last) < 120_000;
+        if active {
+            status_line(ui, &format!("Agent active · {}", ago(last)), p.agent, "An agent called the layer in the last two minutes");
+        } else if last > 0 {
+            status_line(ui, &format!("Agent last seen {}", ago(last)), t.text_disabled, "");
+        } else {
+            status_line(ui, "No agent connected yet", t.text_disabled, "Connect Claude Code (Copy command) or Cowork");
+        }
+        let url = crate::server_url().unwrap_or("http://127.0.0.1:7980/mcp");
+        let cmd = format!("claude mcp add --transport http gridcraft {url}");
+        if row_button(ui, Icon::Copy, "Copy Claude Code command", &cmd, false).clicked() {
+            acts.push(Act::Copy(cmd));
+        }
+    });
+    // How questions reach the agent (GridCraft also starts the agent itself).
     let mode = runner::mode();
     let bg = runner::status(d.uid).unwrap_or_default();
     column(ui, |ui| {
-        let port = url.trim_end_matches("/mcp").rsplit(':').next().unwrap_or("");
-        let (text, color, tip) = match mode {
-            Mode::Background if !bg.last_error.is_empty() && !bg.running => ("Agent stopped".to_string(), p.material, bg.last_error.clone()),
-            Mode::Background if bg.running && bg.in_flight > 0 => (format!("Agent working ({})", bg.in_flight), p.working, bg.recent.join("\n")),
-            Mode::Background if bg.running => ("Agent running".to_string(), p.answered, bg.recent.join("\n")),
-            Mode::Background => ("Background · ready".to_string(), t.text_dim, "Starts with your next question".to_string()),
-            _ if gridcraft_agent::server::agent_connected() => ("Agent connected".to_string(), p.answered, format!("An agent is using {url}")),
-            _ => (format!("Listening · {port}"), t.text_dim, format!("{url}: no agent connected yet")),
-        };
-        let tip = if bg.turns > 0 { format!("{tip}\n{} turns · ${:.2}", bg.turns, bg.cost_usd) } else { tip };
-        status_line(ui, &text, color, &tip);
         let name = match mode {
             Mode::Off => "Mode: I Connect",
             Mode::Channel => "Mode: My Session",
@@ -389,7 +494,7 @@ fn connection(app: &SheetApp, ui: &mut Ui, t: &Tokens, p: &crate::Palette, read_
         };
         let r = row_button(ui, Icon::Settings, name, "How questions reach the agent", true);
         egui::Popup::menu(&r).show(|ui| {
-            for (m, label) in [(Mode::Off, "I connect my agent (MCP, /events)"), (Mode::Channel, "Send to my Claude Code session (channel)"), (Mode::Background, "Background agent for this workbook")] {
+            for (m, label) in [(Mode::Off, "I connect my agent (MCP, Cowork, /events)"), (Mode::Channel, "Send to my Claude Code session (channel)"), (Mode::Background, "Background agent for this workbook")] {
                 if ui.radio(mode == m, label).clicked() {
                     acts.push(Act::Run("agent.agentMode", json!({"mode": m.id()})));
                     ui.close();
@@ -397,16 +502,23 @@ fn connection(app: &SheetApp, ui: &mut Ui, t: &Tokens, p: &crate::Palette, read_
             }
             ui.separator();
             let exe = std::env::current_exe().map(|x| x.display().to_string()).unwrap_or_else(|_| "gridcraft".into());
-            if ui.button("Copy channel setup (Claude Code)").on_hover_text("Add GridCraft as a channel server; then start Claude Code with --dangerously-load-development-channels server:gridcraft-channel").clicked() {
+            if ui.button("Copy channel setup (Claude Code)").clicked() {
                 acts.push(Act::Copy(format!("claude mcp add gridcraft-channel -- '{exe}' --agent-stdio && claude --dangerously-load-development-channels server:gridcraft-channel")));
-                ui.close();
-            }
-            if ui.button("Copy event monitor command").clicked() {
-                acts.push(Act::Copy(format!("curl -sN {}/events", url.trim_end_matches("/mcp"))));
                 ui.close();
             }
         });
         if mode == Mode::Background {
+            let (text, color, detail) = if !bg.last_error.is_empty() && !bg.running {
+                ("Background · stopped".to_string(), p.material, bg.last_error.clone())
+            } else if bg.running && bg.in_flight > 0 {
+                (format!("Background · working ({})", bg.in_flight), p.working, bg.recent.join("\n"))
+            } else if bg.running {
+                ("Background · running".to_string(), p.answered, bg.recent.join("\n"))
+            } else {
+                ("Background · ready".to_string(), t.text_dim, "Starts with your next question".to_string())
+            };
+            let detail = if bg.turns > 0 { format!("{detail}\n{} turns · ${:.2}", bg.turns, bg.cost_usd) } else { detail };
+            status_line(ui, &text, color, &detail);
             let (label, id, tip) = if bg.running {
                 ("Stop Agent", "agent.agentStop", "Stop the background agent (its session is kept)")
             } else {
@@ -414,44 +526,6 @@ fn connection(app: &SheetApp, ui: &mut Ui, t: &Tokens, p: &crate::Palette, read_
             };
             if row_button(ui, Icon::Script, label, tip, false).clicked() {
                 acts.push(Act::Run(id, json!({})));
-            }
-        } else if row_button(ui, Icon::Copy, "Copy MCP Command", &format!("claude mcp add --transport http gridcraft {url}"), false).clicked() {
-            acts.push(Act::Copy(format!("claude mcp add --transport http gridcraft {url}")));
-        }
-    });
-    column(ui, |ui| {
-        let connected = gridcraft_agent::cowork::connected();
-        let tip = if connected {
-            "GridCraft is in Claude Desktop's MCP servers (gridcraft). Click to check again"
-        } else {
-            "Add GridCraft to Claude Desktop and Cowork (claude_desktop_config.json). Claude must be closed while it is written: it rewrites the file when it quits"
-        };
-        if row_button(ui, Icon::Share, if connected { "Cowork Connected" } else { "Connect Cowork" }, tip, false).clicked() {
-            acts.push(Act::Cowork);
-        }
-        if row_button(
-            ui,
-            Icon::Book,
-            "Open Claude",
-            "Open Claude Desktop: background sessions are in its Code tab, under this workbook's folder",
-            false,
-        )
-        .clicked()
-        {
-            acts.push(Act::OpenClaude);
-        }
-        if mode == Mode::Background && !bg.session_id.is_empty() {
-            let cmd = runner::resume_command(&bg);
-            if row_button(
-                ui,
-                Icon::Copy,
-                "Copy Resume",
-                "Continue this conversation yourself (stop the background agent first: one writer per session)",
-                false,
-            )
-            .clicked()
-            {
-                acts.push(Act::Copy(cmd));
             }
         }
     });

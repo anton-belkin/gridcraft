@@ -36,6 +36,9 @@ fn main() {
     }
     gridcraft_agent_ui::install();
     gridcraft_agent_ui::set_server_url("http://127.0.0.1:7980/mcp".into());
+    if let Some(e) = gridcraft_agent::cowork::this_entry(7979) {
+        gridcraft_agent_ui::set_stdio_entry(e);
+    }
     let mut session = Session::new();
     match &input {
         Some(p) => {

@@ -840,36 +840,38 @@ fn stdio_server_answers_without_the_app() {
 
 #[test]
 fn connect_cowork_adds_one_entry_and_keeps_the_rest() {
-    use crate::cowork::{self, Outcome};
+    use crate::cowork::{self, Configured};
+    use std::path::Path;
     let dir = std::env::temp_dir().join(format!("gridcraft-cowork-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("claude_desktop_config.json");
-    let before = json!({"mcpServers": {"wordcraft": {"command": "/x/wordcraft", "args": ["--agent-stdio"]}}, "preferences": {"theme": "dark"}});
+    let before = json!({"globalShortcut": "Alt+Space", "mcpServers": {"wordcraft": {"command": "/x/wordcraft", "env": {"TOKEN": "secret"}}}, "preferences": {"theme": "dark"}});
     std::fs::write(&path, serde_json::to_string_pretty(&before).unwrap()).unwrap();
-    // Claude Desktop open: nothing is written (it would overwrite the edit when it quits).
-    cowork::set_thread_overrides(Some(path.clone()), Some(true));
-    assert_eq!(cowork::connect("/apps/gridcraft").unwrap(), Outcome::ClaudeRunning);
-    assert!(!cowork::connected());
-    // Closed: backed up, written, others kept.
-    cowork::set_thread_overrides(Some(path.clone()), Some(false));
-    let Outcome::Written { backup: Some(b), .. } = cowork::connect("/apps/gridcraft").unwrap() else { panic!("not written") };
-    assert_eq!(serde_json::from_str::<Value>(&std::fs::read_to_string(b).unwrap()).unwrap(), before);
+    let want = cowork::entry(Path::new("/Applications/GridCraft.app/Contents/MacOS/gridcraft"), 7979);
+    assert_eq!(want["args"], json!(["--agent-stdio", "--control", "127.0.0.1:7979"]));
+    assert_eq!(cowork::configured(&path, &want), Configured::Missing);
+    let backup = cowork::write(&path, &want).unwrap().unwrap();
+    assert!(backup.display().to_string().contains(".bak-gridcraft-"));
+    assert_eq!(serde_json::from_str::<Value>(&std::fs::read_to_string(backup).unwrap()).unwrap(), before);
     let after: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
-    assert_eq!(after["mcpServers"]["gridcraft"], json!({"command": "/apps/gridcraft", "args": ["--agent-stdio"]}));
+    assert_eq!(after["mcpServers"]["gridcraft"], want);
     assert_eq!(after["mcpServers"]["wordcraft"], before["mcpServers"]["wordcraft"]);
     assert_eq!(after["preferences"], before["preferences"]);
-    assert!(cowork::connected());
-    // Again: nothing to do, even with Claude open.
-    cowork::set_thread_overrides(Some(path.clone()), Some(true));
-    assert!(matches!(cowork::connect("/apps/gridcraft").unwrap(), Outcome::Unchanged { .. }));
-    // A broken file is left alone; the agent can't connect anything.
+    assert_eq!(after["globalShortcut"], before["globalShortcut"]);
+    assert_eq!(cowork::configured(&path, &want), Configured::Yes);
+    assert_eq!(cowork::configured(&path, &cowork::entry(Path::new("/elsewhere"), 7979)), Configured::Different);
+    // A broken file is left alone; a missing one is made.
     std::fs::write(&path, "{ not json").unwrap();
-    cowork::set_thread_overrides(Some(path.clone()), Some(false));
-    assert!(cowork::connect("/apps/gridcraft").is_err());
+    assert!(cowork::write(&path, &want).is_err());
     assert_eq!(std::fs::read_to_string(&path).unwrap(), "{ not json");
+    let fresh = dir.join("new/claude_desktop_config.json");
+    assert_eq!(cowork::configured(&fresh, &want), Configured::NoClaude);
+    assert_eq!(cowork::write(&fresh, &want).unwrap(), None);
+    assert_eq!(cowork::configured(&fresh, &want), Configured::Yes);
+    // Tests never reach the real file, and the agent can't connect anything.
+    assert!(cowork::config_path().is_none());
     let mut s = model();
     assert!(s.execute("agent.connectCowork", json!({"actor": "agent"})).is_err());
-    cowork::set_thread_overrides(None, None);
     let _ = std::fs::remove_dir_all(&dir);
 }

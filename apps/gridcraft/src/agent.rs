@@ -70,6 +70,10 @@ pub fn start(agent: Option<u16>, control: Option<u16>) {
     match gridcraft_agent::server::start(port, format!("127.0.0.1:{control}")) {
         Ok(port) => {
             gridcraft_agent_ui::set_server_url(format!("http://127.0.0.1:{port}/mcp"));
+            // What Claude Desktop starts to reach this app (Connect Cowork).
+            if let Some(e) = gridcraft_agent::cowork::this_entry(control) {
+                gridcraft_agent_ui::set_stdio_entry(e);
+            }
             // The background agent talks to this server, wherever it listens.
             gridcraft_agent::runner::set_config(gridcraft_agent::runner::Config {
                 mcp_url: format!("http://127.0.0.1:{port}/mcp"),

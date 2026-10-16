@@ -84,6 +84,14 @@ pub fn active_layer(s: &Session) -> Option<Arc<Layer>> {
     s.active().map(layer::get)
 }
 
+static LAST_AGENT_CALL: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// When an agent last called the layer (ms since the epoch; 0 for never), through MCP over HTTP
+/// or stdio alike.
+pub fn last_agent_call_ms() -> u64 {
+    LAST_AGENT_CALL.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 struct Keeper;
 static KEEPER: Keeper = Keeper;
 
@@ -109,7 +117,10 @@ fn is_view_only(id: &str) -> bool {
 }
 
 impl Observer for Keeper {
-    fn before(&self, s: &mut Session, id: &str, _params: &Json) {
+    fn before(&self, s: &mut Session, id: &str, params: &Json) {
+        if id.starts_with("agent.") && params.get("actor").and_then(Json::as_str) == Some("agent") {
+            LAST_AGENT_CALL.store(now_ms(), std::sync::atomic::Ordering::Relaxed);
+        }
         // A safe save that didn't finish puts the real workbook back first.
         safe::restore(s);
         BEFORE.with(|b| b.borrow_mut().push(wb_ptr(s)));
