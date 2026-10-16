@@ -33,6 +33,8 @@ pub mod runner;
 pub mod safe;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod server;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod stdio;
 pub mod stress;
 pub mod variants;
 

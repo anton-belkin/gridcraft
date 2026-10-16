@@ -814,19 +814,28 @@ fn questions_become_channel_events() {
 
 #[test]
 fn stdio_server_answers_without_the_app() {
-    // Port 1: nothing listens there, as when GridCraft isn't running.
-    let init = json!({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}});
-    let r = crate::channel::answer(1, &init.to_string(), &init).unwrap();
-    assert_eq!(r["result"]["serverInfo"]["name"], json!("gridcraft-agent"));
-    let list = json!({"jsonrpc": "2.0", "id": 2, "method": "tools/list"});
-    let r = crate::channel::answer(1, &list.to_string(), &list).unwrap();
-    assert!(r["result"]["tools"].as_array().unwrap().iter().any(|t| t["name"] == json!("wait_for_questions")));
-    let call = json!({"jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": {"name": "get_context", "arguments": {}}});
-    let r = crate::channel::answer(1, &call.to_string(), &call).unwrap();
-    assert_eq!(r["result"]["isError"], json!(true));
-    assert!(r["result"]["content"][0]["text"].as_str().unwrap().contains("isn't running"));
-    let note = json!({"jsonrpc": "2.0", "method": "notifications/initialized"});
-    assert!(crate::channel::answer(1, &note.to_string(), &note).is_none());
+    // Nothing listens on port 1, as when GridCraft isn't open.
+    let mut b = crate::stdio::Lazy::new("127.0.0.1:1");
+    let input = [
+        r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18"}}"#,
+        r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#,
+        r#"{"jsonrpc":"2.0","id":2,"method":"tools/list"}"#,
+        "not json",
+        r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"get_context","arguments":{}}}"#,
+    ]
+    .join("\n");
+    let out = std::sync::Arc::new(std::sync::Mutex::new(Vec::<u8>::new()));
+    let w: std::sync::Arc<std::sync::Mutex<dyn std::io::Write + Send>> = out.clone();
+    crate::stdio::serve(&mut b, input.as_bytes(), w).unwrap();
+    let text = String::from_utf8(out.lock().unwrap().clone()).unwrap();
+    let lines: Vec<Value> = text.lines().map(|l| serde_json::from_str(l).unwrap()).collect();
+    assert_eq!(lines.len(), 4, "the notification gets no reply");
+    assert_eq!(lines[0]["result"]["serverInfo"]["name"], json!("gridcraft-agent"));
+    assert!(lines[1]["result"]["tools"].as_array().unwrap().iter().any(|t| t["name"] == json!("wait_for_questions")));
+    assert_eq!(lines[2]["error"]["code"], json!(-32700));
+    assert_eq!(lines[3]["result"]["isError"], json!(true));
+    let msg = lines[3]["result"]["content"][0]["text"].as_str().unwrap();
+    assert!(msg.contains("not reachable") && msg.contains("Is GridCraft open?"), "{msg}");
 }
 
 #[test]

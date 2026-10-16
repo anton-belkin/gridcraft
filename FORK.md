@@ -37,7 +37,8 @@ lists them; there are about twenty lines, almost all insertions:
   and hidden defined names kept out of the Name Box (a fix Excel agrees with).
 - `crates/ui-egui/src/grid.rs`: `ext::paint_cells` after the built-in overlays, `ext::context_menu`
   at the end of the cell context menu.
-- `apps/gridcraft/src/main.rs`, `apps/gridcraft/Cargo.toml`: wiring (four lines).
+- `apps/gridcraft/src/main.rs`, `apps/gridcraft/Cargo.toml`: wiring (five lines; the first line of
+  `main` serves `--agent-stdio` before anything else starts).
 - `apps/gridcraft-web/src/main.rs`, `src/web.rs`, `Cargo.toml`: wiring (four lines: the module,
   `agent::start` before the app is built, the two dependencies).
 - `Cargo.toml`: the two workspace dependencies.
@@ -137,9 +138,11 @@ upstream. Each one accepted upstream removes its lines from the patch.
   alternatives, risk, history. Group names match WordCraft and DeckCraft (Agent, Client data,
   Connection, View, Share). The floating Agent button shows only when something waits and the tab
   isn't in view.
-- **Cowork and Claude Desktop** run local servers over stdio: `gridcraft --agent-stdio` answers the
-  handshake and the tool list itself (tools are there before the app is), forwards calls to the
-  running app and starts it when it isn't up. **Connect Cowork** writes the `gridcraft` entry into
+- **Cowork and Claude Desktop** run local servers over stdio: `gridcraft --agent-stdio [--control
+  127.0.0.1:7979]`, handled on the first line of `main` (no window, nothing but protocol on
+  stdout), speaks MCP on stdin/stdout and exits when stdin closes. It reaches the app through the
+  control channel, connected on the first tool call, so Claude can start first; while GridCraft is
+  closed, `initialize` and `tools/list` work and tools say it isn't reachable. **Connect Cowork** writes the `gridcraft` entry into
   `claude_desktop_config.json`, backing the file up and touching nothing else, and only while
   Claude Desktop is closed: it keeps the file in memory and writes it back when it quits.
 - **Analysis is deterministic.** The trace and the sensitivity are computed by the engine (the

@@ -17,6 +17,8 @@ use crate::commands::{bad, spec, str_p};
 
 /// The server's name in Claude Desktop (WordCraft and DeckCraft use `wordcraft` and `deckcraft`).
 pub const SERVER_NAME: &str = "gridcraft";
+/// The app's flag for the stdio MCP mode.
+pub const STDIO_FLAG: &str = "--agent-stdio";
 
 pub static SPECS: &[CommandSpec] = &[spec!(
     query "agent.connectCowork",

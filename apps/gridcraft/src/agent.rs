@@ -16,14 +16,11 @@ const CONTROL_PORT: u16 = 7979;
 pub fn take_args(args: Vec<String>) -> (Vec<String>, Option<u16>) {
     let mut port = std::env::var("GRIDCRAFT_AGENT_PORT").ok().and_then(|p| p.parse().ok()).or(Some(AGENT_PORT));
     let mut rest = Vec::with_capacity(args.len());
-    let mut stdio = false;
     let mut it = args.into_iter();
     while let Some(a) = it.next() {
         match a.as_str() {
             "--agent-port" => port = it.next().and_then(|p| p.parse().ok()),
             "--no-agent" => port = None,
-            // Claude Code spawns this as its channel server: bridge stdio to the running app.
-            "--agent-stdio" => stdio = true,
             // How the app brings the agent in: off, channel (my session), background.
             "--agent-mode" => {
                 if let Some(m) = it.next().as_deref().and_then(gridcraft_agent::runner::Mode::parse) {
@@ -39,10 +36,26 @@ pub fn take_args(args: Vec<String>) -> (Vec<String>, Option<u16>) {
             _ => rest.push(a),
         }
     }
-    if stdio {
-        std::process::exit(gridcraft_agent::channel::run_stdio(port.unwrap_or(AGENT_PORT)));
-    }
     (rest, port)
+}
+
+/// `gridcraft --agent-stdio [--control HOST:PORT] [--agent-port PORT]`: serve the agent layer's
+/// MCP over stdio (what Claude Desktop, Cowork and Claude Code start), reaching the running app
+/// through its control channel, and exit. Called first thing in `main`: no window, no logging,
+/// nothing but protocol on stdout.
+pub fn stdio_if_asked() {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    if !args.iter().any(|a| a == gridcraft_agent::cowork::STDIO_FLAG) {
+        return;
+    }
+    let after = |flag: &str| args.iter().position(|a| a == flag).and_then(|i| args.get(i + 1)).cloned();
+    let control = match after("--control") {
+        Some(v) if v.contains(':') => v,
+        Some(v) => format!("127.0.0.1:{v}"),
+        None => format!("127.0.0.1:{CONTROL_PORT}"),
+    };
+    let agent_port = after("--agent-port").and_then(|p| p.parse().ok()).unwrap_or(AGENT_PORT);
+    std::process::exit(gridcraft_agent::stdio::run(&control, agent_port));
 }
 
 /// The control port: the agent server needs one.

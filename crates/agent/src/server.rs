@@ -187,7 +187,7 @@ fn post_mcp(w: &mut TcpStream, req: &Request, control: &str, slot: &mut Option<R
     }
 }
 
-fn handle_any(b: &mut dyn Backend, msg: &Value) -> Option<Value> {
+pub(crate) fn handle_any(b: &mut dyn Backend, msg: &Value) -> Option<Value> {
     match msg {
         Value::Array(batch) => {
             let out: Vec<Value> = batch.iter().filter_map(|m| crate::mcp::handle(b, m)).collect();
