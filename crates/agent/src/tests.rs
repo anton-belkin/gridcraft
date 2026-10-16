@@ -8,6 +8,7 @@ use crate::layer;
 /// A small model: price × volume − costs, with a client name and a private volume.
 fn model() -> Session {
     crate::install();
+    test_keys();
     let mut s = Session::new();
     s.new_workbook();
     for (cell, input) in [
@@ -29,6 +30,11 @@ fn model() -> Session {
         s.execute("cell.set", json!({"cell": cell, "input": input})).unwrap();
     }
     s
+}
+
+/// Keys made by tests go to a temporary folder, never the user's key store.
+fn test_keys() {
+    crate::safe::set_thread_key_dir(Some(std::env::temp_dir().join(format!("gridcraft-agent-test-keys-{}", std::process::id()))));
 }
 
 fn num(s: &Session, cell: &str) -> f64 {
@@ -169,6 +175,7 @@ fn audit_records_who_changed_what() {
 #[test]
 fn every_agent_command_survives_empty_params() {
     crate::install();
+    test_keys();
     for spec in crate::commands::ALL.iter().flat_map(|s| s.iter()) {
         let mut s = Session::new();
         let _ = s.execute(spec.id, json!({}));
@@ -379,4 +386,111 @@ fn risk_matrix_ranks_impact_against_confidence() {
     assert!(scores.windows(2).all(|w| w[0] >= w[1]));
     assert_eq!(rows.last().unwrap()["cell"], json!("Sheet1!B2"));
     assert!(rows.iter().any(|x| x["impact"] == json!(1.0)));
+}
+
+/// A key folder of this test's own (keys never go near the workbook).
+fn key_dir(name: &str) -> std::path::PathBuf {
+    let d = std::env::temp_dir().join(format!("gridcraft-agent-keys-{}-{name}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&d);
+    crate::safe::set_thread_key_dir(Some(d.clone()));
+    d
+}
+
+fn xlsx_text(b64: &str) -> String {
+    // The parts are deflated: look at them through the reader instead of the raw bytes.
+    let bytes = gridcraft_engine::io::base64_decode(b64).unwrap();
+    let (wb, _) = gridcraft_engine::io::open_bytes("x.xlsx", &bytes).unwrap();
+    serde_json::to_string(&wb).unwrap()
+}
+
+#[test]
+fn safe_file_keeps_client_data_out_of_the_file() {
+    let mut s = model();
+    let keys = key_dir("safe");
+    s.execute("agent.private", json!({"range": "B1:B3"})).unwrap();
+    let on = s.execute("agent.safeMode", json!({})).unwrap();
+    let key_id = on["key"].as_str().unwrap().to_string();
+    assert!(keys.join(format!("{key_id}.key")).exists());
+    let b64 = s.execute("file.saveBytes", json!({})).unwrap()["base64"].as_str().unwrap().to_string();
+    // The document keeps its real values; the file has stand-ins, derived values included.
+    assert_eq!(num(&s, "B2"), 120.0);
+    assert_eq!(num(&s, "B6"), 600000.0);
+    let text = xlsx_text(&b64);
+    assert!(!text.contains("Acme Holding"), "client name in the file");
+    assert!(text.contains("{{private:B1}}"));
+    assert!(!text.contains("600000"), "derived revenue in the file");
+    // Opened here (the key is here): the real values are back, and nothing is dirty.
+    let mut t = Session::new();
+    t.execute("file.open", json!({"name": "book.xlsx", "base64": b64})).unwrap();
+    assert_eq!(num(&t, "B2"), 120.0);
+    assert_eq!(num(&t, "B6"), 600000.0);
+    assert!(!t.active().unwrap().is_dirty());
+    let l = layer::get(t.active().unwrap());
+    assert!(l.safe.as_ref().unwrap().sealed.is_none());
+    // Elsewhere (no key): stand-ins, locked, nothing to export; with the key back, unlocked.
+    crate::safe::set_thread_key_dir(Some(std::env::temp_dir().join(format!("gridcraft-agent-no-keys-{}", std::process::id()))));
+    let mut u = Session::new();
+    u.execute("file.open", json!({"name": "book.xlsx", "base64": b64})).unwrap();
+    assert_ne!(num(&u, "B2"), 120.0);
+    assert!(layer::get(u.active().unwrap()).safe.as_ref().unwrap().sealed.is_some());
+    assert!(u.execute("agent.exportExcel", json!({"path": "/tmp/never.xlsx"})).is_err());
+    assert!(u.execute("agent.safeMode", json!({"on": false})).is_err());
+    assert!(u.execute("agent.unlock", json!({})).is_err());
+    crate::safe::set_thread_key_dir(Some(keys.clone()));
+    assert_eq!(u.execute("agent.unlock", json!({})).unwrap()["cells"], json!(3));
+    assert_eq!(num(&u, "B6"), 600000.0);
+    // Only a person turns it off.
+    assert!(s.execute("agent.safeMode", json!({"on": false, "actor": "agent"})).is_err());
+    let _ = std::fs::remove_dir_all(&keys);
+}
+
+#[test]
+fn safe_save_to_disk_and_export_for_excel() {
+    let mut s = model();
+    let keys = key_dir("disk");
+    let dir = std::env::temp_dir().join(format!("gridcraft-agent-book-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("model.xlsx");
+    s.execute("agent.private", json!({"range": "B2"})).unwrap();
+    s.execute("agent.safeMode", json!({})).unwrap();
+    s.execute("file.saveAs", json!({"path": path.to_str().unwrap()})).unwrap();
+    let d = s.active().unwrap();
+    assert!(!d.is_dirty());
+    assert_eq!(num(&s, "B2"), 120.0);
+    // Saving again after an edit still writes a safe file.
+    s.execute("cell.set", json!({"cell": "B4", "input": 71})).unwrap();
+    s.execute("file.save", json!({})).unwrap();
+    assert!(!s.active().unwrap().is_dirty());
+    assert_eq!(num(&s, "B2"), 120.0);
+    // On disk: the stand-in, as anyone without the key sees it.
+    crate::safe::set_thread_key_dir(Some(std::env::temp_dir().join(format!("gridcraft-agent-no-keys-{}", std::process::id()))));
+    let mut v = Session::new();
+    v.execute("file.open", json!({"path": path.to_str().unwrap()})).unwrap();
+    assert_ne!(num(&v, "B2"), 120.0);
+    assert_eq!(num(&v, "B4"), 71.0);
+    crate::safe::set_thread_key_dir(Some(keys.clone()));
+    // The export for standard Excel has the real values and nothing sealed.
+    let r = s.execute("agent.exportExcel", json!({})).unwrap();
+    let out = r["path"].as_str().unwrap().to_string();
+    assert!(out.ends_with("model (Excel).xlsx"));
+    crate::safe::set_thread_key_dir(None);
+    let mut t = Session::new();
+    t.execute("file.open", json!({"path": out})).unwrap();
+    assert_eq!(num(&t, "B2"), 120.0);
+    assert!(layer::get(t.active().unwrap()).safe.is_none());
+    let _ = std::fs::remove_dir_all(&dir);
+    let _ = std::fs::remove_dir_all(&keys);
+}
+
+#[test]
+fn sealed_data_refuses_a_wrong_key_or_a_change() {
+    let k1 = [7u8; 32];
+    let k2 = [8u8; 32];
+    let mut sealed = crate::safe::seal_bytes(&k1, [1u8; 12], b"[{\"n\":120}]", 1).unwrap();
+    assert_eq!(crate::safe::open_bytes(&k1, &sealed).unwrap(), b"[{\"n\":120}]");
+    assert!(crate::safe::open_bytes(&k2, &sealed).is_err());
+    let mut data = gridcraft_engine::io::base64_decode(&sealed.data).unwrap();
+    data[0] ^= 1;
+    sealed.data = gridcraft_engine::io::base64_encode(&data);
+    assert!(crate::safe::open_bytes(&k1, &sealed).is_err());
 }

@@ -38,7 +38,7 @@ macro_rules! spec {
 pub(crate) use spec;
 
 /// Every command of the layer, by module.
-pub static ALL: &[&[CommandSpec]] = &[SPECS, crate::variants::SPECS, crate::stress::SPECS];
+pub static ALL: &[&[CommandSpec]] = &[SPECS, crate::variants::SPECS, crate::stress::SPECS, crate::safe::SPECS];
 
 pub static SPECS: &[CommandSpec] = &[
     // the reader's side
@@ -386,6 +386,7 @@ fn context(s: &mut Session, p: &Json) -> Result<Json> {
         "privateRanges": private,
         "privacyNote": "Cells in privateRanges hold client data. You see stand-in values there (same sign and magnitude), and everything computed from them is recalculated from the stand-ins: never quote these numbers as real. Formulas are real.",
         "inputs": inputs,
+        "safeFile": l.safe.as_ref().map(|x| json!({"on": true, "locked": x.sealed.is_some()})),
         "openQuestions": l.questions.iter().filter(|q| q.status != QuestionStatus::Answered).count(),
         "notes": l.notes.len(),
         "log": l.log.iter().rev().take(20).collect::<Vec<_>>(),

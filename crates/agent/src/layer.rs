@@ -200,6 +200,28 @@ pub struct VariantSet {
     pub at: u64,
 }
 
+/// Real values of client data, encrypted (AES-256-CTR, HMAC-SHA256) under a key kept outside
+/// the workbook.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct Sealed {
+    pub alg: String,
+    pub nonce: String,
+    pub data: String,
+    pub mac: String,
+    /// How many cells are sealed.
+    pub cells: usize,
+}
+
+/// Safe file mode: saves write stand-ins for client data and seal the real values.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct SafeFile {
+    /// The key's id in the local key store (never the key).
+    pub key_id: String,
+    /// Present in the file; in memory only while the key isn't available here.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sealed: Option<Sealed>,
+}
+
 /// Most log entries kept (oldest dropped first).
 pub const MAX_LOG: usize = 5_000;
 
@@ -226,6 +248,8 @@ pub struct Layer {
     pub log: Vec<LogEntry>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub variants: Vec<VariantSet>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub safe: Option<SafeFile>,
     /// Bumped on every change (not saved meaningfully; lets views cache).
     #[serde(skip)]
     pub revision: u64,
@@ -251,7 +275,7 @@ impl Layer {
     }
 
     pub fn is_empty(&self) -> bool {
-        self.anchors.is_empty() && self.log.is_empty()
+        self.anchors.is_empty() && self.log.is_empty() && self.safe.is_none()
     }
 
     /// Anchors nothing refers to any more.

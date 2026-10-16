@@ -340,6 +340,7 @@ fn cell_tab(st: &mut AgentUi, app: &SheetApp, ui: &mut Ui, l: &Layer, t: &Tokens
             acts.push(Act::Run("agent.private", json!({"range": here.a1(), "on": !is_private})));
         }
     });
+    safe_file(ui, d, l, t, p, acts);
     ui.horizontal_wrapped(|ui| {
         ui.label(RichText::new("Heat map").small());
         for (h, name) in [(Heat::Off, "Off"), (Heat::Confidence, "Confidence"), (Heat::Impact, "Impact on this cell")] {
@@ -774,6 +775,53 @@ fn risk_tab(st: &mut AgentUi, app: &SheetApp, ui: &mut Ui, l: &Layer, t: &Tokens
             ui.end_row();
         }
     });
+}
+
+/// Safe file mode: what a save writes, the export for standard Excel, unlocking.
+fn safe_file(ui: &mut Ui, d: &gridcraft_engine::DocState, l: &Layer, t: &Tokens, p: &Palette, acts: &mut Vec<Act>) {
+    let private = analysis::private_cells(&d.wb, l).len();
+    ui.add_space(4.0);
+    match &l.safe {
+        Some(s) if s.sealed.is_some() => {
+            card(ui, t, p.material, |ui| {
+                ui.label(RichText::new("Client data locked").color(p.material).small().strong());
+                ui.label(RichText::new(format!("This is a safe file: its {} client cells show stand-ins. Their real values are sealed under a key that isn't on this computer.", s.sealed.as_ref().map_or(0, |x| x.cells))).small());
+                if ui.small_button("Try to unlock").clicked() {
+                    acts.push(Act::Run("agent.unlock", json!({})));
+                }
+            });
+        }
+        Some(s) => {
+            card(ui, t, p.private, |ui| {
+                ui.label(RichText::new("Safe file · on").color(p.private).small().strong());
+                ui.label(RichText::new(format!("Saving writes the {private} client cells as stand-ins (everything computed from them too). The real values are sealed in the file; the key stays on this computer ({}).", s.key_id)).small());
+                ui.horizontal_wrapped(|ui| {
+                    if ui
+                        .small_button("Export for standard Excel")
+                        .on_hover_text("A copy beside the workbook with the real values and nothing sealed")
+                        .clicked()
+                    {
+                        acts.push(Act::Run("agent.exportExcel", json!({})));
+                    }
+                    if ui.small_button("Turn off").clicked() {
+                        acts.push(Act::Run("agent.safeMode", json!({"on": false})));
+                    }
+                });
+            });
+        }
+        None if private > 0 => {
+            ui.horizontal_wrapped(|ui| {
+                if ui
+                    .button("Safe file: save client data as stand-ins")
+                    .on_hover_text("The real values are sealed in the file under a key kept on this computer")
+                    .clicked()
+                {
+                    acts.push(Act::Run("agent.safeMode", json!({"on": true})));
+                }
+            });
+        }
+        None => {}
+    }
 }
 
 fn history_tab(app: &SheetApp, ui: &mut Ui, l: &Layer, t: &Tokens, p: &Palette, acts: &mut Vec<Act>) {

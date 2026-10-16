@@ -22,6 +22,7 @@ pub mod commands;
 pub mod layer;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod mcp;
+pub mod safe;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod server;
 pub mod stress;
@@ -82,11 +83,16 @@ fn is_view_only(id: &str) -> bool {
 
 impl Observer for Keeper {
     fn before(&self, s: &mut Session, id: &str, _params: &Json) {
+        // A safe save that didn't finish puts the real workbook back first.
+        safe::restore(s);
         BEFORE.with(|b| b.borrow_mut().push(wb_ptr(s)));
-        // Write the layer into the workbook just before it is saved.
-        if matches!(id, "file.save" | "file.saveAs" | "file.saveBytes")
-            && let Some(d) = s.active_mut()
-        {
+        // Write the layer into the workbook just before it is saved; in safe file mode, save a
+        // copy with stand-ins for client data and the real values sealed instead.
+        let saving = matches!(id, "file.save" | "file.saveAs" | "file.saveBytes");
+        if saving && safe::swap_in(s) {
+            return;
+        }
+        if saving && let Some(d) = s.active_mut() {
             let l = layer::get(d);
             let has_part = layer::read_from(&d.wb) != Layer::default();
             if !l.is_empty() || has_part {
@@ -97,6 +103,14 @@ impl Observer for Keeper {
 
     fn after(&self, s: &mut Session, id: &str, params: &Json, result: &Result<Json>) {
         let before = BEFORE.with(|b| b.borrow_mut().pop()).flatten();
+        safe::restore(s);
+        if id == "file.open"
+            && result.is_ok()
+            && let Some(d) = s.active_mut()
+            && let Err(e) = safe::unseal(d)
+        {
+            log::warn!("safe file: {e}; the client data stays locked (stand-ins)");
+        }
         let Some(d) = s.active_mut() else { return };
         anchor::refresh(d);
         let changed = result.is_ok() && before.is_some_and(|(uid, ptr)| uid == d.uid && ptr != Arc::as_ptr(&d.wb) as usize);

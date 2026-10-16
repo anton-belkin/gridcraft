@@ -13,7 +13,7 @@ before changing anything outside the agent crates.
 
 | Path | What | Upstream? |
 | --- | --- | --- |
-| `crates/agent/` (`gridcraft-agent`) | The layer: data model, anchors, storage in the `.xlsx`, `agent.*` commands, privacy masking, trace, sensitivity, alternatives and calculation methods (`variants.rs`), worst and best combinations (`stress.rs`), the in-app MCP server | fork only |
+| `crates/agent/` (`gridcraft-agent`) | The layer: data model, anchors, storage in the `.xlsx`, `agent.*` commands, privacy masking, trace, sensitivity, alternatives and calculation methods (`variants.rs`), worst and best combinations and the risk matrix (`stress.rs`), safe file mode (`safe.rs`), the in-app MCP server | fork only |
 | `crates/agent-ui/` (`gridcraft-agent-ui`) | The Agent pane, cell badges, heat maps, hover card with the tornado chart, context-menu items; `examples/agent_snapshot.rs` renders it offscreen | fork only |
 | `apps/gridcraft/src/agent.rs` | Starts the layer in the desktop app (`--agent-port`, `--no-agent`) | fork only |
 | `agent-layer/` | The agent's skill, the rebase script | fork only |
@@ -57,9 +57,22 @@ upstream. Each one accepted upstream removes its lines from the patch.
 - **Privacy is enforced where the agent reads.** The MCP surface has no tool that returns real
   values: every read goes through a copy of the workbook with private constants replaced by
   stand-ins (same sign and magnitude, stable per cell) and everything recalculated from them.
-  Writes to private cells are refused. Only a person can lift a privacy mark. Not yet covered:
-  the control port (7979) and the `.xlsx` on disk still hold real data. The "safe file" mode in
-  the concept is the next step.
+  Writes to private cells are refused. Only a person can lift a privacy mark. Not covered: the
+  control port (7979) still reaches real data.
+- **Safe file mode: privacy at rest.** With it on, every save (`file.save`, `file.saveAs`,
+  `file.saveBytes`) writes the same masked workbook the agent sees (stand-ins, derived values
+  recalculated from them) and seals the real values in the layer: AES-256-CTR + HMAC-SHA256
+  (the workspace's `aes`/`sha2`, nothing new but `getrandom`) under a random key that never enters
+  the file. The key lives in a key folder outside the workbook's (`~/Library/Application
+  Support/GridCraft/agent-keys` on macOS, `GRIDCRAFT_AGENT_KEYS` to move it; the macOS keychain
+  with `GRIDCRAFT_AGENT_KEYCHAIN=1`). Opening the file where the key is restores the real values;
+  anywhere else it opens with the stand-ins, "locked". "Export for standard Excel" writes the real
+  values with nothing sealed. The document in memory always keeps the real values: the observer
+  swaps a safe copy in for the save only and puts the real workbook back after it (and before the
+  next command, should the save have failed). Only a person turns the mode off; in the browser
+  there is no key store, so a save there writes stand-ins only. Honest limit: an agent with a
+  shell on the same computer as the key folder could read the key; the mode protects the file
+  wherever it travels, not against a local agent that ignores its instructions.
 - **The MCP server runs inside the app** (`http://127.0.0.1:7980/mcp`, Streamable HTTP, JSON
   responses) and reaches the document through the app's own loopback control channel. Connecting an
   agent is one line of config. `/events` streams new questions, one JSON line each, for an agent's
@@ -128,7 +141,9 @@ in the `.xlsx`; alternatives in the document ("A or B?", Variants tab, switch an
 calculation methods side by side (simple vs exact, material differences flagged on the results);
 multi-dimensional analysis (the worst and best combination of an output's inputs, against the
 single moves added up); the risk matrix (each input's impact on an output against the agent's
-confidence in it, Risk tab).
+confidence in it, Risk tab); safe file mode (client data saved as stand-ins, real values sealed
+under a key kept on this computer; export for standard Excel). `agent-layer/demo/build-demo.sh`
+builds a demo workbook with all of it and renders each feature.
 
-Next: export to a self-contained web page (WASM, prepared answers only), a safe file mode for privacy, then WordCraft and DeckCraft (Excel → slide links
-with a back-reference in the workbook), built the same way.
+Next: export to a self-contained web page (WASM, prepared answers only), then WordCraft and
+DeckCraft (Excel → slide links with a back-reference in the workbook), built the same way.
