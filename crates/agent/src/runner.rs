@@ -30,13 +30,15 @@ use crate::layer::{self, QuestionStatus};
 /// How the app brings the agent in.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Mode {
-    /// The user connects an agent themselves (MCP, `/events`).
+    /// The user connects an agent themselves (MCP: Claude Code, Cowork, any client).
     #[default]
-    Off,
-    /// Questions go to the user's interactive session as channel events.
+    Manual,
+    /// Questions go to the user's interactive Claude Code session as channel events.
     Channel,
     /// The app runs a background agent per document.
     Background,
+    /// No agent: tools refuse, nothing is sent out.
+    Off,
 }
 
 static MODE: AtomicU8 = AtomicU8::new(0);
@@ -45,7 +47,8 @@ pub fn mode() -> Mode {
     match MODE.load(Ordering::Relaxed) {
         1 => Mode::Channel,
         2 => Mode::Background,
-        _ => Mode::Off,
+        3 => Mode::Off,
+        _ => Mode::Manual,
     }
 }
 
@@ -53,9 +56,10 @@ pub fn mode() -> Mode {
 pub fn set_mode(m: Mode) {
     MODE.store(
         match m {
-            Mode::Off => 0,
+            Mode::Manual => 0,
             Mode::Channel => 1,
             Mode::Background => 2,
+            Mode::Off => 3,
         },
         Ordering::Relaxed,
     );
@@ -65,19 +69,32 @@ pub fn set_mode(m: Mode) {
 }
 
 impl Mode {
+    pub const ALL: [Mode; 4] = [Mode::Manual, Mode::Channel, Mode::Background, Mode::Off];
+
     pub fn parse(s: &str) -> Option<Mode> {
         match s.trim().to_ascii_lowercase().as_str() {
-            "off" | "none" => Some(Mode::Off),
+            "connect" | "manual" | "mcp" => Some(Mode::Manual),
             "channel" | "session" | "my-session" => Some(Mode::Channel),
             "background" | "bg" => Some(Mode::Background),
+            "off" | "none" => Some(Mode::Off),
             _ => None,
+        }
+    }
+    /// The mode's name in the list, and one line of what it means.
+    pub fn label(self) -> (&'static str, &'static str) {
+        match self {
+            Mode::Manual => ("I connect my agent", "MCP: Claude Code, Cowork, any client"),
+            Mode::Channel => ("Send to my Claude Code session", "Channels: questions arrive in your open session"),
+            Mode::Background => ("Background agent", "GridCraft runs claude itself for this workbook"),
+            Mode::Off => ("Off", "No agent: tools refuse, nothing is sent"),
         }
     }
     pub fn id(self) -> &'static str {
         match self {
-            Mode::Off => "off",
+            Mode::Manual => "connect",
             Mode::Channel => "channel",
             Mode::Background => "background",
+            Mode::Off => "off",
         }
     }
 }
@@ -283,7 +300,7 @@ fn seed(l: &layer::Layer) -> String {
         let who = if e.actor == layer::Actor::Agent { "agent" } else { "reader" };
         s.push_str(&format!("- {who} {}: {}\n", e.kind, short(&e.text, 200)));
     }
-    let open = l.questions.iter().filter(|q| matches!(q.status, QuestionStatus::Pending | QuestionStatus::Working)).count();
+    let open = l.questions.iter().filter(|q| matches!(q.status, QuestionStatus::Pending | QuestionStatus::Working) && !q.is_ping()).count();
     s.push_str(&format!("{open} question(s) are open. Call get_context before anything else.\n"));
     s
 }
@@ -411,6 +428,12 @@ pub fn reset(s: &Session) -> Result<Status, String> {
 
 /// The text a question is sent as.
 pub fn question_text(s: &Session, q: &Json) -> String {
+    if q.get("kind").and_then(Json::as_str) == Some(crate::layer::PING) {
+        let id = q.get("id").and_then(Json::as_str).unwrap_or("");
+        return format!(
+            "Connection check from GridCraft (question {id}, kind ping): answer it at once with answer_question, text \"here\". Don't investigate."
+        );
+    }
     let title = s.doc().map(|d| d.display_title()).unwrap_or_default();
     let get = |k: &str| q.get(k).and_then(Json::as_str).unwrap_or("").to_string();
     let mut t = format!("A question was asked in the workbook “{title}”, on {}", get("range"));
@@ -521,7 +544,7 @@ use gridcraft_engine::cmd::CommandSpec;
 use crate::commands::{bad, spec, str_p};
 
 pub static SPECS: &[CommandSpec] = &[
-    spec!(query "agent.agentMode", "Agent Mode", "{mode?: off|channel|background} → the mode (how the app brings the agent in: not at all, into your own Claude Code session, or as a background agent per document)", mode_cmd),
+    spec!(query "agent.agentMode", "Agent Mode", "{mode?: connect|channel|background|off} → the mode (how the agent comes in: you connect it over MCP, into your own Claude Code session, as a background agent per document, or not at all)", mode_cmd),
     spec!(query "agent.agentStart", "Start Background Agent", "{} — starts (or resumes) the active document's background agent", start_cmd),
     spec!(query "agent.agentStop", "Stop Background Agent", "{}", stop_cmd),
     spec!(query "agent.agentReset", "New Agent Session", "{} — a fresh session for the active document, started from a summary of its history", reset_cmd),
@@ -561,7 +584,7 @@ fn here(s: &Session) -> gridcraft_engine::Result<(u64, String)> {
 fn mode_cmd(s: &mut Session, p: &Json) -> gridcraft_engine::Result<Json> {
     if let Some(m) = str_p(p, "mode") {
         refuse_agent(p, "agent.agentMode")?;
-        set_mode(Mode::parse(m).ok_or_else(|| bad("agent.agentMode", "`mode` is off, channel or background"))?);
+        set_mode(Mode::parse(m).ok_or_else(|| bad("agent.agentMode", "`mode` is connect, channel, background or off"))?);
     }
     let (uid, session) = here(s)?;
     Ok(status_json(uid, &session))
@@ -591,4 +614,96 @@ fn reset_cmd(s: &mut Session, p: &Json) -> gridcraft_engine::Result<Json> {
 fn status_cmd(s: &mut Session, _p: &Json) -> gridcraft_engine::Result<Json> {
     let (uid, session) = here(s)?;
     Ok(status_json(uid, &session))
+}
+
+// ---------------------------------------------------------------- is anyone listening?
+
+/// Signs of a listener, without asking.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Signals {
+    /// `/events` streams open now.
+    pub event_streams: usize,
+    /// Channel streams of Claude Code sessions open now (counted in "my session" mode).
+    pub channel_streams: usize,
+    /// The last time an agent waited for questions (`wait_for_questions`), ms since the epoch.
+    pub last_wait_ms: u64,
+    /// The background agent's process is alive.
+    pub background: bool,
+    /// The last call of an agent tool, ms since the epoch.
+    pub last_call_ms: u64,
+}
+
+/// What the Agent tab says about the connection.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Presence {
+    /// A check was answered (in `latency_ms`), `checked_ms` ago.
+    Answering {
+        checked_ms: u64,
+        latency_ms: u64,
+    },
+    /// A check is out, `since_ms`.
+    Checking {
+        since_ms: u64,
+    },
+    /// A check went unanswered for a minute.
+    NoAnswer {
+        asked_ms: u64,
+    },
+    /// No check, but something listens: what.
+    Listener(Vec<&'static str>),
+    Nobody,
+}
+
+/// A check unanswered for this long is "no answer".
+pub const PING_TIMEOUT_MS: u64 = 60_000;
+/// An answered check counts for this long.
+const PING_FRESH_MS: u64 = 10 * 60_000;
+
+/// What the signals and the last check say.
+pub fn classify(ping: Option<layer::Ping>, s: &Signals, mode: Mode, now: u64) -> Presence {
+    match ping {
+        Some(layer::Ping::Waiting { asked_at }) if now.saturating_sub(asked_at) >= PING_TIMEOUT_MS => {
+            return Presence::NoAnswer { asked_ms: now.saturating_sub(asked_at) };
+        }
+        Some(layer::Ping::Waiting { asked_at }) => return Presence::Checking { since_ms: now.saturating_sub(asked_at) },
+        Some(layer::Ping::Answered { asked_at, answered_at }) if now.saturating_sub(answered_at) < PING_FRESH_MS => {
+            return Presence::Answering { checked_ms: now.saturating_sub(answered_at), latency_ms: answered_at.saturating_sub(asked_at) };
+        }
+        _ => {}
+    }
+    let mut what = vec![];
+    if s.event_streams > 0 {
+        what.push("event stream");
+    }
+    if s.channel_streams > 0 && mode == Mode::Channel {
+        what.push("Claude Code channel");
+    }
+    if s.last_wait_ms > 0 && now.saturating_sub(s.last_wait_ms) < 60_000 {
+        what.push("waiting for questions");
+    }
+    if s.background {
+        what.push("background agent");
+    }
+    if s.last_call_ms > 0 && now.saturating_sub(s.last_call_ms) < 120_000 {
+        what.push("tool calls");
+    }
+    if what.is_empty() { Presence::Nobody } else { Presence::Listener(what) }
+}
+
+/// The signals for the document `uid` now.
+pub fn signals(uid: u64) -> Signals {
+    let (event_streams, channel_streams) = crate::server::streams();
+    Signals {
+        event_streams,
+        channel_streams,
+        last_wait_ms: crate::commands::last_wait_ms(),
+        background: status(uid).is_some_and(|s| s.running),
+        last_call_ms: crate::last_agent_call_ms(),
+    }
+}
+
+/// Where the connection of the active document stands.
+pub fn presence(s: &Session) -> Presence {
+    let Some(d) = s.active() else { return Presence::Nobody };
+    classify(layer::get(d).ping(), &signals(d.uid), mode(), crate::now_ms())
 }

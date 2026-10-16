@@ -12,6 +12,17 @@ use std::sync::{Arc, Mutex};
 use gridcraft_mcp::{Backend, Remote};
 use serde_json::{Value, json};
 
+/// The client this stdio server serves (`clientInfo.name` of its `initialize`).
+static CLIENT: Mutex<Option<String>> = Mutex::new(None);
+
+/// The client's name, once it said hello.
+pub fn client_name() -> Option<String> {
+    match CLIENT.lock() {
+        Ok(g) => g.clone(),
+        Err(p) => p.into_inner().clone(),
+    }
+}
+
 /// A control-channel backend that connects on first use, and again after the app went away.
 pub struct Lazy {
     addr: String,
@@ -56,7 +67,15 @@ pub fn serve(b: &mut dyn Backend, input: impl BufRead, output: Arc<Mutex<dyn Wri
             continue;
         }
         let reply = match serde_json::from_str::<Value>(&line) {
-            Ok(msg) => crate::server::handle_any(b, &msg),
+            Ok(msg) => {
+                if msg.get("method").and_then(Value::as_str) == Some("initialize") {
+                    let name = msg.pointer("/params/clientInfo/name").and_then(Value::as_str).unwrap_or("unknown").to_string();
+                    if let Ok(mut g) = CLIENT.lock() {
+                        *g = Some(name);
+                    }
+                }
+                crate::server::handle_any(b, &msg)
+            }
             Err(_) => Some(json!({"jsonrpc": "2.0", "id": null, "error": {"code": -32700, "message": "parse error"}})),
         };
         if let Some(v) = reply {

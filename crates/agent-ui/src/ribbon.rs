@@ -83,6 +83,7 @@ fn tall_button(
     if let Some((s, c)) = sub {
         ui.painter().text(pos2(rect.center().x, y), Align2::CENTER_CENTER, s, theme::ui_bold(10.0), c);
     }
+    resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, enabled, label.replace('\n', " ")));
     resp.on_hover_text(tip)
 }
 
@@ -108,30 +109,6 @@ fn sparkle(p: &egui::Painter, r: Rect, color: Color32) {
     star(c + vec2(o * 0.95, -o * 0.75), r.width() * 0.16, r.width() * 0.05);
 }
 
-/// Claude Desktop's plug: a box with a plus.
-#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
-fn plug(p: &egui::Painter, r: Rect, color: Color32) {
-    let b = r.shrink(r.width() * 0.18);
-    p.rect_stroke(b, 3.0, Stroke::new(1.6, color), egui::StrokeKind::Inside);
-    let c = b.center();
-    let s = b.width() * 0.25;
-    p.line_segment([c - vec2(s, 0.0), c + vec2(s, 0.0)], Stroke::new(1.8, color));
-    p.line_segment([c - vec2(0.0, s), c + vec2(0.0, s)], Stroke::new(1.8, color));
-}
-
-/// "just now", "5 min ago", "2 h ago".
-#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
-fn ago(ms: u64) -> String {
-    let s = gridcraft_agent::now_ms().saturating_sub(ms) / 1000;
-    if s < 60 {
-        "just now".into()
-    } else if s < 3600 {
-        format!("{} min ago", s / 60)
-    } else {
-        format!("{} h ago", s / 3600)
-    }
-}
-
 /// A compact ribbon row: 14 px icon and a label (three fit over a group's caption).
 fn row_button(ui: &mut Ui, icon: Icon, label: &str, tip: &str, dropdown: bool) -> Response {
     let t = Tokens::get(ui.ctx());
@@ -153,6 +130,7 @@ fn row_button(ui: &mut Ui, icon: Icon, label: &str, tip: &str, dropdown: bool) -
             t.text_dim,
         );
     }
+    resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, label));
     resp.on_hover_text(tip)
 }
 
@@ -192,7 +170,7 @@ pub(crate) fn counts(app: &SheetApp) -> (usize, usize) {
     let Some(d) = app.session.active() else { return (0, 0) };
     let l = layer::get(d);
     let ready = l.questions.iter().filter(|q| q.status == QuestionStatus::Answered && !q.seen).count();
-    let waiting = l.questions.iter().filter(|q| matches!(q.status, QuestionStatus::Pending | QuestionStatus::Working)).count();
+    let waiting = l.questions.iter().filter(|q| matches!(q.status, QuestionStatus::Pending | QuestionStatus::Working) && !q.is_ping()).count();
     (ready, waiting)
 }
 
@@ -201,8 +179,8 @@ fn status(app: &SheetApp, t: &Tokens, p: &crate::Palette) -> (String, Color32) {
     let Some(d) = app.session.active() else { return ("idle".into(), t.text_disabled) };
     let l = layer::get(d);
     let ready = l.questions.iter().filter(|q| q.status == QuestionStatus::Answered && !q.seen).count();
-    let working = l.questions.iter().filter(|q| q.status == QuestionStatus::Working).count();
-    let waiting = l.questions.iter().filter(|q| q.status == QuestionStatus::Pending).count();
+    let working = l.questions.iter().filter(|q| q.status == QuestionStatus::Working && !q.is_ping()).count();
+    let waiting = l.questions.iter().filter(|q| q.status == QuestionStatus::Pending && !q.is_ping()).count();
     if ready > 0 {
         (format!("{ready} ready"), p.answered)
     } else if working > 0 {
@@ -229,6 +207,10 @@ enum Act {
     VoiceModel(Option<craft_voice::Model>),
     #[cfg(not(target_arch = "wasm32"))]
     VoiceToggle,
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    Message(String, String),
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    OpenClaude,
 }
 
 pub(crate) fn show(st: &mut AgentUi, app: &mut SheetApp, ui: &mut Ui) {
@@ -398,9 +380,25 @@ pub(crate) fn show(st: &mut AgentUi, app: &mut SheetApp, ui: &mut Ui) {
             }
             Act::Cowork(entry) => {
                 #[cfg(not(target_arch = "wasm32"))]
-                gridcraft_agent::cowork::connect(entry);
+                {
+                    gridcraft_agent::cowork::connect(entry);
+                    let st = gridcraft_agent::cowork::state_json(&gridcraft_agent::cowork::state());
+                    let msg = st.get("message").and_then(|m| m.as_str()).unwrap_or("").to_string();
+                    if !msg.is_empty() {
+                        app.message = Some(("Connect Cowork".into(), msg));
+                    }
+                }
                 #[cfg(target_arch = "wasm32")]
                 let _ = entry;
+            }
+            Act::Message(title, text) => app.message = Some((title, text)),
+            Act::OpenClaude => {
+                #[cfg(target_os = "macos")]
+                {
+                    let _ = std::process::Command::new("/usr/bin/open").args(["-a", "Claude"]).spawn();
+                }
+                app.toast =
+                    Some(("Claude Desktop: the session is in its Code tab, under this workbook's folder".into(), gridcraft_ui_egui::now_ms()));
             }
             Act::Share(path) => match app.run("agent.exportHtml", json!({"path": path})) {
                 Ok(_) => app.toast = Some((format!("Saved {path}"), gridcraft_ui_egui::now_ms())),
@@ -426,10 +424,81 @@ fn connection(_app: &SheetApp, ui: &mut Ui, t: &Tokens, _p: &crate::Palette, _re
     });
 }
 
+/// The connection's state as a drawn mark: filled (answering), half (a listener), ring (nobody),
+/// cross (no answer).
+#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+#[derive(Clone, Copy, PartialEq)]
+enum Mark {
+    Full,
+    Half,
+    Ring,
+    Cross,
+}
+
+#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+fn mark(p: &egui::Painter, c: egui::Pos2, r: f32, m: Mark, color: Color32) {
+    match m {
+        Mark::Full => {
+            p.circle_filled(c, r, color);
+        }
+        Mark::Half => {
+            p.circle_stroke(c, r - 0.6, Stroke::new(1.4, color));
+            let pts: Vec<egui::Pos2> = (0..=16)
+                .map(|i| {
+                    let a = std::f32::consts::FRAC_PI_2 + std::f32::consts::PI * i as f32 / 16.0;
+                    c + vec2(a.cos(), a.sin()) * r
+                })
+                .collect();
+            p.add(egui::Shape::convex_polygon(pts, color, Stroke::NONE));
+        }
+        Mark::Ring => {
+            p.circle_stroke(c, r - 0.6, Stroke::new(1.4, color));
+        }
+        Mark::Cross => {
+            let d = r * 0.8;
+            p.line_segment([c - vec2(d, d), c + vec2(d, d)], Stroke::new(2.0, color));
+            p.line_segment([c + vec2(-d, d), c + vec2(d, -d)], Stroke::new(2.0, color));
+        }
+    }
+}
+
+/// "12 s", "3 min", "2 h".
+#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+fn span(ms: u64) -> String {
+    let s = ms / 1000;
+    if s < 60 {
+        format!("{s} s")
+    } else if s < 3600 {
+        format!("{} min", s / 60)
+    } else {
+        format!("{} h", s / 3600)
+    }
+}
+
+/// The status: a mark, one line and a sub-line; the details on hover.
+#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+fn status_block(ui: &mut Ui, m: Mark, color: Color32, line: &str, sub: &str, tip: &str) {
+    let t = Tokens::get(ui.ctx());
+    let big = theme::ui_bold(12.5);
+    let small = theme::ui_font(10.5);
+    let w = ui
+        .painter()
+        .layout_no_wrap(line.to_string(), big.clone(), t.text)
+        .size()
+        .x
+        .max(ui.painter().layout_no_wrap(sub.to_string(), small.clone(), t.text).size().x)
+        + 24.0;
+    let (rect, resp) = ui.allocate_exact_size(vec2(w, 34.0), Sense::hover());
+    mark(ui.painter(), pos2(rect.left() + 8.0, rect.top() + 9.0), 5.5, m, color);
+    ui.painter().text(pos2(rect.left() + 20.0, rect.top() + 9.0), Align2::LEFT_CENTER, line, big, t.text);
+    ui.painter().text(pos2(rect.left() + 20.0, rect.top() + 25.0), Align2::LEFT_CENTER, sub, small, t.text_dim);
+    resp.on_hover_text(tip);
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 fn connection(app: &SheetApp, ui: &mut Ui, t: &Tokens, p: &crate::Palette, read_only: bool, acts: &mut Vec<Act>) {
     use gridcraft_agent::cowork::{self, Configured, State};
-    use gridcraft_agent::runner::{self, Mode};
+    use gridcraft_agent::runner::{self, Mode, Presence};
     if read_only {
         column(ui, |ui| {
             status_line(
@@ -442,106 +511,144 @@ fn connection(app: &SheetApp, ui: &mut Ui, t: &Tokens, p: &crate::Palette, read_
         return;
     }
     let Some(d) = app.session.active() else { return };
-    // Connect Cowork: GridCraft in Claude Desktop's MCP servers.
+    let mode = runner::mode();
+    let url = crate::server_url().unwrap_or("http://127.0.0.1:7980/mcp").to_string();
+    let base = url.trim_end_matches("/mcp").to_string();
+    let bg = runner::status(d.uid).unwrap_or_default();
+    let session = if bg.session_id.is_empty() { layer::get(d).agent_session.clone() } else { bg.session_id.clone() };
     let entry = crate::stdio_entry();
     let configured = match (&entry, cowork::config_path()) {
         (Some(e), Some(path)) => cowork::configured(&path, e),
         _ => Configured::NoClaude,
     };
-    let state = cowork::state();
-    let (sub, color) = match (&state, &configured) {
-        (State::Waiting, _) => ("quit Claude (⌘Q)".to_string(), p.pending),
-        (State::Done { .. }, _) => ("open Claude".to_string(), p.answered),
-        (State::Failed(_), _) => ("failed".to_string(), p.material),
-        (_, Configured::Yes) => ("connected".to_string(), p.answered),
-        (_, Configured::Different) => ("other build".to_string(), p.pending),
-        _ => ("not set up".to_string(), t.text_disabled),
+    let cowork_state = cowork::state();
+    let cowork_text = match (&cowork_state, &configured) {
+        (State::Waiting, _) => "waiting: quit Claude (⌘Q)",
+        (State::Done { .. }, _) => "added: open Claude",
+        (State::Failed(_), _) => "failed",
+        (_, Configured::Yes) => "connected",
+        (_, Configured::Different) => "another build is connected",
+        _ => "not set up",
     };
-    let tip = match &state {
-        State::Waiting => "Claude Desktop rewrites its settings when it quits, so GridCraft waits: quit Claude with ⌘Q, GridCraft adds itself, then open Claude again.".to_string(),
-        State::Done { backup } => format!(
-            "Added to Claude Desktop{}. Open Claude (or quit it with ⌘Q and open it again): the gridcraft tools appear in Cowork and chats.",
-            backup.as_ref().map(|b| format!(" (old settings saved as {})", b.display())).unwrap_or_default()
-        ),
-        State::Failed(e) => e.clone(),
-        State::Idle => "Add GridCraft to Claude Desktop, so Cowork and chats there can answer your questions. Other servers in its settings stay as they are.".to_string(),
+    // Everything that isn't the status goes into the details.
+    let signals = runner::signals(d.uid);
+    let mut details = format!("MCP server: {url}\nEvent stream: {base}/events\nCowork (Claude Desktop): {cowork_text}");
+    if let State::Failed(e) = &cowork_state {
+        details.push_str(&format!(" ({e})"));
+    }
+    details.push_str(&format!(
+        "\nListening now: {} event stream(s), {} channel stream(s){}",
+        signals.event_streams,
+        signals.channel_streams,
+        if signals.background { ", background agent" } else { "" }
+    ));
+    if signals.last_call_ms > 0 {
+        details.push_str(&format!("\nLast agent call: {} ago", span(gridcraft_agent::now_ms().saturating_sub(signals.last_call_ms))));
+    }
+    if !session.is_empty() {
+        details.push_str(&format!("\nBackground session: {session}"));
+        if !bg.cwd.is_empty() {
+            details.push_str(&format!(" in {}", bg.cwd));
+        }
+    }
+    if bg.turns > 0 {
+        details.push_str(&format!("\nBackground agent: {} turns, ${:.2}", bg.turns, bg.cost_usd));
+    }
+    if !bg.last_error.is_empty() {
+        details.push_str(&format!("\nLast error: {}", bg.last_error));
+    }
+    let presence = runner::presence(&app.session);
+    let red = Color32::from_rgb(0xC4, 0x2B, 0x1C);
+    let (m, color, line, sub) = match &presence {
+        _ if mode == Mode::Off => (Mark::Ring, t.text_disabled, "Agent off".to_string(), "choose a mode to let an agent in".to_string()),
+        Presence::Answering { checked_ms, latency_ms } => {
+            (Mark::Full, p.answered, "Agent answering".to_string(), format!("checked {} ago · answered in {}", span(*checked_ms), span(*latency_ms)))
+        }
+        Presence::Checking { since_ms } => (Mark::Half, p.pending, "Checking…".to_string(), format!("asked {} ago", span(*since_ms))),
+        Presence::NoAnswer { asked_ms } => (Mark::Cross, red, "No answer to check".to_string(), format!("asked {} ago", span(*asked_ms))),
+        Presence::Listener(what) => (Mark::Half, p.pending, "Listener connected".to_string(), format!("not checked · {}", what.join(", "))),
+        Presence::Nobody => (Mark::Ring, t.text_dim, "Nobody is listening".to_string(), "press Check, or connect an agent".to_string()),
     };
-    let can = entry.is_some() && state != State::Waiting;
-    if tall_button(ui, "Connect\nCowork", Some((&sub, color)), configured == Configured::Yes, can, &tip, plug).clicked()
-        && let Some(e) = entry
-    {
-        acts.push(Act::Cowork(e));
+    if matches!(presence, Presence::Checking { .. } | Presence::Answering { .. } | Presence::Listener(_)) {
+        ui.ctx().request_repaint_after(std::time::Duration::from_secs(1));
     }
     column(ui, |ui| {
-        match crate::server_url() {
-            Some(u) => status_line(
-                ui,
-                &format!("Listening · {}", u.trim_start_matches("http://").trim_end_matches("/mcp")),
-                p.answered,
-                "The agent server (MCP over HTTP, this computer only)",
-            ),
-            None => status_line(ui, "Server off", t.text_disabled, "Start GridCraft without --no-agent"),
-        }
-        let last = gridcraft_agent::last_agent_call_ms();
-        let active = last > 0 && gridcraft_agent::now_ms().saturating_sub(last) < 120_000;
-        if active {
-            status_line(ui, &format!("Agent active · {}", ago(last)), p.agent, "An agent called the layer in the last two minutes");
-        } else if last > 0 {
-            status_line(ui, &format!("Agent last seen {}", ago(last)), t.text_disabled, "");
-        } else {
-            status_line(ui, "No agent connected yet", t.text_disabled, "Connect Claude Code (Copy command) or Cowork");
-        }
-        let url = crate::server_url().unwrap_or("http://127.0.0.1:7980/mcp");
-        let cmd = format!("claude mcp add --transport http gridcraft {url}");
-        if row_button(ui, Icon::Copy, "Copy Claude Code command", &cmd, false).clicked() {
-            acts.push(Act::Copy(cmd));
-        }
-    });
-    // How questions reach the agent (GridCraft also starts the agent itself).
-    let mode = runner::mode();
-    let bg = runner::status(d.uid).unwrap_or_default();
-    column(ui, |ui| {
-        let name = match mode {
-            Mode::Off => "Mode: I Connect",
-            Mode::Channel => "Mode: My Session",
-            Mode::Background => "Mode: Background",
-        };
-        let r = row_button(ui, Icon::Settings, name, "How questions reach the agent", true);
-        egui::Popup::menu(&r).show(|ui| {
-            for (m, label) in [(Mode::Off, "I connect my agent (MCP, Cowork, /events)"), (Mode::Channel, "Send to my Claude Code session (channel)"), (Mode::Background, "Background agent for this workbook")] {
-                if ui.radio(mode == m, label).clicked() {
-                    acts.push(Act::Run("agent.agentMode", json!({"mode": m.id()})));
+        status_block(ui, m, color, &line, &sub, &details);
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 2.0;
+            if mode != Mode::Off
+                && row_button(ui, Icon::Search, "Check", "Ask \"is anyone there?\": a connection check your agent answers with \"here\"", false).clicked()
+            {
+                acts.push(Act::Run("agent.ping", json!({})));
+            }
+            // Mode: a simple list.
+            let r = row_button(ui, Icon::Settings, &format!("Mode: {}", mode.label().0), "How your agent gets the questions", true);
+            egui::Popup::menu(&r).show(|ui| {
+                ui.set_min_width(300.0);
+                for m in Mode::ALL {
+                    let (name, what) = m.label();
+                    let on = mode == m;
+                    let resp = ui.add(egui::Button::selectable(on, egui::RichText::new(name).strong()).min_size(vec2(290.0, 18.0)));
+                    ui.label(egui::RichText::new(what).small().color(t.text_dim));
+                    if resp.clicked() {
+                        if !on {
+                            acts.push(Act::Run("agent.agentMode", json!({"mode": m.id()})));
+                        }
+                        ui.close();
+                    }
+                }
+            });
+            // Copy: what this mode needs, one thing per item.
+            if mode == Mode::Off {
+                return;
+            }
+            let title = if mode == Mode::Background { "Session" } else { "Copy" };
+            let r = row_button(ui, Icon::Copy, title, "What to paste where, for this mode", true);
+            egui::Popup::menu(&r).show(|ui| {
+                ui.set_min_width(260.0);
+                let exe = std::env::current_exe().map(|x| x.display().to_string()).unwrap_or_else(|_| "gridcraft".into());
+                let mut item = |ui: &mut Ui, label: &str, text: String| {
+                    if ui.button(label).on_hover_text(&text).clicked() {
+                        acts.push(Act::Copy(text));
+                        ui.close();
+                    }
+                };
+                match mode {
+                    Mode::Manual => {
+                        item(ui, "Claude Code: add MCP server", format!("claude mcp add --transport http gridcraft {url}"));
+                        item(ui, "Monitor command", format!("curl -sN {base}/events"));
+                        let can = entry.is_some() && cowork_state != State::Waiting;
+                        let label = format!("Connect Cowork… ({cowork_text})");
+                        if ui.add_enabled(can, egui::Button::new(label)).on_hover_text("Adds GridCraft to Claude Desktop (Cowork and chats). Claude rewrites its settings when it quits, so while it runs GridCraft waits for you to quit it (⌘Q), then writes.").clicked()
+                            && let Some(e) = entry.clone()
+                        {
+                            acts.push(Act::Cowork(e));
+                            ui.close();
+                        }
+                    }
+                    Mode::Channel => {
+                        item(ui, "1. Add channel server", format!("claude mcp add gridcraft-channel -- '{exe}' --agent-stdio"));
+                        item(ui, "2. Start Claude Code with the channel", "claude --dangerously-load-development-channels server:gridcraft-channel".into());
+                    }
+                    Mode::Background => {
+                        if ui.button("Open session in Claude Desktop").on_hover_text("Background sessions are in Claude's Code tab, under this workbook's folder").clicked() {
+                            acts.push(Act::OpenClaude);
+                            ui.close();
+                        }
+                        if ui.button("New session").on_hover_text("Start over from a summary of this workbook's history").clicked() {
+                            acts.push(Act::Run("agent.agentReset", json!({})));
+                            ui.close();
+                        }
+                    }
+                    Mode::Off => {}
+                }
+                ui.separator();
+                if ui.button("Details…").clicked() {
+                    acts.push(Act::Message("Connection".into(), details.clone()));
                     ui.close();
                 }
-            }
-            ui.separator();
-            let exe = std::env::current_exe().map(|x| x.display().to_string()).unwrap_or_else(|_| "gridcraft".into());
-            if ui.button("Copy channel setup (Claude Code)").clicked() {
-                acts.push(Act::Copy(format!("claude mcp add gridcraft-channel -- '{exe}' --agent-stdio && claude --dangerously-load-development-channels server:gridcraft-channel")));
-                ui.close();
-            }
+            });
         });
-        if mode == Mode::Background {
-            let (text, color, detail) = if !bg.last_error.is_empty() && !bg.running {
-                ("Background · stopped".to_string(), p.material, bg.last_error.clone())
-            } else if bg.running && bg.in_flight > 0 {
-                (format!("Background · working ({})", bg.in_flight), p.working, bg.recent.join("\n"))
-            } else if bg.running {
-                ("Background · running".to_string(), p.answered, bg.recent.join("\n"))
-            } else {
-                ("Background · ready".to_string(), t.text_dim, "Starts with your next question".to_string())
-            };
-            let detail = if bg.turns > 0 { format!("{detail}\n{} turns · ${:.2}", bg.turns, bg.cost_usd) } else { detail };
-            status_line(ui, &text, color, &detail);
-            let (label, id, tip) = if bg.running {
-                ("Stop Agent", "agent.agentStop", "Stop the background agent (its session is kept)")
-            } else {
-                ("New Session", "agent.agentReset", "Start the background agent over, from a summary of this workbook's history")
-            };
-            if row_button(ui, Icon::Script, label, tip, false).clicked() {
-                acts.push(Act::Run(id, json!({})));
-            }
-        }
     });
 }
 

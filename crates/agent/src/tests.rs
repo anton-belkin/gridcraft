@@ -764,7 +764,7 @@ fn background_agent_gets_questions_and_resumes_its_session() {
     s.execute("agent.agentReset", json!({})).unwrap();
     assert!(wait_for(|| read("stdin.txt").contains("fresh session")));
     assert_ne!(layer::get(s.active().unwrap()).agent_session, session);
-    runner::set_mode(Mode::Off);
+    runner::set_mode(Mode::Manual);
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -947,4 +947,75 @@ fn a_failed_spoken_question_can_be_dismissed() {
     assert!(s.execute("agent.ask", json!({"text": "x", "refs": [{"range": "B5"}]})).is_err());
     assert!(s.execute("agent.ask", json!({"text": "x", "refs": [{"n": 1, "range": "not a cell!"}]})).is_err());
     assert!(s.execute("agent.ask", json!({"text": "", "refs": []})).is_err());
+}
+
+#[test]
+fn ping_checks_the_connection_and_stays_out_of_the_file() {
+    let mut s = model();
+    s.execute("agent.ask", json!({"range": "B7", "text": "Why?"})).unwrap();
+    let log_before = layer::get(s.active().unwrap()).log.len();
+    let id = s.execute("agent.ping", json!({})).unwrap()["id"].as_str().unwrap().to_string();
+    // It goes out like any question, marked as a ping.
+    let pending = s.execute("agent.questions", json!({"status": "pending", "actor": "agent"})).unwrap();
+    let ping = pending.as_array().unwrap().iter().find(|q| q["id"] == json!(id)).unwrap().clone();
+    assert_eq!(ping["kind"], json!("ping"));
+    assert!(ping["text"].as_str().unwrap().contains("Is anyone there?"));
+    assert!(matches!(layer::get(s.active().unwrap()).ping(), Some(layer::Ping::Waiting { .. })));
+    // A second check replaces the first.
+    let id2 = s.execute("agent.ping", json!({})).unwrap()["id"].as_str().unwrap().to_string();
+    assert_eq!(layer::get(s.active().unwrap()).questions.iter().filter(|q| q.is_ping()).count(), 1);
+    let r = s.execute("agent.answer", json!({"id": id2, "text": "here", "actor": "agent"})).unwrap();
+    assert_eq!(r["ping"], json!(true));
+    assert!(r["answeredInMs"].as_u64().is_some());
+    let l = layer::get(s.active().unwrap());
+    assert!(matches!(l.ping(), Some(layer::Ping::Answered { .. })));
+    assert_eq!(l.log.len(), log_before, "a connection check isn't history");
+    // Never saved.
+    let b64 = s.execute("file.saveBytes", json!({})).unwrap()["base64"].as_str().unwrap().to_string();
+    let mut t = Session::new();
+    t.execute("file.open", json!({"name": "book.xlsx", "base64": b64})).unwrap();
+    let l = layer::get(t.active().unwrap());
+    assert_eq!(l.questions.len(), 1);
+    assert!(l.ping().is_none());
+}
+
+#[test]
+fn presence_says_who_listens() {
+    use crate::layer::Ping;
+    use crate::runner::{Mode, Presence, Signals, classify};
+    let now = 10_000_000;
+    let none = Signals::default();
+    assert_eq!(classify(None, &none, Mode::Manual, now), Presence::Nobody);
+    assert_eq!(classify(Some(Ping::Waiting { asked_at: now - 5_000 }), &none, Mode::Manual, now), Presence::Checking { since_ms: 5_000 });
+    assert_eq!(classify(Some(Ping::Waiting { asked_at: now - 61_000 }), &none, Mode::Manual, now), Presence::NoAnswer { asked_ms: 61_000 });
+    assert_eq!(
+        classify(Some(Ping::Answered { asked_at: now - 15_000, answered_at: now - 12_000 }), &none, Mode::Manual, now),
+        Presence::Answering { checked_ms: 12_000, latency_ms: 3_000 }
+    );
+    // An old answer no longer counts; then the passive signals do.
+    let old = Some(Ping::Answered { asked_at: now - 3_600_000, answered_at: now - 3_590_000 });
+    assert_eq!(classify(old, &none, Mode::Manual, now), Presence::Nobody);
+    let events = Signals { event_streams: 1, ..Default::default() };
+    assert_eq!(classify(old, &events, Mode::Manual, now), Presence::Listener(vec!["event stream"]));
+    let waiting = Signals { last_wait_ms: now - 30_000, ..Default::default() };
+    assert_eq!(classify(None, &waiting, Mode::Manual, now), Presence::Listener(vec!["waiting for questions"]));
+    let stale = Signals { last_wait_ms: now - 90_000, ..Default::default() };
+    assert_eq!(classify(None, &stale, Mode::Manual, now), Presence::Nobody);
+    // A channel stream counts in "my session" mode only.
+    let channel = Signals { channel_streams: 1, ..Default::default() };
+    assert_eq!(classify(None, &channel, Mode::Manual, now), Presence::Nobody);
+    assert_eq!(classify(None, &channel, Mode::Channel, now), Presence::Listener(vec!["Claude Code channel"]));
+    let bg = Signals { background: true, ..Default::default() };
+    assert_eq!(classify(None, &bg, Mode::Background, now), Presence::Listener(vec!["background agent"]));
+}
+
+#[test]
+fn waiting_for_questions_is_a_signal_and_off_refuses_tools() {
+    let mut s = model();
+    let before = crate::commands::last_wait_ms();
+    s.execute("agent.questions", json!({"status": "pending", "wait": true, "actor": "agent"})).unwrap();
+    assert!(crate::commands::last_wait_ms() >= before.max(1));
+    assert!(crate::mcp::gate(Some("connect")).is_ok());
+    assert!(crate::mcp::gate(None).is_ok());
+    assert!(crate::mcp::gate(Some("off")).unwrap_err().contains("off in GridCraft"));
 }

@@ -3,7 +3,7 @@
 //!
 //! `--agent-port <port>` (or `GRIDCRAFT_AGENT_PORT`) picks the port, `--no-agent` turns it off,
 //! `--goto <name | Sheet!A1>` selects a place once the workbook is open, `--agent-mode
-//! off|channel|background` says how the app brings the agent in, and `--agent-stdio` runs the
+//! connect|channel|background|off` says how the agent comes in, and `--agent-stdio` runs the
 //! channel bridge Claude Code spawns (no window).
 //! With the agent on, the control channel starts too (on 7979 unless `--control` says otherwise).
 
@@ -21,7 +21,7 @@ pub fn take_args(args: Vec<String>) -> (Vec<String>, Option<u16>) {
         match a.as_str() {
             "--agent-port" => port = it.next().and_then(|p| p.parse().ok()),
             "--no-agent" => port = None,
-            // How the app brings the agent in: off, channel (my session), background.
+            // How the agent comes in: connect (MCP), channel (my session), background, off.
             "--agent-mode" => {
                 if let Some(m) = it.next().as_deref().and_then(gridcraft_agent::runner::Mode::parse) {
                     gridcraft_agent::runner::set_mode(m);

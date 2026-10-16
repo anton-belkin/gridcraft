@@ -361,7 +361,7 @@ impl AgentUi {
         let Some(d) = app.session.active() else { return };
         let l = layer::get(d);
         let ready = l.questions.iter().filter(|q| q.status == QuestionStatus::Answered && !q.seen).count();
-        let waiting = l.questions.iter().filter(|q| matches!(q.status, QuestionStatus::Pending | QuestionStatus::Working)).count();
+        let waiting = l.questions.iter().filter(|q| matches!(q.status, QuestionStatus::Pending | QuestionStatus::Working) && !q.is_ping()).count();
         let t = Tokens::get(ctx);
         let p = palette(&t);
         let (text, color) = if ready > 0 {

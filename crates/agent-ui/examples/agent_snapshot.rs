@@ -2,10 +2,12 @@
 //!
 //! `cargo run -p gridcraft-agent-ui --example agent_snapshot -- --in book.xlsx [--cmd id=json]…
 //!  [--pane cell|questions|notes|history|connect] [--heat off|confidence|impact] [--hover B23]
-//!  [--size 1440x900] [--dark] [--tab Agent] [--voice off|small|turbo]
-//!  [--voice-recording 4:Sheet1!C5,Sheet1!D7] [--voice-download 42] out.png`
+//!  [--size 1440x900] [--dark] [--tab Agent] [--ping checking|answered|noanswer] [--signal wait]
+//!  [--click <label>] [--voice off|small|turbo] [--voice-recording 4:Sheet1!C5,Sheet1!D7]
+//!  [--voice-download 42] out.png`
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
+use egui_kittest::kittest::Queryable;
 use gridcraft_engine::Session;
 use gridcraft_engine::core::CellRef;
 use gridcraft_ui_egui::SheetApp;
@@ -18,6 +20,7 @@ fn main() {
     let mut out = "agent.png".to_string();
     let mut tab: Option<String> = None;
     let (mut voice, mut voice_rec, mut voice_dl): (Option<String>, Option<String>, Option<u64>) = (None, None, None);
+    let (mut ping, mut signal, mut click): (Option<String>, Option<String>, Option<String>) = (None, None, None);
     let mut it = args.into_iter();
     while let Some(a) = it.next() {
         match a.as_str() {
@@ -31,6 +34,9 @@ fn main() {
             "--voice" => voice = it.next(),
             "--voice-recording" => voice_rec = it.next(),
             "--voice-download" => voice_dl = it.next().and_then(|x| x.parse().ok()),
+            "--ping" => ping = it.next(),
+            "--signal" => signal = it.next(),
+            "--click" => click = it.next(),
             "--size" => {
                 if let Some((w, h)) = it.next().as_deref().and_then(|s| s.split_once('x').map(|(w, h)| (w.to_string(), h.to_string()))) {
                     size = (w.parse().unwrap_or(1440.0), h.parse().unwrap_or(900.0));
@@ -77,6 +83,32 @@ fn main() {
         });
         gridcraft_agent_ui::voice::preview(gridcraft_agent_ui::voice::Preview { recording, downloading });
     }
+    // A connection check in a given state: checking, answered (3 s, 12 s ago), noanswer (75 s).
+    if let Some(state) = ping.as_deref() {
+        session.execute("agent.ping", json!({})).expect("ping");
+        let d = session.active().expect("doc");
+        let id = gridcraft_agent::layer::get(d).questions.iter().rev().find(|q| q.is_ping()).map(|q| q.id.clone()).unwrap_or_default();
+        if state == "answered" {
+            session.execute("agent.answer", json!({"id": id, "text": "here", "actor": "agent"})).expect("answer");
+        }
+        let back = match state {
+            "answered" => 15_000,
+            "noanswer" => 75_000,
+            _ => 4_000,
+        };
+        gridcraft_agent::layer::update(session.active().expect("doc"), |l| {
+            if let Some(q) = l.questions.iter_mut().find(|q| q.id == id) {
+                q.asked_at = q.asked_at.saturating_sub(back);
+                if let Some(a) = q.answer.as_mut() {
+                    a.at = a.at.saturating_sub(12_000);
+                }
+            }
+        });
+    }
+    // A listener without a check: an agent waiting for questions.
+    if signal.as_deref() == Some("wait") {
+        let _ = session.execute("agent.questions", json!({"status": "pending", "wait": true, "actor": "agent"}));
+    }
     if let Some(tab) = &pane {
         gridcraft_agent_ui::request_pane(true, tab, &heat);
     } else {
@@ -107,6 +139,14 @@ fn main() {
             // Rest on the cell past the hover delay (the harness clock steps 1/60 s per frame).
             harness.run_steps(40);
         }
+    }
+    // Open a ribbon menu: click the button whose label contains this.
+    if let Some(label) = &click {
+        match harness.query_by_label(label) {
+            Some(node) => node.click(),
+            None => harness.get_by_label_contains(label).click(),
+        }
+        harness.run_steps(8);
     }
     let img = harness.render().expect("render");
     img.save(&out).expect("save png");

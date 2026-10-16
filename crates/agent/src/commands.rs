@@ -62,10 +62,11 @@ pub static SPECS: &[CommandSpec] = &[
     spec!(change "agent.spoken", "Spoken Question Transcribed", "{id, text} — the text is ready: the question goes to the agent; {id, error} — the transcription failed; {id} — transcribing again", spoken),
     spec!(change "agent.removeQuestion", "Dismiss Spoken Question", "{id} — a spoken question still being transcribed, or whose transcription failed", remove_question),
     spec!(change "agent.seen", "Mark Answer Read", "{id}", seen),
+    spec!(change "agent.ping", "Check the Agent", "{} — asks \"is anyone there?\" (a question of kind ping, answered with \"here\"); the Agent tab shows whether and how fast an agent answered", ping),
     spec!(change "agent.private", "Mark as Client Data", "{range?, on?: bool (default true)} — the agent sees stand-in values there", private),
     spec!(change "agent.removeNote", "Remove Agent Note", "{id}", remove_note),
     // the agent's side
-    spec!(query "agent.questions", "Agent Questions", "{status?: pending|working|answered|all (default all)} → questions with their cell", questions),
+    spec!(query "agent.questions", "Agent Questions", "{status?: pending|working|answered|open|all (default all), wait?: bool (an agent waiting for questions)} → questions with their cell; kind \"ping\" is a connection check", questions),
     spec!(change "agent.claim", "Take Question", "{id} — marks it as being worked on", claim),
     spec!(change "agent.answer", "Answer Question", "{id, text, links?: [{label, href, summary?}]}", answer),
     spec!(change "agent.note", "Add Agent Note", "{range, text, title?, kind?: explanation|faq|assumption|source, links?: [{label, href, summary?}], actor?}", note),
@@ -180,6 +181,7 @@ fn ask(s: &mut Session, p: &Json) -> Result<Json> {
             refs,
             spoken,
             error: String::new(),
+            kind: String::new(),
         });
         id
     });
@@ -228,6 +230,30 @@ fn remove_question(s: &mut Session, p: &Json) -> Result<Json> {
         None => Err(format!("no question `{id}`")),
     });
     r.map(|()| json!({"id": id})).map_err(|m| bad("agent.removeQuestion", m))
+}
+
+/// The ping's text, as the agent reads it.
+pub const PING_TEXT: &str = "Is anyone there? (connection check; answer \"here\")";
+
+fn ping(s: &mut Session, _p: &Json) -> Result<Json> {
+    let id = layer::update(s.doc()?, |l| {
+        // One check at a time.
+        l.questions.retain(|q| !q.is_ping());
+        let id = l.fresh_id("ping");
+        l.questions.push(Question {
+            id: id.clone(),
+            anchor: String::new(),
+            text: PING_TEXT.into(),
+            status: QuestionStatus::Pending,
+            asked_at: crate::now_ms(),
+            answer: None,
+            seen: true,
+            kind: layer::PING.into(),
+            ..Question::default()
+        });
+        id
+    });
+    Ok(json!({"id": id}))
 }
 
 fn seen(s: &mut Session, p: &Json) -> Result<Json> {
@@ -340,7 +366,17 @@ pub(crate) fn expand_refs(text: &str, refs: &[Json]) -> String {
     out
 }
 
+static LAST_WAIT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// When an agent last waited for questions (`wait_for_questions`, `/events`): ms since the epoch.
+pub fn last_wait_ms() -> u64 {
+    LAST_WAIT.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 fn questions(s: &mut Session, p: &Json) -> Result<Json> {
+    if p.get("wait").and_then(Json::as_bool) == Some(true) && actor_p(p, Actor::Human) == Actor::Agent {
+        LAST_WAIT.store(crate::now_ms(), std::sync::atomic::Ordering::Relaxed);
+    }
     let l = layer::get(s.doc()?);
     let want = str_p(p, "status").unwrap_or("all");
     let d = s.doc()?;
@@ -389,15 +425,25 @@ fn answer(s: &mut Session, p: &Json) -> Result<Json> {
     let text = text_p(p, "text", "agent.answer")?;
     let links = links_p(p);
     let ok = layer::update(s.doc()?, |l| {
-        let Some(q) = l.questions.iter_mut().find(|q| q.id == id) else { return false };
+        let q = l.questions.iter_mut().find(|q| q.id == id)?;
         q.status = QuestionStatus::Answered;
         q.seen = false;
-        q.answer = Some(Answer { text, links, at: crate::now_ms() });
+        let at = crate::now_ms();
+        q.answer = Some(Answer { text, links, at });
+        if q.is_ping() {
+            // A connection check: answered in so long, nothing for the history.
+            q.seen = true;
+            return Some(Some(at.saturating_sub(q.asked_at)));
+        }
         let (anchor, qtext) = (q.anchor.clone(), q.text.clone());
         l.log(Actor::Agent, "decision", format!("Answered “{qtext}”"), "agent.answer", Some(anchor), id.clone());
-        true
+        Some(None)
     });
-    if ok { Ok(json!({"id": id})) } else { Err(bad("agent.answer", format!("no question `{id}`"))) }
+    match ok {
+        Some(Some(ms)) => Ok(json!({"id": id, "ping": true, "answeredInMs": ms})),
+        Some(None) => Ok(json!({"id": id})),
+        None => Err(bad("agent.answer", format!("no question `{id}`"))),
+    }
 }
 
 fn note(s: &mut Session, p: &Json) -> Result<Json> {
@@ -525,7 +571,7 @@ fn context(s: &mut Session, p: &Json) -> Result<Json> {
         "privacyNote": "Cells in privateRanges hold client data. You see stand-in values there (same sign and magnitude), and everything computed from them is recalculated from the stand-ins: never quote these numbers as real. Formulas are real.",
         "inputs": inputs,
         "safeFile": l.safe.as_ref().map(|x| json!({"on": true, "locked": x.sealed.is_some()})),
-        "openQuestions": l.questions.iter().filter(|q| matches!(q.status, QuestionStatus::Pending | QuestionStatus::Working)).count(),
+        "openQuestions": l.questions.iter().filter(|q| matches!(q.status, QuestionStatus::Pending | QuestionStatus::Working) && !q.is_ping()).count(),
         "notes": l.notes.len(),
         "log": l.log.iter().rev().take(20).collect::<Vec<_>>(),
     }))

@@ -119,7 +119,7 @@ upstream. Each one accepted upstream removes its lines from the patch.
   layer, so "▸ 2 slides" and Go to Slide travel with the workbook.
 - **The app can bring the agent in itself**, in a mode the app sets (never the file: a workbook
   someone sends must not start an agent that spends the reader's money). Connect tab, or
-  `--agent-mode off|channel|background`.
+  `--agent-mode connect|channel|background|off`.
   - *Send to my session* (Claude Code Channels, research preview): the server declares
     `experimental["claude/channel"]` and streams each new question on `GET /mcp` (SSE) as
     `notifications/claude/channel`. Claude Code spawns channel servers over stdio, so
@@ -144,11 +144,19 @@ upstream. Each one accepted upstream removes its lines from the patch.
   pane keeps only the content: the cell's questions and notes, the trace, sensitivity,
   alternatives, risk, history. Group names match WordCraft and DeckCraft (Agent, Client data,
   Connection, View, Share). Agent: one big button with the agent's mark and "1 ready" / "1 in
-  work" / "2 waiting" / "idle". Connection: Connect Cowork (connected / not set up / quit Claude
-  (⌘Q) / open Claude / other build), "Listening · 127.0.0.1:7980", "Agent active · just now" (an
-  `agent.*` call with actor agent in the last two minutes, over HTTP or stdio), Copy Claude Code
-  command, and GridCraft's mode switch. Keytip G (Alt, G; F10, G on macOS): A is Data, as in
-  Excel. The floating Agent button shows only while the ribbon is collapsed.
+  work" / "2 waiting" / "idle". Connection holds three things only: the status, the mode and a
+  Copy menu. The status answers "is anyone listening?": "Agent answering · checked 12 s ago"
+  (green: a check answered), "Listener connected · not checked" (amber: an `/events` stream, a
+  Claude Code channel stream, `wait_for_questions` polled in the last minute, the background
+  agent, or recent tool calls), "Nobody is listening" (grey), "No answer to check" (red: a check
+  unanswered for 60 s). **Check** sends `agent.ping`: a system question of kind `ping` ("Is
+  anyone there?"), sent out on every path (list/wait_for_questions, `/events`, the channel, the
+  background agent) but never shown as a question, badged, logged or saved; the agent answers
+  "here". The mode is a list: I connect my agent (MCP), Send to my Claude Code session
+  (channels), Background agent, Off (tools refuse). Copy holds one thing per item, by mode (MCP
+  command, monitor command, Connect Cowork…; the two channel steps; for the background agent,
+  open the session in Claude Desktop and New session), and Details… (URL, streams, session,
+  last error). Keytip G (Alt, G; F10, G on macOS): A is Data, as in Excel. The floating Agent button shows only while the ribbon is collapsed.
 - **Cowork and Claude Desktop** run local servers over stdio: `gridcraft --agent-stdio [--control
   127.0.0.1:7979]`, handled on the first line of `main` (no window, nothing but protocol on
   stdout), speaks MCP on stdin/stdout and exits when stdin closes. It reaches the app through the
