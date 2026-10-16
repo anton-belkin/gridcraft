@@ -66,6 +66,8 @@ pub enum QuestionStatus {
     Transcribing,
     /// The transcription failed: the reader can retry or dismiss it (memory only).
     Failed,
+    /// The reader took it back (undo) while the agent was on it: the agent drops it.
+    Withdrawn,
 }
 
 impl QuestionStatus {
@@ -121,6 +123,12 @@ pub struct Question {
     /// Who answered (a listener's label), for a connection check.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub answered_by: String,
+    /// The topic it belongs to (its discussion).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub topic: String,
+    /// Undone after it was answered: hidden, kept for redo.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub hidden: bool,
 }
 
 /// The kind of a connection check ("is anyone there?").
@@ -163,6 +171,9 @@ pub struct Note {
     pub author: Actor,
     #[serde(default)]
     pub at: u64,
+    /// The topic it belongs to.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub topic: String,
 }
 
 fn explanation() -> String {
@@ -301,6 +312,116 @@ pub struct LinkUse {
     pub mode: String,
 }
 
+/// Where a topic stands.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Status {
+    /// A question or doubt, no decision yet.
+    #[default]
+    Open,
+    /// Something here must change.
+    Revise,
+    /// Settled and accepted (only a person sets it).
+    Agreed,
+    /// Nothing to decide: an explanation, a source, a caveat.
+    Info,
+}
+
+impl Status {
+    pub fn parse(s: &str) -> Option<Status> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "open" => Some(Status::Open),
+            "revise" => Some(Status::Revise),
+            "agreed" => Some(Status::Agreed),
+            "info" | "for information" | "information" => Some(Status::Info),
+            _ => None,
+        }
+    }
+    pub fn id(self) -> &'static str {
+        match self {
+            Status::Open => "open",
+            Status::Revise => "revise",
+            Status::Agreed => "agreed",
+            Status::Info => "info",
+        }
+    }
+    pub fn label(self) -> &'static str {
+        match self {
+            Status::Open => "Open",
+            Status::Revise => "Revise",
+            Status::Agreed => "Agreed",
+            Status::Info => "For information",
+        }
+    }
+}
+
+/// A topic's status, with its free text and who set it.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct TopicStatus {
+    #[serde(default)]
+    pub status: Status,
+    /// "agreed with the CFO on 14.10, if capex is confirmed" (links stored as anchors).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub text: String,
+    #[serde(default)]
+    pub by: Actor,
+    #[serde(default)]
+    pub at: u64,
+}
+
+/// The agent's proposal to mark a topic Agreed, which a person confirms.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct Proposal {
+    pub reasons: String,
+    #[serde(default)]
+    pub at: u64,
+}
+
+/// One place of a topic: an anchor, and why it is there when the agent added it.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct TopicPlace {
+    pub anchor: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub reason: String,
+    #[serde(default)]
+    pub by: Actor,
+    #[serde(default)]
+    pub at: u64,
+}
+
+/// One question or theme about the workbook: its places, status, notes and discussion (the
+/// questions and notes that name it).
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct Topic {
+    pub id: String,
+    #[serde(default)]
+    pub places: Vec<TopicPlace>,
+    #[serde(default)]
+    pub status: TopicStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub proposed: Option<Proposal>,
+    /// Taken back by an undo (its question was answered): kept for redo.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub hidden: bool,
+    #[serde(default)]
+    pub created_at: u64,
+}
+
+/// Where deleted cells were: the anchors of their neighbours (before and after the deleted rows or
+/// columns) and the address they last had.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct Whereabouts {
+    pub anchor: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub before: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub after: Option<String>,
+    pub was: String,
+}
+
+/// The layer format this build writes.
+pub const VERSION: u32 = 2;
+
 /// Most log entries kept (oldest dropped first).
 pub const MAX_LOG: usize = 5_000;
 
@@ -341,6 +462,12 @@ pub struct Layer {
     /// Where those ranges are used (decks and slides).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub uses: Vec<LinkUse>,
+    /// Topics (format v2): places, status, notes and discussion of each question or theme.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub topics: Vec<Topic>,
+    /// Where deleted places and links were.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub whereabouts: Vec<Whereabouts>,
     /// Bumped on every change (not saved meaningfully; lets views cache).
     #[serde(skip)]
     pub revision: u64,
@@ -383,10 +510,100 @@ impl Layer {
         self.anchors.is_empty() && self.log.is_empty() && self.safe.is_none() && self.workbook_id.is_empty() && self.links.is_empty()
     }
 
+    pub fn topic(&self, id: &str) -> Option<&Topic> {
+        self.topics.iter().find(|t| t.id == id)
+    }
+
+    /// Format v2: every question and note belongs to a topic. A v1 layer gets one topic per
+    /// question (its cells as places; Open, or For information when answered and read) and one per
+    /// note (For information).
+    pub fn migrate(&mut self) {
+        if self.version >= VERSION {
+            return;
+        }
+        let now = crate::now_ms();
+        for i in 0..self.questions.len() {
+            let Some(q) = self.questions.get(i) else { continue };
+            if q.is_ping() || !q.topic.is_empty() {
+                continue;
+            }
+            let mut places = vec![TopicPlace { anchor: q.anchor.clone(), reason: String::new(), by: Actor::Human, at: q.asked_at }];
+            places.extend(q.refs.iter().map(|r| TopicPlace {
+                anchor: r.anchor.clone(),
+                reason: "pointed at while asking".into(),
+                by: Actor::Human,
+                at: q.asked_at,
+            }));
+            let status = if q.status == QuestionStatus::Answered && q.seen { Status::Info } else { Status::Open };
+            let asked = q.asked_at;
+            let id = self.fresh_id("t");
+            self.topics.push(Topic {
+                id: id.clone(),
+                places,
+                status: TopicStatus { status, text: String::new(), by: Actor::Human, at: asked },
+                proposed: None,
+                hidden: false,
+                created_at: asked.max(1).min(now),
+            });
+            if let Some(q) = self.questions.get_mut(i) {
+                q.topic = id;
+            }
+        }
+        for i in 0..self.notes.len() {
+            let Some(n) = self.notes.get(i) else { continue };
+            if !n.topic.is_empty() {
+                continue;
+            }
+            let (anchor, by, at) = (n.anchor.clone(), n.author, n.at);
+            let id = self.fresh_id("t");
+            self.topics.push(Topic {
+                id: id.clone(),
+                places: vec![TopicPlace { anchor, reason: String::new(), by, at }],
+                status: TopicStatus { status: Status::Info, text: String::new(), by, at },
+                proposed: None,
+                hidden: false,
+                created_at: at,
+            });
+            if let Some(n) = self.notes.get_mut(i) {
+                n.topic = id;
+            }
+        }
+        self.version = VERSION;
+    }
+
     /// Anchors nothing refers to any more.
     pub fn unused_anchors(&self) -> Vec<String> {
+        // Anchors named inside texts (links): kept while a text names them.
+        let mut in_text: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut scan = |t: &str| {
+            let mut rest = t;
+            while let Some(i) = rest.find("(anchor:") {
+                rest = &rest[i + 8..];
+                let id: String = rest.chars().take_while(|c| c.is_ascii_alphanumeric()).collect();
+                in_text.insert(id);
+            }
+        };
+        for q in &self.questions {
+            scan(&q.text);
+            if let Some(a) = &q.answer {
+                scan(&a.text);
+            }
+        }
+        for n in &self.notes {
+            scan(&n.text);
+            scan(&n.title);
+        }
+        for t in &self.topics {
+            scan(&t.status.text);
+            if let Some(p) = &t.proposed {
+                scan(&p.reasons);
+            }
+        }
         let used = |id: &str| {
-            self.questions.iter().any(|q| q.anchor == id || q.refs.iter().any(|r| r.anchor == id))
+            in_text.contains(id)
+                || self.topics.iter().any(|t| t.places.iter().any(|p| p.anchor == id))
+                || self.whereabouts.iter().any(|w| w.anchor == id || w.before.as_deref() == Some(id) || w.after.as_deref() == Some(id))
+                || self.questions.iter().any(|q| q.anchor == id || q.refs.iter().any(|r| r.anchor == id))
                 || self.notes.iter().any(|n| n.anchor == id)
                 || self.inputs.iter().any(|i| i.anchor == id)
                 || self.private.iter().any(|p| p == id)
@@ -407,6 +624,11 @@ fn store() -> MutexGuard<'static, Option<HashMap<u64, Arc<Layer>>>> {
         Ok(g) => g,
         Err(poisoned) => poisoned.into_inner(),
     }
+}
+
+/// A fresh layer (no part in the workbook) is already in the current format.
+fn fresh() -> Layer {
+    Layer { version: VERSION, ..Layer::default() }
 }
 
 /// The layer of a document (read from its workbook the first time).
@@ -443,7 +665,7 @@ pub fn known_docs() -> Vec<u64> {
 
 /// The layer kept in a workbook's custom XML part, or an empty one.
 pub fn read_from(wb: &Workbook) -> Layer {
-    let Some(p) = wb.preserved.as_deref() else { return Layer::default() };
+    let Some(p) = wb.preserved.as_deref() else { return fresh() };
     for part in &p.parts {
         if part.data.len() > MAX_PART {
             continue;
@@ -453,12 +675,14 @@ pub fn read_from(wb: &Workbook) -> Layer {
             continue;
         }
         if let Some(json) = between(text, "<![CDATA[", "]]>")
-            && let Ok(layer) = serde_json::from_str::<Layer>(json)
+            && let Ok(mut layer) = serde_json::from_str::<Layer>(json)
         {
+            // A v1 workbook: questions and notes become topics.
+            layer.migrate();
             return layer;
         }
     }
-    Layer::default()
+    fresh()
 }
 
 fn between<'a>(s: &'a str, open: &str, close: &str) -> Option<&'a str> {
@@ -478,7 +702,18 @@ pub fn write_into(wb: &mut Workbook, layer: &Layer) {
         // Connection checks belong to this session, not to the file; spoken questions still
         // being transcribed live in memory only.
         let mut layer = layer.clone();
+        // A topic made by a question still being spoken waits with it.
+        let drafts: Vec<String> = layer.questions.iter().filter(|q| q.status.is_draft()).map(|q| q.topic.clone()).collect();
+        let saved: Vec<String> = layer
+            .questions
+            .iter()
+            .filter(|q| !q.status.is_draft())
+            .map(|q| q.topic.clone())
+            .chain(layer.notes.iter().map(|n| n.topic.clone()))
+            .collect();
+        layer.topics.retain(|t| !drafts.contains(&t.id) || saved.contains(&t.id));
         layer.questions.retain(|q| !q.is_ping() && !q.status.is_draft());
+        layer.version = VERSION;
         let json = serde_json::to_string(&layer).unwrap_or_default();
         // CDATA can't hold `]]>`; JSON only has it inside strings, where `]` means the same.
         let json = json.replace("]]>", "\\u005d\\u005d>");

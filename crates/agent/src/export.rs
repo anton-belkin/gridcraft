@@ -2,8 +2,9 @@
 //! install. It holds GridCraft for the web (the `gridcraft-web` WASM build and its JavaScript glue,
 //! gzipped) and the workbook with its agent layer, opened on start with the layer read-only.
 //!
-//! Prepared answers and notes are kept; questions still waiting for the agent are dropped (the
-//! recipient can't reach the author's agent), and every kept answer shows as new.
+//! Topics go with their places, status and notes; the discussion (questions and answers) stays
+//! behind unless the sender includes it, and then only answered questions, shown as new (the
+//! recipient can't reach the author's agent).
 //!
 //! The web build comes from a folder holding `<name>.js` and `<name>_bg.wasm` (wasm-bindgen's
 //! output, or Trunk's `dist/web`): the `web` param, `$GRIDCRAFT_WEB_BUNDLE`, else `target/agent-web`
@@ -17,11 +18,13 @@ use crate::layer::{self, Layer, QuestionStatus};
 /// The id of the element holding the workbook (base64) in an exported page.
 pub const WORKBOOK_ELEMENT: &str = "gridcraft_workbook";
 
-/// The layer as the recipient gets it: answered questions (shown as new), notes, inputs, client
-/// data marks, confidence and history; open questions dropped with the anchors only they used.
-pub fn shared_layer(l: &Layer) -> Layer {
+/// The layer as the recipient gets it: topics with places, status and notes, inputs, client data
+/// marks, confidence and history; the discussion only with `discussion` (answered questions,
+/// shown as new). Undone topics and anchors nothing uses any more are left out.
+pub fn shared_layer(l: &Layer, discussion: bool) -> Layer {
     let mut out = l.clone();
-    out.questions.retain(|q| q.status == QuestionStatus::Answered && q.answer.is_some());
+    out.topics.retain(|t| !t.hidden);
+    out.questions.retain(|q| discussion && q.status == QuestionStatus::Answered && q.answer.is_some() && !q.hidden);
     for q in &mut out.questions {
         q.seen = false;
     }
@@ -30,13 +33,14 @@ pub fn shared_layer(l: &Layer) -> Layer {
     out
 }
 
-/// `agent.exportHtml {path, web?}`.
+/// `agent.exportHtml {path, web?, includeDiscussion?}`.
 pub fn export_html(s: &mut Session, p: &Json) -> Result<Json> {
     let bad = |msg: String| EngineError::BadParams { cmd: "agent.exportHtml".into(), msg };
     let path = p.get("path").and_then(Json::as_str).map(str::trim).filter(|t| !t.is_empty()).ok_or_else(|| bad("missing `path`".into()))?;
     let d = s.doc()?;
     let mut wb = (*d.wb).clone();
-    layer::write_into(&mut wb, &shared_layer(&layer::get(d)));
+    let discussion = p.get("includeDiscussion").and_then(Json::as_bool).unwrap_or(false);
+    layer::write_into(&mut wb, &shared_layer(&layer::get(d), discussion));
     let xlsx = gridcraft_engine::io::save_bytes_as(&wb, "book.xlsx", gridcraft_engine::io::FileKind::Xlsx)?;
     let title = std::path::Path::new(&d.title).file_stem().and_then(|t| t.to_str()).filter(|t| !t.is_empty()).unwrap_or("Workbook").to_string();
     let bundle = bundle::find(p.get("web").and_then(Json::as_str))?;

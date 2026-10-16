@@ -479,7 +479,12 @@ pub fn question_text(s: &Session, q: &Json) -> String {
         t.push_str(&format!(" ({label})"));
     }
     t.push_str(&format!(":\n\n“{}”\n\nQuestion id: {}. Document: {}.", get("text"), get("id"), get("document")));
-    t.push_str(" Claim it (claim_question), investigate with the gridcraft tools, and answer with answer_question, linking the cells you used.");
+    if let Some(tp) = q.get("topic").filter(|t| t.is_object()) {
+        let num = tp.get("number").map(|n| n.to_string()).unwrap_or_default();
+        let st = tp.get("status").and_then(Json::as_str).unwrap_or("open");
+        t.push_str(&format!(" It belongs to topic {num} ({st}): get_topic gives its notes and discussion so far."));
+    }
+    t.push_str(" Claim it (claim_question), investigate with the gridcraft tools, and answer with answer_question, links inside the text.");
     t
 }
 

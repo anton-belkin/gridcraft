@@ -17,7 +17,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use gridcraft_mcp::{Backend, Remote};
-use serde_json::{Value, json};
+use serde_json::{Value, Value as Json, json};
 
 /// Open `/events` streams, and channel streams (`GET /mcp`) of clients that take channel events.
 static EVENT_STREAMS: AtomicUsize = AtomicUsize::new(0);
@@ -242,6 +242,7 @@ fn channel_stream(mut w: TcpStream, control: &str, client: &str) {
     }
     let _ = w.flush();
     let mut seen: HashSet<String> = HashSet::new();
+    let mut gone: HashSet<String> = HashSet::new();
     let mut slot: Option<Remote> = None;
     let mut quiet = 0u32;
     loop {
@@ -267,6 +268,18 @@ fn channel_stream(mut w: TcpStream, control: &str, client: &str) {
                 Ok(_) => {}
                 Err(_) => slot = None,
             }
+            // Questions the user took back: the session drops them.
+            if let Some(b) = slot.as_mut() {
+                for q in withdrawn(b, None, &mut gone) {
+                    let n = json!({"jsonrpc": "2.0", "method": "notifications/claude/channel", "params": {
+                        "content": format!("Question {} was withdrawn by the user: drop it.", q.0),
+                        "meta": {"question_id": q.0, "kind": "withdrawn", "document": q.1},
+                    }});
+                    if w.write_all(format!("event: message\ndata: {n}\n\n").as_bytes()).and_then(|()| w.flush()).is_err() {
+                        return;
+                    }
+                }
+            }
         }
         std::thread::sleep(Duration::from_millis(800));
         quiet += 1;
@@ -278,6 +291,25 @@ fn channel_stream(mut w: TcpStream, control: &str, client: &str) {
             }
         }
     }
+}
+
+/// Questions withdrawn since the last look (each once): (id, document).
+fn withdrawn(b: &mut Remote, document: Option<&str>, gone: &mut HashSet<String>) -> Vec<(String, Json)> {
+    let params = json!({"status": "withdrawn", "actor": "agent", "masked": true, "poll": true});
+    let call = match document {
+        Some(d) => {
+            json!({"command": "agent.onDocument", "params": {"document": d, "command": "agent.questions", "params": params, "actor": "agent"}})
+        }
+        None => json!({"command": "agent.questions", "params": params}),
+    };
+    let Ok(Json::Array(list)) = b.call("engine.execute", call) else { return vec![] };
+    list.into_iter()
+        .filter_map(|q| {
+            let id = q.get("id").and_then(Json::as_str)?.to_string();
+            let doc = q.get("document").cloned().unwrap_or(Json::Null);
+            gone.insert(format!("{doc}#{id}")).then_some((id, doc))
+        })
+        .collect()
 }
 
 /// Streams new pending questions, one JSON object per line, until the client goes away.
@@ -297,6 +329,7 @@ fn events(mut w: TcpStream, control: &str, query: &str) {
     }
     let _ = w.flush();
     let mut seen: HashSet<String> = HashSet::new();
+    let mut gone: HashSet<String> = HashSet::new();
     let mut slot: Option<Remote> = None;
     loop {
         if crate::runner::mode() != crate::runner::Mode::Off
@@ -339,6 +372,14 @@ fn events(mut w: TcpStream, control: &str, query: &str) {
                 }
                 Ok(_) => {}
                 Err(_) => slot = None,
+            }
+            if let Some(b) = slot.as_mut() {
+                for (id, doc) in withdrawn(b, document.as_deref(), &mut gone) {
+                    let line = json!({"event": "withdrawn", "id": id, "document": doc, "hint": "the user took this question back: drop it"});
+                    if writeln!(w, "{line}").and_then(|()| w.flush()).is_err() {
+                        return;
+                    }
+                }
             }
         }
         std::thread::sleep(Duration::from_millis(800));

@@ -416,7 +416,19 @@ pub fn restore(s: &mut Session) {
 
 // ---------------------------------------------------------------- commands
 
+/// Safe file on and off are a person's undoable actions.
 fn safe_mode(s: &mut Session, p: &Json) -> Result<Json> {
+    let before = crate::topics::Part::Safe(layer::get(s.doc()?).safe.clone());
+    let r = safe_mode_inner(s, p)?;
+    let after_safe = layer::get(s.doc()?).safe.clone();
+    if crate::topics::by_person(p) && crate::topics::Part::Safe(after_safe.clone()).differs(&before) {
+        let label = if after_safe.is_some() { "Safe File On" } else { "Safe File Off" };
+        crate::topics::record(s, label, vec![before], vec![crate::topics::Part::Safe(after_safe)]);
+    }
+    Ok(r)
+}
+
+fn safe_mode_inner(s: &mut Session, p: &Json) -> Result<Json> {
     const CMD: &str = "agent.safeMode";
     let on = p.get("on").and_then(Json::as_bool).unwrap_or(true);
     let actor = actor_p(p, Actor::Human);

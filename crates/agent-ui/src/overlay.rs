@@ -8,6 +8,8 @@ use gridcraft_agent::anchor;
 use gridcraft_agent::layer::{self, Layer, QuestionStatus, VariantKind};
 use gridcraft_agent::links;
 use gridcraft_agent::stress::{self, Stress};
+use gridcraft_agent::textlinks;
+use gridcraft_agent::topics;
 use gridcraft_agent::variants::{self, Comparison};
 use gridcraft_engine::DocState;
 use gridcraft_engine::core::{CellRef, RangeRef, Value};
@@ -33,6 +35,8 @@ pub(crate) struct State {
     cache: HashMap<(u64, usize, u64, usize, CellRef), Sens>,
     comparisons: Option<((u64, usize, u64), Vec<Comparison>)>,
     stress: Option<((u64, usize, u64), usize, CellRef, Option<Stress>)>,
+    /// Topic markers painted last frame: (where, topic, place anchor), for clicks.
+    pub markers: Vec<(Rect, String, String)>,
 }
 
 /// Version of what an analysis depends on: the document, its workbook and its layer.
@@ -209,67 +213,151 @@ pub(crate) fn paint(st: &mut AgentUi, app: &SheetApp, ui: &Ui, painter: &Painter
         }
     }
 
-    // Notes: a triangle in the top-left corner (Excel's comments use the top right).
-    for n in &l.notes {
-        let Some(pl) = on_sheet(&n.anchor) else { continue };
-        let r = cells.rect(RangeRef::cell(pl.range.start));
-        let pts = vec![r.left_top(), pos2(r.left() + 7.0, r.top()), pos2(r.left(), r.top() + 7.0)];
-        painter.add(egui::Shape::convex_polygon(pts, p.note, Stroke::NONE));
-    }
-
-    // Questions: a badge in the top-right corner, on the cell asked about and on every cell
-    // pointed at while it was spoken.
-    for q in &l.questions {
-        for id in std::iter::once(&q.anchor).chain(q.refs.iter().map(|r| &r.anchor)) {
-            let Some(pl) = on_sheet(id) else { continue };
-            let r = cells.rect(pl.range);
+    // Topics: a numbered circle per place in its top-right cell's top-right corner, in the topic's
+    // status colour; several topics on one cell stack leftwards. A range place gets a thin outline.
+    let time = ui.input(|i| i.time);
+    let n = topics::numbering(&d.wb, &l);
+    let mut by_cell: Vec<(CellRef, Vec<(String, Color32, bool, String, String)>)> = vec![];
+    let mut pulsing = false;
+    for id in &n.order {
+        let Some(tp) = l.topic(id) else { continue };
+        let color = p.status(tp.status.status);
+        let working = topics::discussion(&l, id).iter().any(|q| matches!(q.status, QuestionStatus::Working | QuestionStatus::Transcribing));
+        let unread = topics::unread(&l, id);
+        for place in &tp.places {
+            let Some(pl) = on_sheet(&place.anchor) else { continue };
             if !pl.range.is_single() {
-                painter.rect_stroke(r, 0.0, Stroke::new(1.0, status_color(&p, q.status, q.seen).gamma_multiply(0.6)), StrokeKind::Inside);
+                painter.rect_stroke(cells.rect(pl.range), 0.0, Stroke::new(1.0, color.gamma_multiply(0.55)), StrokeKind::Inside);
             }
-            badge(painter, r, q.status, q.seen, &p, ui.input(|i| i.time));
+            let fill = if working {
+                pulsing = true;
+                p.working.gamma_multiply(0.55 + 0.45 * ((time * 4.0).sin() * 0.5 + 0.5) as f32)
+            } else {
+                color
+            };
+            let label = n.place.get(&(id.clone(), place.anchor.clone())).cloned().unwrap_or_default();
+            let corner = CellRef { row: pl.range.start.row, col: pl.range.end.col };
+            let entry = (label, fill, unread, id.clone(), place.anchor.clone());
+            match by_cell.iter_mut().find(|(c, _)| *c == corner) {
+                Some((_, list)) => list.push(entry),
+                None => by_cell.push((corner, vec![entry])),
+            }
         }
     }
-    if l.questions.iter().any(|q| matches!(q.status, QuestionStatus::Working | QuestionStatus::Transcribing) && !q.is_ping()) {
+    let mut markers = vec![];
+    if let Some(sh) = d.wb.sheet(si) {
+        for (corner, list) in by_cell {
+            let cell = cells.rect(RangeRef::cell(corner));
+            if !cell.intersects(cells.cells()) {
+                continue;
+            }
+            let h = 11.0_f32.min((cell.height() * 0.65).max(6.0));
+            let sizes: Vec<f32> = list.iter().map(|e| marker_width(painter, &e.0, h)).collect();
+            let total = sizes.iter().sum::<f32>() + sizes.len().saturating_sub(1) as f32;
+            // Beside the value, never on it: the corner when it's clear, else just left of a
+            // right-aligned value; a full cell gets one small dot.
+            let span = value_span(painter, &d.wb, sh, corner, cell, h);
+            let clear = |right: f32| span.is_none_or(|(l, r)| right - total > r + 1.0 || right < l - 1.0);
+            let right = if clear(cell.right() - 1.0) {
+                Some(cell.right() - 1.0)
+            } else {
+                span.map(|(l, _)| l - 2.0).filter(|x| *x - total >= cell.left() + 1.0)
+            };
+            match right {
+                Some(mut x) => {
+                    for (e, w) in list.iter().zip(sizes) {
+                        let r = Rect::from_min_size(pos2(x - w, cell.top() + 1.0), vec2(w, h));
+                        marker(painter, r, &e.0, e.1, e.2, &t);
+                        markers.push((r, e.3.clone(), e.4.clone()));
+                        x -= w + 1.0;
+                    }
+                }
+                None => {
+                    // No room beside the value: a corner flag (numbers on hover and in the pane).
+                    let first = list.first().map_or(p.open, |e| e.1);
+                    let tr = cell.right_top();
+                    let k = 6.0_f32.min(cell.height() * 0.4);
+                    painter.add(egui::Shape::convex_polygon(vec![tr, pos2(tr.x, tr.y + k), pos2(tr.x - k, tr.y)], first, Stroke::NONE));
+                    if let Some(e) = list.first() {
+                        markers.push((Rect::from_min_max(pos2(tr.x - 9.0, tr.y), pos2(tr.x, tr.y + 9.0)), e.3.clone(), e.4.clone()));
+                    }
+                }
+            }
+        }
+    }
+    st.overlay.markers = markers;
+    if pulsing {
         ui.ctx().request_repaint_after(std::time::Duration::from_millis(120));
     }
 
     hover(st, app, ui, d, &l, cells, &t, &p);
 }
 
-fn status_color(p: &Palette, s: QuestionStatus, seen: bool) -> Color32 {
-    match s {
-        QuestionStatus::Pending => p.pending,
-        QuestionStatus::Working => p.working,
-        QuestionStatus::Answered if seen => p.seen,
-        QuestionStatus::Answered => p.answered,
-        QuestionStatus::Transcribing => p.transcribing,
-        QuestionStatus::Failed => p.failed,
+fn marker_width(painter: &Painter, label: &str, h: f32) -> f32 {
+    let galley = painter.layout_no_wrap(label.to_string(), theme::ui_bold(h - 1.5), Color32::WHITE);
+    (galley.size().x + 4.0).max(h)
+}
+
+/// A topic marker: a small pill with the number (`3`, `3.2`); an unread answer adds a dot.
+pub(crate) fn marker(painter: &Painter, r: Rect, label: &str, fill: Color32, unread: bool, t: &Tokens) {
+    let galley = painter.layout_no_wrap(label.to_string(), theme::ui_bold(r.height() - 1.5), Color32::WHITE);
+    painter.rect_filled(r, r.height() / 2.0, fill);
+    painter.galley(r.center() - galley.size() / 2.0, galley, Color32::WHITE);
+    if unread {
+        let c = pos2(r.left(), r.top() + 1.0);
+        painter.circle_filled(c, 2.6, t.window);
+        painter.circle_filled(c, 1.9, crate::BLUE);
     }
 }
 
-/// A flag in the top-right corner of the cell (where Excel puts its comment marker, in the
-/// question's colour): it never covers the cell's text. A fresh answer gets a bigger flag; a
-/// question being worked on pulses.
-fn badge(painter: &Painter, cell: Rect, s: QuestionStatus, seen: bool, p: &Palette, time: f64) {
-    let mut color = status_color(p, s, seen);
-    let size = match s {
-        QuestionStatus::Answered if !seen => 11.0_f32,
-        QuestionStatus::Answered => 7.0,
-        _ => 9.0,
+/// Where a cell's shown value sits across the cell (left and right x) when it reaches up into the
+/// strip a marker of height `h` takes at the top; `None` when the strip is clear.
+fn value_span(
+    painter: &Painter,
+    wb: &gridcraft_engine::model::Workbook,
+    sh: &gridcraft_engine::model::Sheet,
+    c: CellRef,
+    rect: Rect,
+    h: f32,
+) -> Option<(f32, f32)> {
+    use gridcraft_engine::model::{HAlign, VAlign};
+    let cell = sh.cell(c)?;
+    if cell.value.is_empty() {
+        return None;
+    }
+    let text = gridcraft_engine::display::cell_text(wb, sh, c);
+    if text.is_empty() {
+        return None;
+    }
+    let z = rect.height() / sh.row_height(c.row).max(1.0);
+    let st = wb.styles.get(sh.style_id(c));
+    let size = (st.font.size * 96.0 / 72.0 * z).clamp(4.0, 200.0);
+    let font = egui::FontId::new(size, theme::cell_family(&st.font.name, st.font.bold, st.font.italic));
+    let g = painter.layout_no_wrap(text, font, Color32::PLACEHOLDER).size();
+    // Text sits at the bottom unless styled otherwise; a tall row leaves the top strip clear.
+    let top = match st.align.v {
+        VAlign::Top => rect.top(),
+        VAlign::Bottom => rect.bottom() - g.y,
+        _ => rect.center().y - g.y / 2.0,
     };
-    if matches!(s, QuestionStatus::Working | QuestionStatus::Transcribing) {
-        let k = 0.55 + 0.45 * ((time * 4.0).sin() * 0.5 + 0.5) as f32;
-        color = color.gamma_multiply(k);
+    if top > rect.top() + 1.0 + h {
+        return None;
     }
-    let size = size.min(cell.height() * 0.6).min(cell.width() * 0.5);
-    let tr = cell.right_top();
-    let pts = vec![tr, pos2(tr.x, tr.y + size), pos2(tr.x - size, tr.y)];
-    painter.add(egui::Shape::convex_polygon(pts, color, Stroke::NONE));
-}
-
-/// `⟦2⟧` → `[2]` where a marker can't be drawn as a bubble.
-pub(crate) fn plain_markers(text: &str) -> String {
-    text.replace('⟦', "[").replace('⟧', "]")
+    let pad = 2.5 * z;
+    let h_align = match st.align.h {
+        HAlign::General => match cell.value {
+            Value::Number(_) => HAlign::Right,
+            Value::Bool(_) | Value::Error(_) => HAlign::Center,
+            _ => HAlign::Left,
+        },
+        x => x,
+    };
+    Some(match h_align {
+        HAlign::Right => (rect.right() - pad - g.x, rect.right()),
+        HAlign::Center | HAlign::CenterAcross | HAlign::Distributed => (rect.center().x - g.x / 2.0, rect.center().x + g.x / 2.0),
+        // Left-aligned text may run on into the next cells.
+        _ => (rect.left(), (rect.left() + pad + g.x).max(rect.left())),
+    })
 }
 
 /// Red (0) → amber → green (1).
@@ -310,14 +398,14 @@ fn hover(st: &mut AgentUi, app: &SheetApp, ui: &Ui, d: &DocState, l: &Layer, cel
         return;
     }
     let here = |id: &str| l.anchor(id).and_then(|a| anchor::resolve(&d.wb, a)).is_some_and(|pl| pl.sheet == si && pl.range.contains(c));
-    let notes: Vec<_> = l.notes.iter().filter(|n| here(&n.anchor)).collect();
-    let questions: Vec<_> = l.questions.iter().filter(|q| here(&q.anchor) || q.refs.iter().any(|r| here(&r.anchor))).collect();
+    let n = topics::numbering(&d.wb, l);
+    let at: Vec<_> = n.order.iter().filter_map(|id| l.topic(id)).filter(|t| t.places.iter().any(|p| here(&p.anchor))).collect();
     let private = l.private.iter().any(|id| here(id));
     let input = l.inputs.iter().find(|i| here(&i.anchor));
     let slides: Vec<_> = links::uses_at(&d.wb, l, si, Some(&RangeRef::cell(c))).into_iter().map(|(_, u)| u).collect();
     let sens = if is_formula_number(d, si, c) { Some(st.overlay.sensitivity(d, l, si, c)) } else { None };
     let sens = sens.filter(|s| !s.swings.is_empty());
-    if notes.is_empty() && questions.is_empty() && !private && input.is_none() && sens.is_none() && slides.is_empty() {
+    if at.is_empty() && !private && input.is_none() && sens.is_none() && slides.is_empty() {
         return;
     }
     let pos = pointer + vec2(18.0, 18.0);
@@ -337,27 +425,36 @@ fn hover(st: &mut AgentUi, app: &SheetApp, ui: &Ui, d: &DocState, l: &Layer, cel
                     }
                     ui.add_space(4.0);
                 }
-                for q in questions.iter().take(2) {
-                    let (status, color) = match q.status {
-                        QuestionStatus::Pending => ("Question waiting", p.pending),
-                        QuestionStatus::Working => ("The agent is working on it", p.working),
-                        QuestionStatus::Answered => ("Answered", p.answered),
-                        QuestionStatus::Transcribing => ("Spoken · transcribing…", p.transcribing),
-                        QuestionStatus::Failed => ("Spoken · not transcribed", p.failed),
-                    };
-                    ui.label(egui::RichText::new(status).color(color).small().strong());
-                    if !q.text.is_empty() {
-                        ui.label(egui::RichText::new(plain_markers(&q.text)).italics());
+                for tp in at.iter().take(3) {
+                    let num = n.topic.get(&tp.id).copied().unwrap_or(0);
+                    let color = p.status(tp.status.status);
+                    ui.label(egui::RichText::new(format!("{num} · {}", tp.status.status.label())).color(color).small().strong());
+                    if !tp.status.text.is_empty() {
+                        ui.label(clip(&textlinks::plain(&d.wb, l, &tp.status.text, si), 160));
                     }
-                    if let Some(a) = &q.answer {
-                        ui.label(clip(&a.text, 180));
+                    let disc = topics::discussion(l, &tp.id);
+                    if let Some(q) = disc.last() {
+                        if !q.text.is_empty() {
+                            ui.label(egui::RichText::new(clip(&textlinks::plain(&d.wb, l, &q.text, si), 120)).italics());
+                        }
+                        match &q.answer {
+                            Some(a) => {
+                                ui.label(clip(&textlinks::plain(&d.wb, l, &a.text, si), 180));
+                            }
+                            None if q.status == QuestionStatus::Working => {
+                                ui.label(egui::RichText::new("The agent is working on it").color(p.working).small());
+                            }
+                            None => {}
+                        }
                     }
-                    ui.add_space(4.0);
-                }
-                for n in notes.iter().take(2) {
-                    let title = if n.title.is_empty() { kind_label(&n.kind).to_string() } else { format!("{} · {}", kind_label(&n.kind), n.title) };
-                    ui.label(egui::RichText::new(title).color(p.note).small().strong());
-                    ui.label(clip(&n.text, 280));
+                    for note in topics::notes(l, &tp.id).iter().take(2) {
+                        let title = if note.title.is_empty() {
+                            kind_label(&note.kind).to_string()
+                        } else {
+                            format!("{} · {}", kind_label(&note.kind), note.title)
+                        };
+                        ui.label(egui::RichText::new(title).color(p.note).small());
+                    }
                     ui.add_space(4.0);
                 }
                 if let Some(i) = input {
@@ -388,6 +485,7 @@ pub(crate) fn kind_label(kind: &str) -> &'static str {
         "faq" => "Prepared answer",
         "assumption" => "Assumption",
         "source" => "Source",
+        "decision" => "Decision",
         _ => "Explanation",
     }
 }

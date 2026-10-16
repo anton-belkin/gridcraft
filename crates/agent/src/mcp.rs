@@ -28,8 +28,14 @@ PING: a question with kind \"ping\" is a connection check: answer it at once wit
 CHANNEL: when GridCraft sends questions to this session, each arrives as <channel source=\"gridcraft\" question_id=\"q3\" \
 range=\"Sheet1!B7\">question text</channel>: claim_question with that id, investigate, answer_question. Keep it short; \
 the user is waiting in the spreadsheet. \
-VOICE: ⟦n⟧ in a question is what the user pointed at while speaking (expanded as ⟦n: Sheet1!C16 · label = value⟧), see refs; \
-resolve \"this\", \"that one\", \"это\" from those and the context.";
+VOICE: a spoken question links what the user pointed at while speaking (see refs); resolve \"this\", \"that one\", \"это\" \
+from those and the context. \
+TOPICS: every question belongs to a topic (its places, a status, notes and the discussion); questions carry their topic. \
+Write links inside your text: [B1](cell:Sheet1!B1), [topic 3](topic:3), [the source](https://…); they follow the cells when \
+rows move. When a change here affects other cells, add_places to the topic with a reason each; widen_place when the answer is \
+about more than what was selected (a whole row or table). Leave notes that will still matter after the chat (add_note with the \
+topic). Set Open or Revise with set_status; never mark Agreed: propose_agreed with your reasons, the user confirms. A question \
+the user withdrew (undo) answers \"withdrawn\": drop it.";
 
 /// Tools that take a `listener` (AItoCraft): calls refresh it.
 const LISTENER_TOOLS: &[&str] = &["list_questions", "wait_for_questions", "claim_question", "answer_question"];
@@ -93,7 +99,7 @@ pub fn tools() -> Vec<Value> {
         ),
         tool(
             "list_questions",
-            "Questions the user asked on cells. status: pending (new), working (claimed), answered, open (pending+working) or all. A spoken question carries ⟦n: Sheet1!C16 · label = value⟧ where the user pointed at a cell while speaking; refs lists them.",
+            "Questions the user asked on cells. status: pending (new), working (claimed), answered, open (pending+working) or all. Each carries its topic (id, number, status); a spoken question links where the user pointed while speaking (refs lists them).",
             json!({"status": {"type": "string", "enum": ["pending", "working", "answered", "open", "all"]}}),
             &[],
             true,
@@ -114,16 +120,58 @@ pub fn tools() -> Vec<Value> {
         ),
         tool(
             "answer_question",
-            "Answer a question; the cell shows \"answer ready\". Link to the cells and sources you used.",
-            json!({"id": s("Question id"), "text": s("The answer (plain text, short paragraphs)"), "links": links()}),
+            "Answer a question. Put links inside the text: [B1](cell:Sheet1!B1), [the source](https://…); plain B1, C3:D9 and Sheet2!B4 are linked too. A withdrawn question is refused: drop it.",
+            json!({"id": s("Question id"), "text": s("The answer (short paragraphs, links inside the text)"), "links": links()}),
             &["id", "text"],
             false,
         ),
         tool(
             "add_note",
-            "Leave a note on a range: why it is done this way (explanation), a prepared answer to a likely question (faq), an assumption, or a source with a summary.",
-            json!({"range": s("Range"), "text": s("Note text"), "title": s("Short title"), "kind": {"type": "string", "enum": ["explanation", "faq", "assumption", "source"]}, "links": links()}),
-            &["range", "text"],
+            "Leave a note in a topic, one that will still matter after the chat: an explanation, a source (url + summary), an assumption or a decision. Without a topic, a range starts a new topic (For information).",
+            json!({"topic": s("Topic id or number"), "range": s("Range, for a new topic"), "title": s("Short title"), "text": s("Note text, links inside"), "kind": {"type": "string", "enum": ["explanation", "source", "assumption", "decision"]}, "url": s("A source's address"), "summary": s("What the source says, one line"), "links": links()}),
+            &["text"],
+            false,
+        ),
+        tool(
+            "list_topics",
+            "The workbook's topics in document order: number, status and its text, places (with ranges), note titles, unread answers, whether you're working on one.",
+            json!({"status": {"type": "string", "enum": ["open", "revise", "agreed", "info"]}}),
+            &[],
+            true,
+        ),
+        tool(
+            "get_topic",
+            "Everything about one topic: places, status, notes with their texts, and the discussion.",
+            json!({"topic": s("Topic id or number")}),
+            &["topic"],
+            true,
+        ),
+        tool(
+            "add_places",
+            "Attach places a change here affects to the topic, each with a short reason (\"depends on 3.1 via the margin formula\"): the dependency shows on the sheet.",
+            json!({"topic": s("Topic id or number"), "places": {"type": "array", "items": {"type": "object", "properties": {"range": {"type": "string"}, "reason": {"type": "string"}}, "required": ["range"]}}}),
+            &["topic", "places"],
+            false,
+        ),
+        tool(
+            "widen_place",
+            "Widen a place to what the answer is really about (the whole row, the whole table), and say why.",
+            json!({"place": s("Place number (\"3.1\") or anchor id"), "to": s("The wider range, e.g. \"A12:H12\""), "reason": s("Why")}),
+            &["place", "to"],
+            false,
+        ),
+        tool(
+            "set_status",
+            "Set a topic's status with its text: open (a question or doubt) or revise (something here must change), or info (nothing to decide). Agreed is the user's: use propose_agreed.",
+            json!({"topic": s("Topic id or number"), "status": {"type": "string", "enum": ["open", "revise", "info"]}, "text": s("Why, links inside")}),
+            &["topic", "status"],
+            false,
+        ),
+        tool(
+            "propose_agreed",
+            "Suggest the user marks a topic Agreed, with your reasons; they confirm with one click.",
+            json!({"topic": s("Topic id or number"), "reasons": s("Why it can be agreed, links inside")}),
+            &["topic", "reasons"],
             false,
         ),
         tool(
@@ -296,7 +344,13 @@ fn call_tool(b: &mut dyn Backend, name: &str, args: &Value) -> Result<Value, Str
         }
         "claim_question" => exec(b, "agent.claim", pick(args, &["id"])),
         "answer_question" => exec(b, "agent.answer", pick(args, &["id", "text", "links"])),
-        "add_note" => exec(b, "agent.note", pick(args, &["range", "text", "title", "kind", "links"])),
+        "add_note" => exec(b, "agent.note", pick(args, &["topic", "range", "text", "title", "kind", "url", "summary", "links"])),
+        "list_topics" => exec(b, "agent.topics", pick(args, &["status"])),
+        "get_topic" => exec(b, "agent.topic", pick(args, &["topic"])),
+        "add_places" => exec(b, "agent.addPlaces", pick(args, &["topic", "places"])),
+        "widen_place" => exec(b, "agent.widenPlace", pick(args, &["place", "to", "reason"])),
+        "set_status" => exec(b, "agent.setStatus", pick(args, &["topic", "status", "text"])),
+        "propose_agreed" => exec(b, "agent.proposeAgreed", pick(args, &["topic", "reasons"])),
         "set_input_range" => exec(b, "agent.input", pick(args, &["cell", "low", "high", "relative", "rationale"])),
         "set_confidence" => exec(b, "agent.confidence", pick(args, &["range", "level", "reason"])),
         "log_decision" => exec(b, "agent.decision", pick(args, &["text", "range", "source"])),

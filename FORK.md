@@ -62,10 +62,15 @@ upstream. Each one accepted upstream removes its lines from the patch.
 - **Commands, not side channels.** Everything the layer does is an `agent.*` command registered
   through `gridcraft_engine::ext`, so the UI, the control channel, the CLI and MCP reach it like
   any other command, and `Session::execute` keeps catching panics.
-- **The layer lives in a per-document store, not in the undo history.** Undoing a cell edit must
-  never take away a question or an answer. The layer is written into the workbook only just before
-  a save (an observer on `file.save*`).
-- **In the file, as a custom XML part** (`urn:gridcraft:agent-layer:v1`, JSON in CDATA). GridCraft
+- **The layer lives in a per-document store, not in the document's snapshots.** Undoing a cell
+  edit must never take away a question or an answer. The layer is written into the workbook only
+  just before a save (an observer on `file.save*`). What a *person* does with the layer (ask, set a
+  status, mark client data, remove a note, reject a place, safe file, input ranges) is still on
+  their ⌘Z: a custom undo step (`ext::push_undo_step`, the engine hook below) sits in the same
+  history as their edits and restores only its part of the layer. The agent's own answers, notes
+  and places are not on the person's stack; each has a Remove or Reject that is.
+- **In the file, as a custom XML part** (`urn:gridcraft:agent-layer:v1`, JSON in CDATA, `version` 2 since Topics; a version 1 layer
+  becomes topics on load). GridCraft
   keeps custom XML parts on open and save (`xlsx/passthrough.rs`), and so does Excel, so the layer
   survives a round trip through Excel.
 - **Anchors are hidden defined names** (`_GcAgent_<id>`). The engine and Excel move them with
@@ -195,6 +200,41 @@ upstream. Each one accepted upstream removes its lines from the patch.
   something; Off refuses every agent-side command ("the agent connection is off in GridCraft
   (Agent tab ▸ Connection ▸ Mode)") while `initialize` and `tools/list` still answer; the mode is
   remembered in `<settings>/agent/mode`, and `--agent-mode` overrides it.
+- **Topics (v1, the shared model in `aitocraft/TOPICS.md`).** The unit is a topic: places
+  (anchors with the agent's reasons), a status (Open, Revise, Agreed, For information, with text,
+  who and when), notes, and the discussion (its questions and answers). Questions and notes stay in
+  their own lists with a `topic` id, so the existing question flow (claim, answer, events, voice)
+  didn't change shape. Topics are numbered like footnotes, by their first place in sheet order, and
+  places within a topic (`3.1`, `3.2`); numbers are computed, never stored. Only a person sets
+  Agreed: the agent proposes it with reasons and the person accepts with one click
+  (`agent.proposeAgreed`, `agent.acceptProposal`); every status change is in the log with who made
+  it. MCP: `list_topics`, `get_topic`, `add_places`, `widen_place`, `set_status`, `propose_agreed`;
+  `add_note` takes a topic. The web export drops the discussion unless "Include Discussion" is on.
+  - *Links inside text* (`textlinks.rs`). Answers, notes, status text, reasons and questions are
+    stored with `[label](anchor:<id>)` links; a `[B1](cell:Sheet1!B1)` the agent writes, and a
+    plain unambiguous `C3:D9`, `Sheet2!B4` or a lone `B1` that holds something, becomes one when
+    the text is stored. A label that was the address is stored as `@` and shown as the current
+    address, so an answer that said C4 says C5 after a row insert, with nothing marking it.
+  - *Whereabouts of deleted places.* An observer before `home.deleteRows`, `deleteColumns`,
+    `deleteCells` and `deleteSheet` anchors the neighbours (the row above and below, the column left
+    and right) of every anchor the delete takes; the place then reads "removed (was C10, between C9
+    and C10)" with live links, struck through in its topic. Undo of the delete brings the anchor
+    back. Cut and paste move a place (the engine moves defined names); copy and fill don't
+    duplicate it (they don't copy names).
+  - *Undo of a question*: not yet taken, it goes with its topic; being worked on, it's withdrawn
+    (the agent gets a `withdrawn` event and `answer_question` says to drop it); answered, it's
+    hidden with its answer. Redo sends it again, or shows it as it was.
+  - *Markers*: a numbered pill per place in the top-right cell's top-right corner, in the status
+    colour, blue and pulsing while the agent works, a dot for an unread answer; several stack
+    leftwards. They never cover the value: measured with the cell's font, the stack goes left of a
+    right-aligned value when the corner is taken, and a cell with no room left gets a corner flag
+    (the numbers are on hover and in the pane). Clicking one opens the topic.
+  - *The pane*: Selection (the cell, the topics touching it as cards, and folded below them where
+    the number comes from, sensitivity, worst and best case, alternatives, risk; the question box at
+    the bottom, adding to the selection's topic or starting a new one), Overview (sign-off "Agreed
+    3 of 5 · 1 revise · 1 open", filters, every topic; also every set of alternatives), History.
+    The ribbon's Agent button shows the sign-off count.
+  - Deferred (TOPICS.md §6): nested places.
 - **Analysis is deterministic.** The trace and the sensitivity are computed by the engine (the
   dependency graph, recalculation of a scratch copy). The agent explains them; it doesn't make them up.
 - **Several inputs at once, bounded.** The worst and best combination moves 3–12 inputs inside
@@ -307,14 +347,16 @@ Rules that keep it this way:
 
 ## Status
 
-Prototype. Done for GridCraft: question queue with live badges, agent notes with links, privacy
+Prototype. Done for GridCraft: topics (TOPICS.md v1: places with whereabouts, statuses with
+sign-off, links inside text that follow the cells, numbered markers, Selection / Overview pane,
+person actions on ⌘Z, layer format v2), question queue with live markers, agent notes with links, privacy
 gate, the calculation tree, sensitivity with reasoned ranges (tornado on hover, Impact heat map),
 the confidence heat map, decision history and audit trail, in-app MCP and event stream, storage
-in the `.xlsx`; export to a self-contained web page (WASM, prepared answers only, read-only); alternatives in the document ("A or B?", Variants tab, switch and recalculate) and
+in the `.xlsx`; export to a self-contained web page (WASM, prepared answers only, read-only); alternatives in the document ("A or B?", switch and recalculate) and
 calculation methods side by side (simple vs exact, material differences flagged on the results);
 multi-dimensional analysis (the worst and best combination of an output's inputs, against the
 single moves added up); the risk matrix (each input's impact on an output against the agent's
-confidence in it, Risk tab); safe file mode (client data saved as stand-ins, real values sealed
+confidence in it); safe file mode (client data saved as stand-ins, real values sealed
 under a key kept on this computer; export for standard Excel); GridCraft's side of Excel → slide
 links (copy as linked source, `link.read`, "used on slides" with Go to Slide, `--goto`); the app
 starting the agent itself (into the user's own Claude Code session as channel events, or as a

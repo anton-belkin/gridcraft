@@ -169,26 +169,48 @@ fn status_line(ui: &mut Ui, text: &str, color: Color32, tip: &str) {
 pub(crate) fn counts(app: &SheetApp) -> (usize, usize) {
     let Some(d) = app.session.active() else { return (0, 0) };
     let l = layer::get(d);
-    let ready = l.questions.iter().filter(|q| q.status == QuestionStatus::Answered && !q.seen).count();
-    let waiting = l.questions.iter().filter(|q| matches!(q.status, QuestionStatus::Pending | QuestionStatus::Working) && !q.is_ping()).count();
+    let ready = l.questions.iter().filter(|q| q.status == QuestionStatus::Answered && !q.seen && !q.hidden).count();
+    let waiting =
+        l.questions.iter().filter(|q| matches!(q.status, QuestionStatus::Pending | QuestionStatus::Working) && !q.is_ping() && !q.hidden).count();
     (ready, waiting)
 }
 
-/// What the Agent button says under its label: "1 ready", "1 in work", "2 waiting", "idle".
-fn status(app: &SheetApp, t: &Tokens, p: &crate::Palette) -> (String, Color32) {
-    let Some(d) = app.session.active() else { return ("idle".into(), t.text_disabled) };
+/// What the Agent button says under its label: readiness for sign-off ("3 of 5 agreed"), or what
+/// waits when there are no topics to decide yet; the details on hover.
+fn status(app: &SheetApp, t: &Tokens, p: &crate::Palette) -> (String, Color32, String) {
+    let Some(d) = app.session.active() else { return ("idle".into(), t.text_disabled, String::new()) };
     let l = layer::get(d);
-    let ready = l.questions.iter().filter(|q| q.status == QuestionStatus::Answered && !q.seen).count();
-    let working = l.questions.iter().filter(|q| q.status == QuestionStatus::Working && !q.is_ping()).count();
-    let waiting = l.questions.iter().filter(|q| q.status == QuestionStatus::Pending && !q.is_ping()).count();
+    let live = |q: &&layer::Question| !q.is_ping() && !q.hidden;
+    let ready = l.questions.iter().filter(live).filter(|q| q.status == QuestionStatus::Answered && !q.seen).count();
+    let working = l.questions.iter().filter(live).filter(|q| q.status == QuestionStatus::Working).count();
+    let waiting = l.questions.iter().filter(live).filter(|q| q.status == QuestionStatus::Pending).count();
+    let mut tip = crate::pane::signoff_line(&l);
+    for (k, what) in [(ready, "answers ready"), (working, "in work with the agent"), (waiting, "waiting for the agent")] {
+        if k > 0 {
+            tip.push_str(&format!("\n{k} {what}"));
+        }
+    }
+    let (agreed, decide, revise, open, _) = crate::pane::signoff(&l);
+    if decide > 0 {
+        let color = if revise > 0 {
+            p.revise
+        } else if agreed == decide {
+            p.agreed
+        } else if open > 0 {
+            p.open
+        } else {
+            t.text_dim
+        };
+        return (format!("{agreed} of {decide} agreed"), color, tip);
+    }
     if ready > 0 {
-        (format!("{ready} ready"), p.answered)
+        (format!("{ready} ready"), p.answered, tip)
     } else if working > 0 {
-        (format!("{working} in work"), p.working)
+        (format!("{working} in work"), p.working, tip)
     } else if waiting > 0 {
-        (format!("{waiting} waiting"), p.pending)
+        (format!("{waiting} waiting"), p.pending, tip)
     } else {
-        ("idle".into(), t.text_disabled)
+        ("idle".into(), t.text_disabled, tip)
     }
 }
 
@@ -230,19 +252,10 @@ pub(crate) fn show(st: &mut AgentUi, app: &mut SheetApp, ui: &mut Ui) {
 
     // Agent: the pane and what waits.
     group(ui, "Agent", |ui| {
-        let (sub, color) = status(app, &t, &p);
-        if tall_button(
-            ui,
-            "Agent",
-            Some((&sub, color)),
-            st.open,
-            true,
-            "Show or hide the Agent pane: your questions, the agent's answers and notes",
-            |pa, r, _| sparkle(pa, r, p.agent),
-        )
-        .clicked()
-        {
-            acts.push(Act::Pane(!st.open, if ready > 0 || waiting > 0 { Tab::Questions } else { Tab::Cell }));
+        let (sub, color, detail) = status(app, &t, &p);
+        let tip = format!("Show or hide the Agent pane: topics on the selection, their status, notes and discussion\n\n{detail}");
+        if tall_button(ui, "Agent", Some((&sub, color)), st.open, true, tip.trim_end(), |pa, r, _| sparkle(pa, r, p.agent)).clicked() {
+            acts.push(Act::Pane(!st.open, if ready > 0 || waiting > 0 { Tab::Overview } else { Tab::Selection }));
         }
     });
 
@@ -342,13 +355,23 @@ pub(crate) fn show(st: &mut AgentUi, app: &mut SheetApp, ui: &mut Ui) {
                         ui,
                         Icon::Picture,
                         "Export Web Page",
-                        &format!("One HTML file with the prepared answers and notes, read-only · {tip}"),
+                        &format!("One HTML file with the topics, their status and notes, read-only · {tip}"),
                         false,
                     )
                     .clicked()
                         && let Some(path) = path
                     {
                         acts.push(Act::Share(path));
+                    }
+                    if choice(
+                        ui,
+                        "Include Discussion",
+                        st.share_discussion,
+                        "The web page also carries the questions and answers. Off: only the status and notes of each topic go out",
+                    )
+                    .clicked()
+                    {
+                        st.share_discussion = !st.share_discussion;
                     }
                 }
             });
@@ -374,7 +397,7 @@ pub(crate) fn show(st: &mut AgentUi, app: &mut SheetApp, ui: &mut Ui) {
             Act::Pane(open, tab) => {
                 st.open = open;
                 st.tab = tab;
-                if open && tab == Tab::Cell {
+                if open && tab == Tab::Selection {
                     st.focus_draft = true;
                 }
             }
@@ -414,7 +437,7 @@ pub(crate) fn show(st: &mut AgentUi, app: &mut SheetApp, ui: &mut Ui) {
                 app.toast =
                     Some(("Claude Desktop: the session is in its Code tab, under this workbook's folder".into(), gridcraft_ui_egui::now_ms()));
             }
-            Act::Share(path) => match app.run("agent.exportHtml", json!({"path": path})) {
+            Act::Share(path) => match app.run("agent.exportHtml", json!({"path": path, "includeDiscussion": st.share_discussion})) {
                 Ok(_) => app.toast = Some((format!("Saved {path}"), gridcraft_ui_egui::now_ms())),
                 Err(e) => app.message = Some(("Export Web Page".into(), e)),
             },

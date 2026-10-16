@@ -41,6 +41,8 @@ pub mod server;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod stdio;
 pub mod stress;
+pub mod textlinks;
+pub mod topics;
 pub mod variants;
 
 use std::sync::Arc;
@@ -147,6 +149,10 @@ impl Observer for Keeper {
         }
         // A safe save that didn't finish puts the real workbook back first.
         safe::restore(s);
+        // Deleted places and links keep their whereabouts.
+        if matches!(id, "home.deleteRows" | "home.deleteColumns" | "home.deleteCells" | "home.deleteSheet") {
+            topics::before_delete(s, id, params);
+        }
         BEFORE.with(|b| b.borrow_mut().push(wb_ptr(s)));
         // Write the layer into the workbook just before it is saved; in safe file mode, save a
         // copy with stand-ins for client data and the real values sealed instead.
@@ -156,7 +162,8 @@ impl Observer for Keeper {
         }
         if saving && let Some(d) = s.active_mut() {
             let l = layer::get(d);
-            let has_part = layer::read_from(&d.wb) != Layer::default();
+            let has_part =
+                d.wb.preserved.as_deref().is_some_and(|p| p.parts.iter().any(|q| std::str::from_utf8(&q.data).is_ok_and(|t| t.contains(layer::NS))));
             if !l.is_empty() || has_part {
                 layer::write_into(Arc::make_mut(&mut d.wb), &l);
             }
@@ -192,6 +199,14 @@ impl Observer for Keeper {
         let agent = commands::AGENT_DEPTH.with(std::cell::Cell::get) > 0;
         if !agent && layer::get(d).is_empty() {
             return;
+        }
+        // The agent's edits stay in the person's history, labelled as the agent's.
+        if agent
+            && let Some(e) = d.undo.last_mut()
+            && before.is_some_and(|(_, ptr)| Arc::as_ptr(&e.wb) as usize == ptr)
+            && !e.label.starts_with("(agent)")
+        {
+            e.label = format!("(agent) {}", e.label);
         }
         let (reason, source) = if agent { commands::PENDING_REASON.with(|r| r.borrow().clone()).unwrap_or_default() } else { Default::default() };
         let label = gridcraft_engine::find_command(id).map(|c| c.label.trim_end_matches('…').to_string()).unwrap_or_else(|| id.to_string());

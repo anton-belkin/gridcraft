@@ -61,7 +61,9 @@ fn question_round_trip() {
     .unwrap();
     let all = s.execute("agent.questions", json!({})).unwrap();
     assert_eq!(all[0]["status"], json!("answered"));
-    assert_eq!(all[0]["answer"]["links"][0]["href"], json!("cell:Sheet1!B5"));
+    // The links go inside the text, as a sentence.
+    let text = all[0]["answer"]["text"].as_str().unwrap();
+    assert!(text.contains("[Fixed costs](cell:Sheet1!B5)"), "{text}");
 }
 
 #[test]
@@ -72,15 +74,21 @@ fn anchors_follow_inserted_rows_and_survive_undo() {
     s.execute("home.insertRows", json!({})).unwrap();
     let q = s.execute("agent.questions", json!({})).unwrap();
     assert_eq!(q[0]["range"], json!("Sheet1!B8"), "{q}");
-    // Undoing the insert moves the anchor back; undoing past the question keeps the question.
+    // Undoing the insert moves the anchor back; undoing the question takes it back (it was the
+    // person's action, in the same history); redo asks it again.
     s.execute("edit.undo", json!({})).unwrap();
     let q = s.execute("agent.questions", json!({})).unwrap();
     assert_eq!(q[0]["range"], json!("Sheet1!B7"));
+    let r = s.execute("edit.undo", json!({})).unwrap();
+    assert_eq!(r["undone"], json!("Ask the Agent"));
+    assert!(s.execute("agent.questions", json!({})).unwrap().as_array().unwrap().is_empty());
     for _ in 0..20 {
         let _ = s.execute("edit.undo", json!({}));
     }
-    let q = s.execute("agent.questions", json!({})).unwrap();
+    s.execute("edit.redo", json!({"steps": 20})).unwrap();
+    let q = s.execute("agent.questions", json!({"status": "pending"})).unwrap();
     assert_eq!(q.as_array().unwrap().len(), 1);
+    assert_eq!(q[0]["range"], json!("Sheet1!B8"));
 }
 
 #[test]
@@ -229,21 +237,28 @@ fn mcp_tools_reach_the_commands() {
 }
 
 #[test]
-fn shared_layer_keeps_answers_and_drops_open_questions() {
+fn sending_drops_the_discussion_unless_included() {
     let mut s = model();
-    let open = s.execute("agent.ask", json!({"range": "B5", "text": "Where do fixed costs come from?"})).unwrap();
+    s.execute("agent.ask", json!({"range": "B5", "text": "Where do fixed costs come from?"})).unwrap();
     let asked = s.execute("agent.ask", json!({"range": "B7", "text": "Why is profit negative?"})).unwrap();
     let id = asked["id"].as_str().unwrap();
     s.execute("agent.answer", json!({"id": id, "text": "Fixed costs exceed the margin."})).unwrap();
     s.execute("agent.seen", json!({"id": id})).unwrap();
+    s.execute("agent.setStatus", json!({"topic": asked["topic"], "status": "revise", "text": "cut fixed costs in B5"})).unwrap();
     s.execute("agent.note", json!({"range": "B2", "text": "List price.", "kind": "source"})).unwrap();
-    let l = crate::export::shared_layer(&layer::get(s.active().unwrap()));
+    // Sent as is: topics with places, status and notes; no discussion.
+    let l = crate::export::shared_layer(&layer::get(s.active().unwrap()), false);
+    assert!(l.questions.is_empty());
+    assert_eq!(l.topics.len(), 3);
+    assert_eq!(l.notes.len(), 1);
+    let t = l.topic(asked["topic"].as_str().unwrap()).unwrap();
+    assert_eq!(t.status.status, layer::Status::Revise);
+    assert!(l.anchor(&t.places[0].anchor).is_some(), "places travel");
+    // With the discussion: the answered question, shown as new; the open one stays behind.
+    let l = crate::export::shared_layer(&layer::get(s.active().unwrap()), true);
     assert_eq!(l.questions.len(), 1);
     assert_eq!(l.questions[0].id, id);
     assert!(!l.questions[0].seen, "a prepared answer is new to the recipient");
-    assert_eq!(l.notes.len(), 1);
-    let open_anchor = &layer::get(s.active().unwrap()).questions.iter().find(|q| Some(q.id.as_str()) == open["id"].as_str()).unwrap().anchor.clone();
-    assert!(l.anchor(open_anchor).is_none(), "the open question's anchor goes with it");
 }
 
 #[test]
@@ -268,7 +283,16 @@ fn export_html_embeds_the_workbook_and_the_app() {
     let mut r = Session::new();
     r.execute("file.open", json!({"name": "book.xlsx", "base64": gridcraft_engine::io::base64_encode(&bytes)})).unwrap();
     let l = layer::get(r.active().unwrap());
-    assert_eq!(l.questions.len(), 1, "only the answered question travels");
+    assert!(l.questions.is_empty(), "the discussion stays behind");
+    assert_eq!(l.topics.len(), 2, "the topics travel");
+    s.execute("agent.exportHtml", json!({"path": out.to_str().unwrap(), "web": web.to_str().unwrap(), "includeDiscussion": true})).unwrap();
+    let html = std::fs::read_to_string(&out).unwrap();
+    let start = html.find(&format!("id=\"{}\"", crate::export::WORKBOOK_ELEMENT)).unwrap();
+    let body = &html[start..];
+    let b64 = &body[body.find('>').unwrap() + 1..body.find("</script>").unwrap()];
+    let mut r = Session::new();
+    r.execute("file.open", json!({"name": "book.xlsx", "base64": b64})).unwrap();
+    assert_eq!(layer::get(r.active().unwrap()).questions.len(), 1, "with the discussion: the answered question");
     assert!(s.execute("agent.exportHtml", json!({"path": out.to_str().unwrap(), "web": dir.join("none").to_str().unwrap()})).is_err());
     assert!(s.execute("agent.exportHtml", json!({})).is_err());
     let _ = std::fs::remove_dir_all(&dir);
@@ -918,10 +942,9 @@ fn spoken_question_with_pointing() {
     let pending = s.execute("agent.questions", json!({"status": "pending"})).unwrap();
     let p = &pending[0];
     assert_eq!(p["range"], json!("Sheet1!B8"));
-    assert_eq!(p["spokenText"], json!("Why is ⟦1⟧ so much higher than ⟦2⟧ times the price?"));
+    // Where they pointed became links (and places of the topic), following the moved rows.
     let text = p["text"].as_str().unwrap();
-    assert!(text.starts_with("Why is ⟦1: Sheet1!B7 · Revenue = "), "{text}");
-    assert!(text.contains("⟦2: Sheet1!B4 · Volume = "), "{text}");
+    assert_eq!(text, "Why is [B7](cell:Sheet1!B7) so much higher than [B4](cell:Sheet1!B4) times the price?");
     // The volume is client data: the agent sees a stand-in, never 5000.
     assert!(!text.contains("5000") && !text.contains("5,000"), "{text}");
     assert_eq!(p["refs"][1]["range"], json!("Sheet1!B4"));
@@ -931,7 +954,7 @@ fn spoken_question_with_pointing() {
     assert!(s.execute("agent.removeQuestion", json!({"id": id})).is_err());
     // The events stream, the channel and the background agent all read this text.
     let note = crate::channel::notification(p);
-    assert!(note["params"]["content"].as_str().unwrap().contains("⟦1: Sheet1!B7"), "{note}");
+    assert!(note["params"]["content"].as_str().unwrap().contains("[B7](cell:Sheet1!B7)"), "{note}");
     // Saved now, refs and all.
     let b64 = s.execute("file.saveBytes", json!({})).unwrap()["base64"].as_str().unwrap().to_string();
     let mut t = Session::new();
@@ -1239,4 +1262,326 @@ fn registry_says_when_each_document_had_focus() {
     assert_eq!(doc(&s, &first)["focusedAt"], json!(6_000));
     let v = crate::registry::contents(&s, "http://127.0.0.1:7980/mcp", 7_000);
     assert!(v["documents"].as_array().unwrap().iter().any(|d| d["focusedAt"] == json!(6_000)));
+}
+
+// ---------------------------------------------------------------- Topics v1
+
+fn topic_of(s: &Session, id: &str) -> crate::layer::Topic {
+    layer::get(s.active().unwrap()).topic(id).cloned().unwrap()
+}
+
+fn render_answer(s: &mut Session, qid: &str) -> String {
+    let all = s.execute("agent.questions", json!({"masked": false})).unwrap();
+    all.as_array().unwrap().iter().find(|q| q["id"] == json!(qid)).unwrap()["answer"]["text"].as_str().unwrap().to_string()
+}
+
+#[test]
+fn links_in_text_follow_the_cells_silently() {
+    let mut s = model();
+    let q = s.execute("agent.ask", json!({"range": "B7", "text": "Why?"})).unwrap();
+    let id = q["id"].as_str().unwrap().to_string();
+    // A cell link, plain references (a range, another sheet's cell, a cell that holds something),
+    // and a plain word that only looks like a cell (Q3 is empty: not a link).
+    s.execute("sheet.add", json!({})).ok();
+    s.execute(
+        "agent.answer",
+        json!({"id": id, "text": "Profit is [the margin](cell:Sheet1!B6) less B5; see B2:B4 for inputs. Q3 numbers aren't in yet.", "actor": "agent"}),
+    )
+    .unwrap();
+    let before = render_answer(&mut s, &id);
+    assert!(before.contains("[the margin](cell:Sheet1!B6)"), "{before}");
+    assert!(before.contains("[B5](cell:Sheet1!B5)"), "{before}");
+    assert!(before.contains("[B2:B4](cell:Sheet1!B2:B4)"), "{before}");
+    assert!(before.contains("Q3 numbers"), "{before}");
+    assert!(!before.contains("cell:Sheet1!Q3"), "{before}");
+    // A row inserted above: the same text now says B6 and B3:B5, nothing marking the change.
+    s.execute("selection.set", json!({"range": "A1"})).unwrap();
+    s.execute("home.insertRows", json!({})).unwrap();
+    let after = render_answer(&mut s, &id);
+    assert!(after.contains("less [B6](cell:Sheet1!B6)"), "{after}");
+    assert!(after.contains("[B3:B5](cell:Sheet1!B3:B5)"), "{after}");
+    assert!(after.contains("[the margin](cell:Sheet1!B7)"), "{after}");
+}
+
+#[test]
+fn topics_are_numbered_like_footnotes_and_places_within_them() {
+    let mut s = model();
+    let a = s.execute("agent.ask", json!({"range": "B7", "text": "Profit?"})).unwrap();
+    let b = s.execute("agent.ask", json!({"range": "B5", "text": "Fixed costs?"})).unwrap();
+    let (ta, tb) = (a["topic"].as_str().unwrap().to_string(), b["topic"].as_str().unwrap().to_string());
+    let n = |s: &Session| {
+        let d = s.active().unwrap();
+        crate::topics::numbering(&d.wb, &layer::get(d))
+    };
+    // B5 comes before B7: topic numbers follow the sheet, not the order of asking.
+    assert_eq!(n(&s).topic[&tb], 1);
+    assert_eq!(n(&s).topic[&ta], 2);
+    // A follow-up on the same cell joins the topic; the agent adds a place: 2.1, 2.2.
+    let c = s.execute("agent.ask", json!({"range": "B7", "text": "And next year?"})).unwrap();
+    assert_eq!(c["topic"], json!(ta));
+    s.execute("agent.addPlaces", json!({"topic": "2", "places": [{"range": "B3", "reason": "depends on volume"}], "actor": "agent"})).unwrap();
+    let t = topic_of(&s, &ta);
+    assert_eq!(t.places.len(), 2);
+    let nn = n(&s);
+    // B3 now comes first: topic `ta` is 1, its places 1.1 (B3) and 1.2 (B7).
+    assert_eq!(nn.topic[&ta], 1);
+    assert_eq!(nn.place[&(ta.clone(), t.places[1].anchor.clone())], "1.1");
+    assert_eq!(nn.place[&(ta.clone(), t.places[0].anchor.clone())], "1.2");
+    // A new topic on purpose, on the same cell.
+    let d = s.execute("agent.ask", json!({"range": "B7", "text": "Separate thing", "newTopic": true})).unwrap();
+    assert_ne!(d["topic"], json!(ta));
+    // The agent widens a place to the whole row, with its reason.
+    s.execute("agent.widenPlace", json!({"place": "1.2", "to": "A7:B7", "reason": "the whole profit line", "actor": "agent"})).unwrap();
+    let t = topic_of(&s, &ta);
+    let d = s.active().unwrap();
+    let widened = t.places.iter().find(|p| p.reason.contains("profit line")).unwrap();
+    assert_eq!(crate::anchor::resolve(&d.wb, layer::get(d).anchor(&widened.anchor).unwrap()).unwrap().a1(), "Sheet1!A7:B7");
+}
+
+#[test]
+fn a_deleted_place_remembers_where_it_was() {
+    let mut s = model();
+    let q = s.execute("agent.ask", json!({"range": "B5", "text": "Fixed costs?"})).unwrap();
+    let t = q["topic"].as_str().unwrap().to_string();
+    s.execute("selection.set", json!({"range": "A5"})).unwrap();
+    s.execute("home.deleteRows", json!({})).unwrap();
+    let topic = s.execute("agent.topic", json!({"topic": t, "masked": false})).unwrap();
+    let removed = topic["places"][0]["removed"].as_str().unwrap();
+    assert!(removed.contains("removed (was B5, between [B4](cell:Sheet1!B4) and [B5](cell:Sheet1!B5))"), "{removed}");
+    // The neighbours are live: a row inserted above moves them.
+    s.execute("selection.set", json!({"range": "A1"})).unwrap();
+    s.execute("home.insertRows", json!({})).unwrap();
+    let topic = s.execute("agent.topic", json!({"topic": t, "masked": false})).unwrap();
+    assert!(topic["places"][0]["removed"].as_str().unwrap().contains("between [B5](cell:Sheet1!B5) and [B6](cell:Sheet1!B6)"), "{topic}");
+    // Undo of the delete brings the place back as it was.
+    s.execute("edit.undo", json!({"steps": 2})).unwrap();
+    let topic = s.execute("agent.topic", json!({"topic": t, "masked": false})).unwrap();
+    assert_eq!(topic["places"][0]["range"], json!("Sheet1!B5"));
+}
+
+#[test]
+fn cut_moves_a_place_and_copy_or_fill_doesnt_duplicate_it() {
+    let mut s = model();
+    let q = s.execute("agent.ask", json!({"range": "B4", "text": "Unit cost?"})).unwrap();
+    let t = q["topic"].as_str().unwrap().to_string();
+    let places = |s: &mut Session| s.execute("agent.topic", json!({"topic": t, "masked": false})).unwrap()["places"].clone();
+    s.execute("selection.set", json!({"range": "B4"})).unwrap();
+    s.execute("edit.cut", json!({})).unwrap();
+    s.execute("selection.set", json!({"range": "D10"})).unwrap();
+    s.execute("edit.paste", json!({})).unwrap();
+    let p = places(&mut s);
+    assert_eq!(p.as_array().unwrap().len(), 1);
+    assert_eq!(p[0]["range"], json!("Sheet1!D10"));
+    s.execute("selection.set", json!({"range": "D10"})).unwrap();
+    s.execute("edit.copy", json!({})).unwrap();
+    s.execute("selection.set", json!({"range": "F12"})).unwrap();
+    s.execute("edit.paste", json!({})).unwrap();
+    s.execute("selection.set", json!({"range": "D10:D14"})).unwrap();
+    let _ = s.execute("home.fillDown", json!({}));
+    let p = places(&mut s);
+    assert_eq!(p.as_array().unwrap().len(), 1, "{p}");
+    assert_eq!(p[0]["range"], json!("Sheet1!D10"));
+    assert_eq!(layer::get(s.active().unwrap()).topics.len(), 1);
+}
+
+#[test]
+fn undo_takes_a_question_back_and_redo_sends_it_again() {
+    let mut s = model();
+    // Not taken yet: gone, with its topic; redo asks again.
+    let q = s.execute("agent.ask", json!({"range": "B7", "text": "Why?"})).unwrap();
+    let id = q["id"].as_str().unwrap().to_string();
+    s.execute("edit.undo", json!({})).unwrap();
+    let l = layer::get(s.active().unwrap());
+    assert!(l.questions.is_empty() && l.topics.is_empty());
+    s.execute("edit.redo", json!({})).unwrap();
+    assert_eq!(s.execute("agent.questions", json!({"status": "pending"})).unwrap()[0]["id"], json!(id));
+    // Being worked on: withdrawn; the agent's answer is refused; redo sends it again.
+    s.execute("agent.claim", json!({"id": id, "actor": "agent"})).unwrap();
+    s.execute("edit.undo", json!({})).unwrap();
+    assert_eq!(s.execute("agent.questions", json!({"status": "withdrawn"})).unwrap()[0]["id"], json!(id));
+    let e = s.execute("agent.answer", json!({"id": id, "text": "x", "actor": "agent"})).unwrap_err().to_string();
+    assert!(e.contains("this question was withdrawn by the user; drop it"), "{e}");
+    s.execute("edit.redo", json!({})).unwrap();
+    assert_eq!(s.execute("agent.questions", json!({"status": "pending"})).unwrap()[0]["id"], json!(id));
+    // Answered: undo hides it with its answer; redo shows it as it was, without asking again.
+    s.execute("agent.answer", json!({"id": id, "text": "Because.", "actor": "agent"})).unwrap();
+    s.execute("edit.undo", json!({})).unwrap();
+    assert!(s.execute("agent.questions", json!({})).unwrap().as_array().unwrap().is_empty());
+    assert!(layer::get(s.active().unwrap()).topics[0].hidden);
+    s.execute("edit.redo", json!({})).unwrap();
+    let all = s.execute("agent.questions", json!({})).unwrap();
+    assert_eq!(all[0]["status"], json!("answered"));
+    assert_eq!(all[0]["answer"]["text"], json!("Because."));
+    // The agent's contributions aren't on the person's stack.
+    let depth = s.active().unwrap().undo.len();
+    s.execute("agent.note", json!({"topic": q["topic"], "text": "An explanation", "actor": "agent"})).unwrap();
+    s.execute("agent.setStatus", json!({"topic": q["topic"], "status": "revise", "actor": "agent"})).unwrap();
+    assert_eq!(s.active().unwrap().undo.len(), depth);
+}
+
+#[test]
+fn a_persons_layer_actions_undo_in_order() {
+    let mut s = model();
+    let q = s.execute("agent.ask", json!({"range": "B7", "text": "Why?"})).unwrap();
+    let t = q["topic"].as_str().unwrap().to_string();
+    s.execute("agent.setStatus", json!({"topic": t, "status": "revise", "text": "B5 must come down"})).unwrap();
+    s.execute("cell.set", json!({"cell": "B5", "input": 90000})).unwrap();
+    s.execute("agent.private", json!({"range": "B1"})).unwrap();
+    // Undo: client data, the cell, the status: each in turn, nothing else touched.
+    s.execute("edit.undo", json!({})).unwrap();
+    assert!(layer::get(s.active().unwrap()).private.is_empty());
+    assert_eq!(num(&s, "B5"), 90000.0);
+    assert_eq!(topic_of(&s, &t).status.status, layer::Status::Revise);
+    s.execute("edit.undo", json!({})).unwrap();
+    assert_eq!(num(&s, "B5"), 100000.0);
+    assert_eq!(topic_of(&s, &t).status.status, layer::Status::Revise);
+    s.execute("edit.undo", json!({})).unwrap();
+    assert_eq!(topic_of(&s, &t).status.status, layer::Status::Open);
+    s.execute("edit.redo", json!({"steps": 3})).unwrap();
+    assert_eq!(topic_of(&s, &t).status.status, layer::Status::Revise);
+    assert_eq!(num(&s, "B5"), 90000.0);
+    assert_eq!(layer::get(s.active().unwrap()).private.len(), 1);
+    // Removing a note is undoable too.
+    let n = s.execute("agent.note", json!({"topic": t, "text": "From the 2025 budget", "actor": "agent"})).unwrap();
+    s.execute("agent.removeNote", json!({"id": n["id"]})).unwrap();
+    s.execute("edit.undo", json!({})).unwrap();
+    assert_eq!(layer::get(s.active().unwrap()).notes.len(), 1);
+}
+
+#[test]
+fn only_a_person_sets_agreed() {
+    let mut s = model();
+    let q = s.execute("agent.ask", json!({"range": "B7", "text": "OK?"})).unwrap();
+    let t = q["topic"].as_str().unwrap().to_string();
+    let e = s.execute("agent.setStatus", json!({"topic": t, "status": "agreed", "actor": "agent"})).unwrap_err().to_string();
+    assert!(e.contains("only a person sets Agreed"), "{e}");
+    assert!(s.execute("agent.acceptProposal", json!({"topic": t, "actor": "agent"})).is_err());
+    s.execute("agent.proposeAgreed", json!({"topic": t, "reasons": "B5 matches the 2025 budget", "actor": "agent"})).unwrap();
+    assert!(topic_of(&s, &t).proposed.is_some());
+    s.execute("agent.acceptProposal", json!({"topic": t})).unwrap();
+    let tp = topic_of(&s, &t);
+    assert_eq!(tp.status.status, layer::Status::Agreed);
+    assert_eq!(tp.status.by, crate::Actor::Human);
+    assert!(tp.proposed.is_none());
+    // Every status change is in the log, with who made it.
+    let l = layer::get(s.active().unwrap());
+    assert!(l.log.iter().any(|e| e.text.contains("Agreed") && e.actor == crate::Actor::Human));
+    assert!(l.log.iter().any(|e| e.text.contains("Proposed Agreed") && e.actor == crate::Actor::Agent));
+    // Sign-off: agreed 1 of 1.
+    assert_eq!(crate::topics::signoff(&l).0, 1);
+}
+
+#[test]
+fn version_1_workbooks_become_topics_on_load() {
+    let mut s = model();
+    // A v1 layer as an older build wrote it: two questions (one answered and read) and a note.
+    let v1 = json!({
+        "version": 1, "next_id": 9,
+        "anchors": [{"id": "a1", "name": "_GcAgent_a1", "sheet": "Sheet1", "range": "B7"}, {"id": "a2", "name": "_GcAgent_a2", "sheet": "Sheet1", "range": "B5"}],
+        "questions": [
+            {"id": "q3", "anchor": "a1", "text": "Why?", "status": "answered", "seen": true, "answer": {"text": "Because.", "at": 5}},
+            {"id": "q4", "anchor": "a2", "text": "Source?", "status": "pending"}
+        ],
+        "notes": [{"id": "n5", "anchor": "a2", "kind": "source", "text": "2025 budget", "author": "agent"}],
+        "log": [{"seq": 1, "at": 1, "actor": "human", "kind": "decision", "text": "started"}]
+    });
+    let d = s.active_mut().unwrap();
+    let wb = std::sync::Arc::make_mut(&mut d.wb);
+    for (name, cell) in [("_GcAgent_a1", "$B$7"), ("_GcAgent_a2", "$B$5")] {
+        wb.names.push(gridcraft_engine::model::DefinedName {
+            name: name.into(),
+            scope: None,
+            formula: format!("Sheet1!{cell}"),
+            comment: String::new(),
+            hidden: true,
+        });
+    }
+    let mut p: gridcraft_engine::model::Preserved = Default::default();
+    let xml = format!("<agentLayer xmlns=\"{}\"><![CDATA[{}]]></agentLayer>", layer::NS, v1);
+    p.parts.push(gridcraft_engine::model::PreservedPart {
+        name: "customXml/gridcraftAgent.xml".into(),
+        content_type: "application/xml".into(),
+        data: std::sync::Arc::from(xml.into_bytes()),
+        rels: vec![],
+    });
+    wb.preserved = Some(std::sync::Arc::new(p));
+    let l = layer::read_from(&s.active().unwrap().wb);
+    assert_eq!(l.version, layer::VERSION);
+    assert_eq!(l.topics.len(), 3);
+    let q3 = l.questions.iter().find(|q| q.id == "q3").unwrap();
+    let q4 = l.questions.iter().find(|q| q.id == "q4").unwrap();
+    assert_eq!(l.topic(&q3.topic).unwrap().status.status, layer::Status::Info, "answered and read");
+    assert_eq!(l.topic(&q4.topic).unwrap().status.status, layer::Status::Open);
+    let n5 = l.notes.iter().find(|n| n.id == "n5").unwrap();
+    let tn = l.topic(&n5.topic).unwrap();
+    assert_eq!(tn.status.status, layer::Status::Info);
+    assert_eq!(tn.places[0].anchor, "a2");
+    // Saved again: v2.
+    let mut wb2 = (*s.active().unwrap().wb).clone();
+    layer::write_into(&mut wb2, &l);
+    assert_eq!(layer::read_from(&wb2), {
+        let mut x = l.clone();
+        x.revision = 0;
+        x
+    });
+}
+
+#[test]
+fn voice_refs_become_places_of_the_topic() {
+    let mut s = model();
+    let q = s.execute("agent.ask", json!({"range": "B7", "transcribing": true, "refs": [{"n": 1, "range": "B6"}, {"n": 2, "range": "B3"}]})).unwrap();
+    let id = q["id"].as_str().unwrap().to_string();
+    s.execute("agent.spoken", json!({"id": id, "text": "Why is ⟦1⟧ bigger than ⟦2⟧?"})).unwrap();
+    let t = topic_of(&s, q["topic"].as_str().unwrap());
+    assert_eq!(t.places.len(), 3, "the main cell and the two pointed at");
+    assert_eq!(t.places.iter().filter(|p| p.reason == "pointed at while asking").count(), 2);
+    let d = s.active().unwrap();
+    let n = crate::topics::numbering(&d.wb, &layer::get(d));
+    let mut labels: Vec<String> = t.places.iter().map(|p| n.place[&(t.id.clone(), p.anchor.clone())].clone()).collect();
+    labels.sort();
+    assert_eq!(labels, vec!["1.1", "1.2", "1.3"]);
+    // The markers in the text are place links now.
+    let text = layer::get(s.active().unwrap()).questions[0].text.clone();
+    assert!(!text.contains('⟦') && text.matches("(anchor:").count() == 2, "{text}");
+}
+
+#[test]
+fn mcp_topics_tools() {
+    struct Local(Session);
+    impl gridcraft_mcp::Backend for Local {
+        fn call(&mut self, method: &str, params: Value) -> Result<Value, String> {
+            match method {
+                "engine.execute" => self.0.run(params["command"].as_str().unwrap_or(""), params["params"].clone()),
+                _ => Err("unknown".into()),
+            }
+        }
+        fn has_ui(&self) -> bool {
+            false
+        }
+        fn describe(&self) -> String {
+            "test".into()
+        }
+    }
+    let mut s = model();
+    let q = s.execute("agent.ask", json!({"range": "B7", "text": "Why is profit 150k?"})).unwrap();
+    let mut b = Local(s);
+    let call = |b: &mut Local, name: &str, args: Value| crate::mcp::call(b, name, &args);
+    let w = call(&mut b, "wait_for_questions", json!({"timeout_seconds": 0})).unwrap();
+    assert_eq!(w[0]["topic"]["number"], json!(1));
+    assert_eq!(w[0]["topic"]["status"], json!("open"));
+    call(&mut b, "add_note", json!({"topic": "1", "title": "Budget", "kind": "source", "url": "https://example.com/budget", "summary": "2025 budget, line 14", "text": "Fixed costs B5 come from the budget."})).unwrap();
+    call(&mut b, "add_places", json!({"topic": "1", "places": [{"range": "B5", "reason": "fixed costs drive it"}]})).unwrap();
+    call(&mut b, "set_status", json!({"topic": "1", "status": "revise", "text": "B5 is last year's"})).unwrap();
+    assert!(call(&mut b, "set_status", json!({"topic": "1", "status": "agreed"})).is_err());
+    call(&mut b, "propose_agreed", json!({"topic": "1", "reasons": "checked against the budget"})).unwrap();
+    let t = call(&mut b, "get_topic", json!({"topic": "1"})).unwrap();
+    assert_eq!(t["status"], json!("revise"));
+    assert_eq!(t["proposed"]["status"], json!("agreed"));
+    assert_eq!(t["places"].as_array().unwrap().len(), 2);
+    assert_eq!(t["notes"][0]["links"][0]["href"], json!("https://example.com/budget"));
+    assert!(t["notes"][0]["text"].as_str().unwrap().contains("[B5](cell:Sheet1!B5)"));
+    assert_eq!(t["discussion"][0]["id"], q["id"]);
+    let list = call(&mut b, "list_topics", json!({"status": "revise"})).unwrap();
+    assert_eq!(list.as_array().unwrap().len(), 1);
+    call(&mut b, "widen_place", json!({"place": "1.2", "to": "A7:B7", "reason": "the whole row"})).unwrap();
 }

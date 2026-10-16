@@ -1,7 +1,7 @@
 //! Offscreen render of GridCraft with the agent layer, for looking at the UI without a window.
 //!
-//! `cargo run -p gridcraft-agent-ui --example agent_snapshot -- --in book.xlsx [--cmd id=json]…
-//!  [--pane cell|questions|notes|history|connect] [--heat off|confidence|impact] [--hover B23]
+//! `cargo run -p gridcraft-agent-ui --example agent_snapshot -- --in book.xlsx [--cmd id=json]… (`$q`/`$t`: latest question/topic)
+//!  [--pane selection|overview|history|analysis] [--heat off|confidence|impact] [--hover B23]
 //!  [--size 1440x900] [--dark] [--tab Agent] [--ping checking|answered|noanswer] [--signal wait]
 //!  [--click <label>]… [--listener <label>] [--voice off|small|turbo]
 //!  [--voice-recording 4:Sheet1!C5,Sheet1!D7] [--voice-download 42] out.png`
@@ -66,6 +66,13 @@ fn main() {
         }
     }
     for c in &cmds {
+        // `$q` and `$t`: the latest question and topic, for an agent answering in a scene.
+        let c = &session.active().map_or(c.clone(), |d| {
+            let l = gridcraft_agent::layer::get(d);
+            let q = l.questions.last().map(|q| q.id.clone()).unwrap_or_default();
+            let t = l.topics.last().map(|t| t.id.clone()).unwrap_or_default();
+            c.replace("$q", &q).replace("$t", &t)
+        });
         let (id, p) = c.split_once('=').map(|(a, b)| (a.to_string(), serde_json::from_str(b).unwrap_or(json!({})))).unwrap_or((c.clone(), json!({})));
         if let Err(e) = session.execute(&id, p) {
             eprintln!("{id}: {e}");
@@ -123,7 +130,7 @@ fn main() {
     if let Some(tab) = &pane {
         gridcraft_agent_ui::request_pane(true, tab, &heat);
     } else {
-        gridcraft_agent_ui::request_pane(false, "cell", &heat);
+        gridcraft_agent_ui::request_pane(false, "selection", &heat);
     }
     let mut harness =
         egui_kittest::Harness::builder().with_size(egui::vec2(size.0, size.1)).with_pixels_per_point(2.0).with_max_steps(12).wgpu().build_ui_state(

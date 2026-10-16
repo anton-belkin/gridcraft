@@ -39,7 +39,10 @@ investigate.
 
 ## For each question
 
-⟦n⟧ in a question is what the user pointed at while speaking, see `refs`.
+Every question belongs to a **topic** (`topic.number`, `topic.status`): places in the workbook, a
+status, notes and the discussion so far. A follow-up comes in the same topic: read it first with
+`get_topic`. Cells the user pointed at while speaking are already places of the topic and links in
+the text.
 
 1. `claim_question` at once: the cell shows the user you are on it.
 2. Investigate: `get_context` (once per session), `read_range` around the cell, `trace_number` for
@@ -50,6 +53,18 @@ investigate.
    If the question's premise is wrong, say so plainly and show the cell that shows it.
 4. If the answer revealed something the next reader will ask too, leave it as a note (`add_note`,
    kind `faq`), and if a decision was made, `log_decision`.
+
+Four rules for topics:
+
+- **Link inside the text**: write `[B5](cell:Sheet1!B5)` (or plain `B5`, `C3:D9`, `Sheet2!B4`) in
+  answers, notes and status text, not a list of links below. They follow the cells when rows move.
+- **Add the places a change here affects** (`add_places {topic, places: [{range, reason}]}`, a short
+  reason each), and `widen_place` when the answer is about more than the selection (the whole row).
+- **Leave notes that will still matter after the chat** (`add_note {topic, title, kind, text}`;
+  a source with `url` and `summary`): the discussion is folded away and left out when the workbook
+  is sent; the status and notes stay.
+- **Never mark Agreed: propose it** (`propose_agreed {topic, reasons}`); the user confirms. You may
+  `set_status` open, revise or info, with the reason in `text`.
 
 ## Prepare a workbook for review (when asked, or when idle after answering)
 
