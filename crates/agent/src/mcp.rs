@@ -226,18 +226,7 @@ pub fn tools() -> Vec<Value> {
     ]
 }
 
-/// Refusal when the agent is off in GridCraft (the mode, as the app reports it).
-pub fn gate(mode: Option<&str>) -> Result<(), String> {
-    if mode == Some("off") {
-        return Err("The agent is off in GridCraft (Agent tab ▸ Connection ▸ Mode). Ask the user to choose a mode first.".into());
-    }
-    Ok(())
-}
-
 fn exec(b: &mut dyn Backend, command: &str, mut params: Value) -> Result<Value, String> {
-    // The app decides whether an agent may work at all (also for the stdio server, a separate process).
-    let mode = b.call("engine.execute", json!({"command": "agent.agentMode", "params": {}})).ok();
-    gate(mode.as_ref().and_then(|m| m.get("mode")).and_then(Value::as_str))?;
     let (document, listener) = ROUTE.with(|r| r.borrow().clone());
     if let Value::Object(o) = &mut params {
         o.insert("actor".into(), json!("agent"));
@@ -295,7 +284,7 @@ fn call_tool(b: &mut dyn Backend, name: &str, args: &Value) -> Result<Value, Str
             let secs = args.get("timeout_seconds").and_then(Value::as_f64).unwrap_or(25.0).clamp(0.0, 50.0);
             let mut polls = (secs * 2.0) as u32;
             loop {
-                let v = exec(b, "agent.questions", json!({"status": "pending", "wait": true}))?;
+                let v = exec(b, "agent.questions", json!({"status": "pending", "waiting": true}))?;
                 if v.as_array().is_some_and(|a| !a.is_empty()) || polls == 0 {
                     return Ok(v);
                 }

@@ -95,7 +95,7 @@ fn main() {
     }
     // A listener without a check: an agent waiting for questions.
     if signal.as_deref() == Some("wait") {
-        let _ = session.execute("agent.questions", json!({"status": "pending", "wait": true, "actor": "agent"}));
+        let _ = session.execute("agent.questions", json!({"status": "pending", "waiting": true, "actor": "agent"}));
     }
     if let Some(tab) = &pane {
         gridcraft_agent_ui::request_pane(true, tab, &heat);

@@ -248,7 +248,10 @@ fn channel_stream(mut w: TcpStream, control: &str, client: &str) {
         if crate::runner::mode() == crate::runner::Mode::Channel
             && let Ok(b) = backend(&mut slot, control)
         {
-            match b.call("engine.execute", json!({"command": "agent.questions", "params": {"status": "pending", "actor": "agent", "masked": true}})) {
+            match b.call(
+                "engine.execute",
+                json!({"command": "agent.questions", "params": {"status": "pending", "actor": "agent", "masked": true, "poll": true}}),
+            ) {
                 Ok(Value::Array(list)) => {
                     for q in list {
                         let Some(id) = q.get("id").and_then(Value::as_str).map(str::to_string) else { continue };
@@ -299,7 +302,7 @@ fn events(mut w: TcpStream, control: &str, query: &str) {
         if crate::runner::mode() != crate::runner::Mode::Off
             && let Ok(b) = backend(&mut slot, control)
         {
-            let mut params = json!({"status": "pending", "actor": "agent", "masked": true, "wait": true});
+            let mut params = json!({"status": "pending", "actor": "agent", "masked": true, "poll": true});
             if let Some(l) = &listener {
                 params["listener"] = json!(l);
             }

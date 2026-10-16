@@ -178,6 +178,14 @@ upstream. Each one accepted upstream removes its lines from the patch.
   Desktop, Claude Code: add AItoCraft), the per-app `--agent-stdio` kept under Details. The
   background agent runs in the neutral `ArtCraft/agent-sessions/` unless "use the document's folder
   as its project" is on.
+- **Shared details with WordCraft and DeckCraft**: ping ids are `ping<ms>`, and an unanswered
+  ping leaves `agent.questions` after 60 s (the status still says "No answer to check");
+  `wait_for_questions` polls with `waiting: true` (a listener for 60 s), streams and the runner
+  with `poll: true`, and neither counts as a tool call; the background agent is started with
+  `--name "GridCraft · <file>"`, and a new session gets the history seed only when the log has
+  something; Off refuses every agent-side command ("the agent connection is off in GridCraft
+  (Agent tab ▸ Connection ▸ Mode)") while `initialize` and `tools/list` still answer; the mode is
+  remembered in `<settings>/agent/mode`, and `--agent-mode` overrides it.
 - **Analysis is deterministic.** The trace and the sensitivity are computed by the engine (the
   dependency graph, recalculation of a scratch copy). The agent explains them; it doesn't make them up.
 - **Several inputs at once, bounded.** The worst and best combination moves 3–12 inputs inside

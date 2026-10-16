@@ -52,6 +52,31 @@ pub fn mode() -> Mode {
     }
 }
 
+/// Where the chosen mode is kept between runs (`<settings>/agent/mode`; none in tests).
+fn mode_file() -> Option<PathBuf> {
+    if cfg!(test) {
+        return None;
+    }
+    default_data_dir().map(|d| d.join("mode"))
+}
+
+/// Remembers the mode for the next run.
+pub fn remember_mode(m: Mode) {
+    if let Some(f) = mode_file() {
+        if let Some(dir) = f.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        let _ = std::fs::write(f, m.id());
+    }
+}
+
+/// The mode of the last run (when `--agent-mode` didn't say).
+pub fn load_saved_mode() {
+    if let Some(m) = mode_file().and_then(|f| std::fs::read_to_string(f).ok()).and_then(|t| Mode::parse(&t)) {
+        set_mode(m);
+    }
+}
+
 /// Switches the mode; leaving the background mode stops its agents.
 pub fn set_mode(m: Mode) {
     MODE.store(
@@ -225,10 +250,12 @@ pub fn status(uid: u64) -> Option<Status> {
 }
 
 /// The arguments the agent CLI is started with.
-pub fn args(c: &Config, session: &str, resume: bool, mcp_config: &str, skill: Option<&str>) -> Vec<String> {
+pub fn args(c: &Config, session: &str, resume: bool, mcp_config: &str, skill: Option<&str>, name: &str) -> Vec<String> {
     let mut a: Vec<String> =
         ["-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose"].iter().map(|s| s.to_string()).collect();
     a.extend([if resume { "--resume" } else { "--session-id" }.to_string(), session.to_string()]);
+    // Named for the session lists ("GridCraft · budget.xlsx").
+    a.extend(["--name".to_string(), name.to_string()]);
     a.extend(["--mcp-config".to_string(), mcp_config.to_string(), "--strict-mcp-config".to_string()]);
     a.extend(["--allowedTools".to_string(), "mcp__gridcraft__*".to_string()]);
     if let Some(s) = skill {
@@ -348,7 +375,7 @@ pub fn start(s: &Session) -> Result<Status, String> {
         }
     };
     let mut child = Command::new(&c.command)
-        .args(args(&c, &session, resume, &mcp, skill.as_deref()))
+        .args(args(&c, &session, resume, &mcp, skill.as_deref(), &format!("GridCraft · {}", d.display_title())))
         .current_dir(&cwd)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -367,10 +394,9 @@ pub fn start(s: &Session) -> Result<Status, String> {
         let _ = std::thread::Builder::new().name("agent-stderr".into()).spawn(move || read_stderr(stderr, sh));
     }
     let mut agent = Agent { child, stdin, sent: HashSet::new(), shared, resumed: resume };
-    // Name it for the session lists, and give a fresh session the history.
-    let name = d.display_title();
-    let mut first = vec![format!("/rename GridCraft · {name}")];
-    if !resume && (fresh || !l.log.is_empty()) {
+    // A new session gets the document's history, when there is one.
+    let mut first = vec![];
+    if !resume && !l.log.is_empty() {
         first.push(seed(&l));
     }
     for m in first {
@@ -516,7 +542,7 @@ pub fn tick(s: &mut Session) {
     if new.is_empty() {
         return;
     }
-    let list = match s.execute("agent.questions", json!({"status": "pending", "masked": true})) {
+    let list = match s.execute("agent.questions", json!({"status": "pending", "masked": true, "poll": true})) {
         Ok(Json::Array(v)) => v,
         _ => return,
     };
@@ -600,7 +626,9 @@ fn mode_cmd(s: &mut Session, p: &Json) -> gridcraft_engine::Result<Json> {
     }
     if let Some(m) = str_p(p, "mode") {
         refuse_agent(p, "agent.agentMode")?;
-        set_mode(Mode::parse(m).ok_or_else(|| bad("agent.agentMode", "`mode` is connect, channel, background or off"))?);
+        let m = Mode::parse(m).ok_or_else(|| bad("agent.agentMode", "`mode` is connect, channel, background or off"))?;
+        set_mode(m);
+        remember_mode(m);
     }
     let (uid, session) = here(s)?;
     Ok(status_json(uid, &session))

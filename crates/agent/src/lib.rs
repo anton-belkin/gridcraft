@@ -67,6 +67,25 @@ pub fn read_only() -> bool {
     READ_ONLY.with(std::cell::Cell::get)
 }
 
+/// A tool call of an agent ("last tool call"): an `agent.*` command with actor agent; a stream's
+/// polling (`poll`) or a wait loop (`waiting`) isn't one.
+pub fn is_tool_call(id: &str, params: &Json) -> bool {
+    let polling = ["waiting", "poll"].iter().any(|k| params.get(*k).and_then(Json::as_bool) == Some(true));
+    id.starts_with("agent.") && params.get("actor").and_then(Json::as_str) == Some("agent") && !polling
+}
+
+/// The agent connection is off (Agent tab ▸ Connection ▸ Mode): agent-side commands refuse.
+pub fn agent_off() -> bool {
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        runner::mode() == runner::Mode::Off
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        false
+    }
+}
+
 /// Milliseconds since the Unix epoch (0 where the platform has no clock).
 pub fn now_ms() -> u64 {
     gridcraft_engine::core::date::unix_now_ms().map_or(0, |ms| ms.max(0.0) as u64)
@@ -123,7 +142,7 @@ fn is_view_only(id: &str) -> bool {
 
 impl Observer for Keeper {
     fn before(&self, s: &mut Session, id: &str, params: &Json) {
-        if id.starts_with("agent.") && params.get("actor").and_then(Json::as_str) == Some("agent") {
+        if is_tool_call(id, params) {
             LAST_AGENT_CALL.store(now_ms(), std::sync::atomic::Ordering::Relaxed);
         }
         // A safe save that didn't finish puts the real workbook back first.

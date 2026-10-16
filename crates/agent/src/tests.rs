@@ -716,14 +716,15 @@ fn background_agent_gets_questions_and_resumes_its_session() {
     let q = s.execute("agent.ask", json!({"range": "B7", "text": "Why is profit 150k?"})).unwrap()["id"].as_str().unwrap().to_string();
     runner::tick(&mut s);
     runner::tick(&mut s);
-    assert!(wait_for(|| read("stdin.txt").lines().count() >= 2), "stdin: {}", read("stdin.txt"));
+    assert!(wait_for(|| !read("stdin.txt").is_empty()), "stdin: {}", read("stdin.txt"));
+    std::thread::sleep(std::time::Duration::from_millis(200));
+    // No history yet: no seed, just the question.
     let lines: Vec<Value> = read("stdin.txt").lines().map(|l| serde_json::from_str(l).unwrap()).collect();
-    assert_eq!(lines.len(), 2, "{lines:?}");
+    assert_eq!(lines.len(), 1, "{lines:?}");
     assert_eq!(lines[0]["type"], json!("user"));
-    assert!(lines[0]["message"]["content"].as_str().unwrap().starts_with("/rename GridCraft · q3.xlsx"));
-    let text = lines[1]["message"]["content"].as_str().unwrap();
+    let text = lines[0]["message"]["content"].as_str().unwrap();
     assert!(text.contains("Why is profit 150k?") && text.contains(&q) && text.contains("Sheet1!B7"), "{text}");
-    assert_eq!(lines[1]["parent_tool_use_id"], Value::Null);
+    assert_eq!(lines[0]["parent_tool_use_id"], Value::Null);
     let args = read("args.txt");
     let a: Vec<&str> = args.lines().collect();
     let session = layer::get(s.active().unwrap()).agent_session.clone();
@@ -744,6 +745,7 @@ fn background_agent_gets_questions_and_resumes_its_session() {
     assert!(!a.contains(&"--bare"));
     let at = |flag: &str| a.iter().position(|x| *x == flag).and_then(|i| a.get(i + 1)).copied().unwrap_or("");
     assert_eq!(at("--session-id"), session);
+    assert_eq!(at("--name"), "GridCraft · q3.xlsx");
     let mcp: Value = serde_json::from_str(&std::fs::read_to_string(at("--mcp-config")).unwrap()).unwrap();
     assert_eq!(mcp["mcpServers"].as_object().unwrap().len(), 1);
     assert_eq!(mcp["mcpServers"]["gridcraft"]["type"], json!("http"));
@@ -751,11 +753,11 @@ fn background_agent_gets_questions_and_resumes_its_session() {
     assert_eq!(read("cwd.txt").trim(), std::fs::canonicalize(dir.join("ArtCraft/agent-sessions")).unwrap().display().to_string());
     // The question tells it which document it's from.
     assert!(text.contains(&crate::docs::doc_id(s.active().unwrap().uid)), "{text}");
-    // Both messages were answered; the same question isn't sent twice.
-    assert!(wait_for(|| runner::status(s.active().unwrap().uid).is_some_and(|x| x.turns == 2 && x.in_flight == 0)));
+    // Answered; the same question isn't sent twice.
+    assert!(wait_for(|| runner::status(s.active().unwrap().uid).is_some_and(|x| x.turns == 1 && x.in_flight == 0)));
     runner::tick(&mut s);
     std::thread::sleep(std::time::Duration::from_millis(200));
-    assert_eq!(read("stdin.txt").lines().count(), 2);
+    assert_eq!(read("stdin.txt").lines().count(), 1);
     // Stopped and started again: the same session, resumed.
     let st = s.execute("agent.agentStop", json!({})).unwrap();
     assert_eq!(st["running"], json!(false));
@@ -768,7 +770,8 @@ fn background_agent_gets_questions_and_resumes_its_session() {
     assert!(read("args.txt").lines().any(|l| l == session));
     assert!(wait_for(|| read("cwd.txt").trim() == std::fs::canonicalize(&dir).unwrap().display().to_string()));
     s.execute("agent.agentMode", json!({"projectFolder": false})).unwrap();
-    // A new session starts from the document's history.
+    // A new session starts from the document's history (there is some now).
+    s.execute("agent.decision", json!({"text": "Churn from the 2026 cohort analysis"})).unwrap();
     std::fs::remove_file(rec.join("stdin.txt")).unwrap();
     s.execute("agent.agentReset", json!({})).unwrap();
     assert!(wait_for(|| read("stdin.txt").contains("fresh session")));
@@ -906,6 +909,18 @@ fn ping_checks_the_connection_and_stays_out_of_the_file() {
     let l = layer::get(s.active().unwrap());
     assert!(matches!(l.ping(), Some(layer::Ping::Answered { .. })));
     assert_eq!(l.log.len(), log_before, "a connection check isn't history");
+    // Ids are ping<ms>; an unanswered check drops out of the questions after a minute (the
+    // status still says "no answer").
+    let id3 = s.execute("agent.ping", json!({})).unwrap()["id"].as_str().unwrap().to_string();
+    assert!(id3.strip_prefix("ping").unwrap().parse::<u64>().unwrap() > 1_700_000_000_000);
+    layer::update(s.active().unwrap(), |l| {
+        if let Some(q) = l.questions.iter_mut().find(|q| q.id == id3) {
+            q.asked_at -= 61_000;
+        }
+    });
+    let pending = s.execute("agent.questions", json!({"status": "pending", "actor": "agent"})).unwrap();
+    assert!(pending.as_array().unwrap().iter().all(|q| q["id"] != json!(id3)));
+    assert!(matches!(layer::get(s.active().unwrap()).ping(), Some(layer::Ping::Waiting { .. })));
     // Never saved.
     let b64 = s.execute("file.saveBytes", json!({})).unwrap()["base64"].as_str().unwrap().to_string();
     let mut t = Session::new();
@@ -956,11 +971,18 @@ fn presence_says_who_listens() {
 fn waiting_for_questions_is_a_signal_and_off_refuses_tools() {
     let mut s = model();
     let before = crate::commands::last_wait_ms();
-    s.execute("agent.questions", json!({"status": "pending", "wait": true, "actor": "agent"})).unwrap();
+    s.execute("agent.questions", json!({"status": "pending", "waiting": true, "actor": "agent"})).unwrap();
     assert!(crate::commands::last_wait_ms() >= before.max(1));
-    assert!(crate::mcp::gate(Some("connect")).is_ok());
-    assert!(crate::mcp::gate(None).is_ok());
-    assert!(crate::mcp::gate(Some("off")).unwrap_err().contains("off in GridCraft"));
+    // Waiting and polling aren't tool calls; an agent's command is; a person's isn't.
+    assert!(!crate::is_tool_call("agent.questions", &json!({"waiting": true, "actor": "agent"})));
+    assert!(!crate::is_tool_call("agent.questions", &json!({"poll": true, "actor": "agent"})));
+    assert!(crate::is_tool_call("agent.questions", &json!({"actor": "agent"})));
+    assert!(!crate::is_tool_call("agent.questions", &json!({})));
+    // Off: every agent-side command refuses with the same words; a person's still runs.
+    let off = crate::commands::agent_allowed(true, &json!({"actor": "agent"})).unwrap_err().to_string();
+    assert!(off.contains("the agent connection is off in GridCraft (Agent tab ▸ Connection ▸ Mode)"), "{off}");
+    assert!(crate::commands::agent_allowed(true, &json!({})).is_ok());
+    assert!(crate::commands::agent_allowed(false, &json!({"actor": "agent"})).is_ok());
 }
 
 /// Two workbooks open: the model (not active) and a blank one (active).

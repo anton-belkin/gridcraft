@@ -25,6 +25,7 @@ pub fn take_args(args: Vec<String>) -> (Vec<String>, Option<u16>) {
             "--agent-mode" => {
                 if let Some(m) = it.next().as_deref().and_then(gridcraft_agent::runner::Mode::parse) {
                     gridcraft_agent::runner::set_mode(m);
+                    MODE_FROM_FLAG.store(true, std::sync::atomic::Ordering::Relaxed);
                 }
             }
             // Open the workbook at a defined name or a place (a slide's "Open source").
@@ -58,6 +59,9 @@ pub fn stdio_if_asked() {
     std::process::exit(gridcraft_agent::stdio::run(&control, agent_port));
 }
 
+/// `--agent-mode` was given: it overrides the mode remembered from the last run.
+static MODE_FROM_FLAG: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 /// The control port: the agent server needs one.
 pub fn control_port(agent: Option<u16>, control: Option<u16>) -> Option<u16> {
     if agent.is_some() { control.or(Some(CONTROL_PORT)) } else { control }
@@ -67,6 +71,9 @@ pub fn control_port(agent: Option<u16>, control: Option<u16>) -> Option<u16> {
 pub fn start(agent: Option<u16>, control: Option<u16>) {
     let (Some(port), Some(control)) = (agent, control) else { return };
     gridcraft_agent_ui::install();
+    if !MODE_FROM_FLAG.load(std::sync::atomic::Ordering::Relaxed) {
+        gridcraft_agent::runner::load_saved_mode();
+    }
     match gridcraft_agent::server::start(port, format!("127.0.0.1:{control}")) {
         Ok(port) => {
             gridcraft_agent_ui::set_server_url(format!("http://127.0.0.1:{port}/mcp"));

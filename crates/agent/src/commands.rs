@@ -30,6 +30,7 @@ macro_rules! spec {
             run: {
                 fn guarded(s: &mut gridcraft_engine::Session, p: &serde_json::Value) -> gridcraft_engine::Result<serde_json::Value> {
                     $crate::commands::writable($id, spec!(@journal $kind))?;
+                    $crate::commands::agent_allowed(crate::agent_off(), p)?;
                     $run(s, p)
                 }
                 guarded
@@ -65,7 +66,7 @@ pub static SPECS: &[CommandSpec] = &[
     spec!(change "agent.private", "Mark as Client Data", "{range?, on?: bool (default true)} — the agent sees stand-in values there", private),
     spec!(change "agent.removeNote", "Remove Agent Note", "{id}", remove_note),
     // the agent's side
-    spec!(query "agent.questions", "Agent Questions", "{status?: pending|working|answered|open|all (default all), wait?: bool (an agent waiting for questions)} → questions with their cell; kind \"ping\" is a connection check", questions),
+    spec!(query "agent.questions", "Agent Questions", "{status?: pending|working|answered|open|all (default all), waiting?: bool (wait_for_questions: an agent listening), poll?: bool (a stream polling; not a tool call)} → questions with their cell; kind \"ping\" is a connection check", questions),
     spec!(change "agent.claim", "Take Question", "{id} — marks it as being worked on", claim),
     spec!(change "agent.answer", "Answer Question", "{id, text, links?: [{label, href, summary?}]}", answer),
     spec!(change "agent.note", "Add Agent Note", "{range, text, title?, kind?: explanation|faq|assumption|source, links?: [{label, href, summary?}], actor?}", note),
@@ -88,6 +89,17 @@ pub static SPECS: &[CommandSpec] = &[
 pub(crate) fn writable(id: &str, changes: bool) -> Result<()> {
     if changes && crate::read_only() && !matches!(id, "agent.seen" | "agent.useVariant") {
         return Err(EngineError::Other("This is a read-only copy: questions go to the agent from the workbook in GridCraft.".into()));
+    }
+    Ok(())
+}
+
+/// The words of the refusal while the agent connection is off.
+pub const OFF_MESSAGE: &str = "the agent connection is off in GridCraft (Agent tab ▸ Connection ▸ Mode)";
+
+/// Off mode: every agent-side command (actor agent) is refused; a person's still runs.
+pub fn agent_allowed(off: bool, p: &Json) -> Result<()> {
+    if off && p.get("actor").and_then(Json::as_str) == Some("agent") {
+        return Err(EngineError::Other(OFF_MESSAGE.into()));
     }
     Ok(())
 }
@@ -179,7 +191,7 @@ fn ping(s: &mut Session, _p: &Json) -> Result<Json> {
     let id = layer::update(s.doc()?, |l| {
         // One check at a time.
         l.questions.retain(|q| !q.is_ping());
-        let id = l.fresh_id("ping");
+        let id = format!("ping{}", crate::now_ms());
         l.questions.push(Question {
             id: id.clone(),
             anchor: String::new(),
@@ -273,13 +285,17 @@ pub fn last_wait_ms() -> u64 {
 
 fn questions(s: &mut Session, p: &Json) -> Result<Json> {
     crate::docs::touch_from(s, p);
-    if p.get("wait").and_then(Json::as_bool) == Some(true) && actor_p(p, Actor::Human) == Actor::Agent {
+    if p.get("waiting").and_then(Json::as_bool) == Some(true) && actor_p(p, Actor::Human) == Actor::Agent {
         LAST_WAIT.store(crate::now_ms(), std::sync::atomic::Ordering::Relaxed);
     }
     let l = layer::get(s.doc()?);
     let want = str_p(p, "status").unwrap_or("all");
     let d = s.doc()?;
-    let has_any = l.questions.iter().any(|q| status_matches(q, want));
+    let now = crate::now_ms();
+    // A check nobody answered in a minute is over: no agent should wake up for it.
+    let shown =
+        |q: &&Question| status_matches(q, want) && !(q.is_ping() && q.status != QuestionStatus::Answered && now.saturating_sub(q.asked_at) >= 60_000);
+    let has_any = l.questions.iter().any(|q| shown(&q));
     // One masked copy for all of them (and none when there is nothing to show).
     let wb = if !has_any {
         Workbook::new()
@@ -288,7 +304,7 @@ fn questions(s: &mut Session, p: &Json) -> Result<Json> {
     } else {
         (*d.wb).clone()
     };
-    let list: Vec<Json> = l.questions.iter().filter(|q| status_matches(q, want)).map(|q| question_json(s, &l, q, &wb)).collect();
+    let list: Vec<Json> = l.questions.iter().filter(shown).map(|q| question_json(s, &l, q, &wb)).collect();
     Ok(Json::Array(list))
 }
 
