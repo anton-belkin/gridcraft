@@ -729,6 +729,7 @@ pub fn show(app: &mut SheetApp, ui: &mut egui::Ui) {
     // Objects above cells.
     let objects = crate::chartview::paint_objects(app, &painter.with_clip_rect(geo.cells), &geo, &wb, si, sh);
     paint_overlays(app, ui, &painter.with_clip_rect(geo.cells), &geo, &wb, si, sh, &sel);
+    crate::ext::paint_cells(app, ui, &painter.with_clip_rect(geo.cells), &geo, si, sh); // fork:agent
     if sh.view == gridcraft_engine::model::SheetViewMode::PageBreakPreview {
         paint_pages(app, &painter.with_clip_rect(geo.cells), &geo, sh);
     }
@@ -2926,6 +2927,7 @@ fn context_menu(app: &mut SheetApp, ui: &mut egui::Ui) {
                     }
                 }
             }
+            close |= crate::ext::context_menu(app, ui); // fork:agent
         });
     });
     if close
