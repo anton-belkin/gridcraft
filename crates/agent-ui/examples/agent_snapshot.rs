@@ -55,6 +55,13 @@ fn main() {
     let _ = std::fs::remove_file(&settings);
     gridcraft_agent_ui::voice::set_settings_path(Some(settings));
     gridcraft_agent_ui::set_server_url("http://127.0.0.1:7980/mcp".into());
+    // Never the reader's settings, and never a real agent (it would run on their subscription).
+    gridcraft_agent::context::persist(false);
+    gridcraft_agent::runner::set_config(gridcraft_agent::runner::Config {
+        command: "gridcraft-snapshot-no-agent".into(),
+        data_dir: Some(std::env::temp_dir().join(format!("gridcraft-snapshot-agent-{}", std::process::id()))),
+        ..gridcraft_agent::runner::Config::default()
+    });
     if let Some(e) = gridcraft_agent::cowork::this_entry(7979) {
         gridcraft_agent_ui::set_stdio_entry(e);
     }

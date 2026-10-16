@@ -98,10 +98,17 @@ pub fn from_mode(m: Mode) -> AgentContext {
 // ---------------------------------------------------------------- the app's last choice
 
 static LAST: Mutex<Option<AgentContext>> = Mutex::new(None);
+/// Whether the last choice is written to the app's settings (off for offscreen renders).
+static PERSIST: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+
+/// Keeps choices in memory only: a snapshot or a script never changes the person's settings.
+pub fn persist(on: bool) {
+    PERSIST.store(on, std::sync::atomic::Ordering::Relaxed);
+}
 
 /// Where the last choice is kept between runs (`<settings>/agent/context.json`; none in tests).
 fn last_file() -> Option<PathBuf> {
-    if cfg!(test) {
+    if cfg!(test) || !PERSIST.load(std::sync::atomic::Ordering::Relaxed) {
         return None;
     }
     runner::default_data_dir().map(|d| d.join("context.json"))
@@ -291,8 +298,10 @@ pub fn recheck() {
     }
 }
 
+/// The Claude CLI the checks, the login and the install use (the same the background client runs
+/// by default).
 fn claude() -> String {
-    runner::config().command
+    std::env::var("GRIDCRAFT_AGENT_COMMAND").unwrap_or_else(|_| "claude".into())
 }
 
 /// Runs the CLI with a time limit; its output when it ran.
