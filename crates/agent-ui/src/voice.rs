@@ -64,8 +64,9 @@ impl Status {
 type Anchor = String;
 
 struct Recording {
-    /// None in a preview (offscreen snapshots): no microphone.
+    /// None in a preview (offscreen snapshots) or with a stand-in microphone.
     recorder: Option<Recorder>,
+    fake: Option<Vec<f32>>,
     preview_secs: f32,
     doc: u64,
     /// The selection when it started: the question's main place.
@@ -191,6 +192,21 @@ pub fn preview(p: Preview) {
     if let Ok(mut g) = PREVIEW.lock() {
         *g = Some(p);
     }
+}
+
+/// A stand-in microphone (tests): recordings return these samples, and nothing is transcribed.
+static FAKE_MIC: Mutex<Option<Vec<f32>>> = Mutex::new(None);
+
+/// Records from a stand-in instead of the microphone, and transcribes nothing (tests).
+#[doc(hidden)]
+pub fn use_fake_microphone(samples: Option<Vec<f32>>) {
+    if let Ok(mut g) = FAKE_MIC.lock() {
+        *g = samples;
+    }
+}
+
+fn fake_mic() -> Option<Vec<f32>> {
+    FAKE_MIC.lock().ok().and_then(|g| g.clone())
 }
 
 /// Moves the settings file (tests).
@@ -333,7 +349,7 @@ impl Voice {
 
     fn start(&mut self, ctx: &egui::Context) {
         let (Some(m), Some(dir)) = (self.choice, model_dir()) else { return };
-        if self.transcriber.is_some() {
+        if self.transcriber.is_some() || fake_mic().is_some() {
             return;
         }
         let c = ctx.clone();
@@ -392,7 +408,17 @@ impl Voice {
     /// Push to talk: ⌥ held alone starts recording, its release sends; Esc cancels.
     fn key(&mut self, app: &mut SheetApp, ctx: &egui::Context, now: f64) {
         let (mods, keys, esc) = ctx.input(|i| {
-            let keys = i.events.iter().any(|e| matches!(e, egui::Event::Key { pressed: true, .. } | egui::Event::Text(_)));
+            // Another key with ⌥ makes it a shortcut. Modifier keys themselves don't count: egui
+            // reports ⌥ as a key too, sometimes a frame after the modifiers changed.
+            let modifier = |k: &egui::Key| {
+                use egui::Key::*;
+                matches!(k, AltLeft | AltRight | ShiftLeft | ShiftRight | ControlLeft | ControlRight | SuperLeft | SuperRight)
+            };
+            let keys = i.events.iter().any(|e| match e {
+                egui::Event::Key { key, pressed: true, .. } => !modifier(key),
+                egui::Event::Text(_) => true,
+                _ => false,
+            });
             let esc = i.key_pressed(egui::Key::Escape);
             (i.modifiers, keys, esc)
         });
@@ -402,7 +428,9 @@ impl Voice {
             self.key = if mods.alt { Key::Chord } else { Key::Idle };
             return;
         }
-        let typing = app.editor.is_some() || ctx.egui_wants_keyboard_input();
+        // Not while typing in a cell or a text box. (Not `egui_wants_keyboard_input`: that is any
+        // focus, and the grid takes focus with every click on a cell.)
+        let typing = app.editor.is_some() || ctx.text_edit_focused();
         self.key = match self.key {
             Key::Idle if alone && !typing && self.choice.is_some() && self.rec.is_none() && app.session.active().is_some() => {
                 ctx.request_repaint_after(Duration::from_secs_f64(HOLD + 0.02));
@@ -435,6 +463,9 @@ impl Voice {
                 if self.rec.as_ref().is_some_and(|r| r.by_key) {
                     self.finish(app, ctx);
                 }
+                // Releasing Alt alone opens the ribbon's keytips on Windows and Linux: not after
+                // a question.
+                app.keytips.clear();
                 Key::Idle
             }
             Key::Recording => Key::Recording,
@@ -452,6 +483,7 @@ impl Voice {
         let n = places.len().max(1) as f32;
         self.rec = Some(Recording {
             recorder: None,
+            fake: None,
             preview_secs: secs,
             doc: d.uid,
             anchor: anchor::Place { sheet: si, sheet_name: name, range: sel }.a1(),
@@ -483,16 +515,11 @@ impl Voice {
         let sel = d.selection.current();
         let place = anchor::Place { sheet: si, sheet_name: sheet, range: sel };
         let doc = d.uid;
-        match Recorder::start() {
+        let fake = fake_mic();
+        let started = if fake.is_some() { Ok(None) } else { Recorder::start().map(Some) };
+        match started {
             Ok(recorder) => {
-                self.rec = Some(Recording {
-                    recorder: Some(recorder),
-                    preview_secs: 0.0,
-                    doc,
-                    anchor: place.a1(),
-                    pointing: Pointing::new((si, sel)),
-                    by_key,
-                });
+                self.rec = Some(Recording { recorder, fake, preview_secs: 0.0, doc, anchor: place.a1(), pointing: Pointing::new((si, sel)), by_key });
                 // Load the model while the reader speaks.
                 self.start(ctx);
                 self.last_used = ctx.input(|i| i.time);
@@ -534,8 +561,13 @@ impl Voice {
     fn finish(&mut self, app: &mut SheetApp, ctx: &egui::Context) {
         let Some(r) = self.rec.take() else { return };
         let (doc, main, pointers) = (r.doc, r.anchor, r.pointing.pointers);
-        let Some(recorder) = r.recorder else { return };
-        let audio = match recorder.stop() {
+        let audio = match (r.recorder, r.fake) {
+            (Some(recorder), _) => recorder.stop(),
+            (None, Some(samples)) => Ok(Audio { samples }),
+            // A preview: nothing was recorded.
+            (None, None) => return,
+        };
+        let audio = match audio {
             Ok(a) => a,
             Err(e) => {
                 app.toast = Some((format!("Voice: {e}"), gridcraft_ui_egui::now_ms()));

@@ -44,12 +44,13 @@ pub(crate) fn stdio_entry() -> Option<serde_json::Value> {
 /// Registers the agent UI (call once, on the UI thread, before the first frame).
 pub fn install() {
     gridcraft_agent::install();
-    #[cfg(not(target_arch = "wasm32"))]
-    {
-        static ONCE: std::sync::Once = std::sync::Once::new();
-        ONCE.call_once(|| gridcraft_engine::ext::register_commands(voice::SPECS));
-    }
-    gridcraft_ui_egui::ext::register(Box::new(AgentUi::default()));
+    // Once: a second registration would run every hook twice.
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        #[cfg(not(target_arch = "wasm32"))]
+        gridcraft_engine::ext::register_commands(voice::SPECS);
+        gridcraft_ui_egui::ext::register(Box::new(AgentUi::default()));
+    });
 }
 
 /// Tells the UI where the agent server listens (shown on the Agent tab).
