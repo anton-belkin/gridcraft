@@ -13,6 +13,8 @@ workspace = true
 [dependencies]
 gridcraft-engine = { workspace = true }
 gridcraft-ui-egui = { workspace = true }
+gridcraft-agent = { workspace = true } # fork:agent
+gridcraft-agent-ui = { workspace = true } # fork:agent
 eframe = { workspace = true, features = ["default_fonts", "wgpu", "accesskit", "wayland", "x11"] }
 egui = { workspace = true }
 serde_json = { workspace = true }

@@ -1503,6 +1503,8 @@ dependencies = [
  "eframe",
  "egui",
  "fmv-macos-events",
+ "gridcraft-agent",
+ "gridcraft-agent-ui",
  "gridcraft-engine",
  "gridcraft-ui-egui",
  "image",
@@ -1514,6 +1516,30 @@ dependencies = [
  "rfd",
  "serde_json",
  "winresource",
+]
+
+[[package]]
+name = "gridcraft-agent"
+version = "0.7.0"
+dependencies = [
+ "gridcraft-engine",
+ "gridcraft-mcp",
+ "gridcraft-xlsx",
+ "log",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "gridcraft-agent-ui"
+version = "0.7.0"
+dependencies = [
+ "egui",
+ "egui_kittest",
+ "gridcraft-agent",
+ "gridcraft-engine",
+ "gridcraft-ui-egui",
+ "serde_json",
 ]
 
 [[package]]
