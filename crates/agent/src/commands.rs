@@ -8,7 +8,7 @@
 use std::cell::Cell as StdCell;
 
 use gridcraft_engine::calc::Key;
-use gridcraft_engine::cmd::{CommandSpec, has_doc};
+use gridcraft_engine::cmd::CommandSpec;
 use gridcraft_engine::core::RangeRef;
 use gridcraft_engine::model::Workbook;
 use gridcraft_engine::{EngineError, Result, Session};
@@ -20,13 +20,13 @@ use crate::layer::{self, Actor, Answer, Confidence, Input, Layer, Link, Note, Qu
 
 macro_rules! spec {
     ($kind:ident $id:literal, $label:literal, $params:literal, $run:expr) => {
-        CommandSpec {
+        gridcraft_engine::cmd::CommandSpec {
             id: $id,
             label: $label,
             menu: &[],
             shortcut: None,
             params: $params,
-            enabled: has_doc,
+            enabled: gridcraft_engine::cmd::has_doc,
             run: $run,
             journal: spec!(@journal $kind),
             undoable: false,
@@ -35,6 +35,10 @@ macro_rules! spec {
     (@journal query) => { false };
     (@journal change) => { true };
 }
+pub(crate) use spec;
+
+/// Every command of the layer, by module.
+pub static ALL: &[&[CommandSpec]] = &[SPECS, crate::variants::SPECS];
 
 pub static SPECS: &[CommandSpec] = &[
     // the reader's side
@@ -60,19 +64,19 @@ pub static SPECS: &[CommandSpec] = &[
 
 // ---------------------------------------------------------------- params
 
-fn bad(cmd: &str, msg: impl Into<String>) -> EngineError {
+pub(crate) fn bad(cmd: &str, msg: impl Into<String>) -> EngineError {
     EngineError::BadParams { cmd: cmd.into(), msg: msg.into() }
 }
 
-fn str_p<'a>(p: &'a Json, k: &str) -> Option<&'a str> {
+pub(crate) fn str_p<'a>(p: &'a Json, k: &str) -> Option<&'a str> {
     p.get(k).and_then(Json::as_str)
 }
 
-fn masked_p(p: &Json) -> bool {
+pub(crate) fn masked_p(p: &Json) -> bool {
     p.get("masked").and_then(Json::as_bool).unwrap_or(true)
 }
 
-fn actor_p(p: &Json, default: Actor) -> Actor {
+pub(crate) fn actor_p(p: &Json, default: Actor) -> Actor {
     match str_p(p, "actor") {
         Some("agent") => Actor::Agent,
         Some("human") => Actor::Human,
@@ -82,7 +86,7 @@ fn actor_p(p: &Json, default: Actor) -> Actor {
 }
 
 /// `range` / `cell` param (on the active sheet unless it names one), else the selection.
-fn place_p(s: &Session, p: &Json, cmd: &str) -> Result<Place> {
+pub(crate) fn place_p(s: &Session, p: &Json, cmd: &str) -> Result<Place> {
     let d = s.doc()?;
     let text = str_p(p, "range").or_else(|| str_p(p, "cell"));
     match text {
@@ -95,20 +99,20 @@ fn place_p(s: &Session, p: &Json, cmd: &str) -> Result<Place> {
     }
 }
 
-fn links_p(p: &Json) -> Vec<Link> {
+pub(crate) fn links_p(p: &Json) -> Vec<Link> {
     p.get("links")
         .and_then(Json::as_array)
         .map(|a| a.iter().take(50).filter_map(|v| serde_json::from_value(v.clone()).ok()).collect())
         .unwrap_or_default()
 }
 
-fn text_p(p: &Json, k: &str, cmd: &str) -> Result<String> {
+pub(crate) fn text_p(p: &Json, k: &str, cmd: &str) -> Result<String> {
     let t = str_p(p, k).map(str::trim).filter(|t| !t.is_empty()).ok_or_else(|| bad(cmd, format!("missing `{k}`")))?;
     // Long enough for an essay, short enough to never be a problem in the file.
     Ok(t.chars().take(20_000).collect())
 }
 
-fn where_json(s: &Session, l: &Layer, anchor_id: &str) -> Json {
+pub(crate) fn where_json(s: &Session, l: &Layer, anchor_id: &str) -> Json {
     let Ok(d) = s.doc() else { return Json::Null };
     match l.anchor(anchor_id).and_then(|a| anchor::resolve(&d.wb, a)) {
         Some(p) => json!(p.a1()),
@@ -493,5 +497,7 @@ fn exec(s: &mut Session, p: &Json) -> Result<Json> {
 }
 
 thread_local! {
+    /// > 0 while a layer command makes a change it records itself (the audit log skips it).
+    pub(crate) static QUIET: StdCell<u32> = const { StdCell::new(0) };
     pub(crate) static PENDING_REASON: std::cell::RefCell<Option<(String, String)>> = const { std::cell::RefCell::new(None) };
 }

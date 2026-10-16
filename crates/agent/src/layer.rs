@@ -155,6 +155,51 @@ pub struct LogEntry {
     pub source: String,
 }
 
+/// What a set of alternatives is.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum VariantKind {
+    /// "A or B?": alternative assumptions or formulas for a range, both kept in the document.
+    #[default]
+    Alternatives,
+    /// A readable formula and an exact one for the same cell (options 0 and 1).
+    Method,
+}
+
+/// One alternative of a [`VariantSet`].
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct VariantOption {
+    pub name: String,
+    /// The range's contents in this option, row by row, as typed: numbers, booleans, text or
+    /// `=formulas` (the canonical spelling).
+    pub values: Vec<Vec<serde_json::Value>>,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub note: String,
+}
+
+/// Alternatives for a range that live in the document: the reader switches between them and
+/// sees the model recalculate.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct VariantSet {
+    pub id: String,
+    pub anchor: String,
+    #[serde(default)]
+    pub kind: VariantKind,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub title: String,
+    pub options: Vec<VariantOption>,
+    /// Cells to compare the options on (anchors); empty: the model's final outputs.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub outputs: Vec<String>,
+    /// For a method: the relative difference on an output above which the choice matters.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub threshold: Option<f64>,
+    #[serde(default)]
+    pub author: Actor,
+    #[serde(default)]
+    pub at: u64,
+}
+
 /// Most log entries kept (oldest dropped first).
 pub const MAX_LOG: usize = 5_000;
 
@@ -179,6 +224,8 @@ pub struct Layer {
     pub confidence: Vec<Confidence>,
     #[serde(default)]
     pub log: Vec<LogEntry>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub variants: Vec<VariantSet>,
     /// Bumped on every change (not saved meaningfully; lets views cache).
     #[serde(skip)]
     pub revision: u64,
@@ -216,6 +263,7 @@ impl Layer {
                 || self.private.iter().any(|p| p == id)
                 || self.confidence.iter().any(|c| c.anchor == id)
                 || self.log.iter().any(|e| e.anchor.as_deref() == Some(id))
+                || self.variants.iter().any(|v| v.anchor == id || v.outputs.iter().any(|o| o == id))
         };
         self.anchors.iter().filter(|a| !used(&a.id)).map(|a| a.id.clone()).collect()
     }

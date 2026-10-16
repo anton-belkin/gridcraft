@@ -24,6 +24,7 @@ pub mod layer;
 pub mod mcp;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod server;
+pub mod variants;
 
 use std::sync::Arc;
 
@@ -43,7 +44,9 @@ pub fn now_ms() -> u64 {
 pub fn install() {
     static ONCE: std::sync::Once = std::sync::Once::new();
     ONCE.call_once(|| {
-        gridcraft_engine::ext::register_commands(commands::SPECS);
+        for specs in commands::ALL {
+            gridcraft_engine::ext::register_commands(specs);
+        }
         gridcraft_engine::ext::register_observer(&KEEPER);
     });
 }
@@ -96,7 +99,8 @@ impl Observer for Keeper {
         let Some(d) = s.active_mut() else { return };
         anchor::refresh(d);
         let changed = result.is_ok() && before.is_some_and(|(uid, ptr)| uid == d.uid && ptr != Arc::as_ptr(&d.wb) as usize);
-        if !changed || is_view_only(id) || id == "edit.undo" || id == "edit.redo" {
+        let quiet = commands::QUIET.with(std::cell::Cell::get) > 0;
+        if !changed || quiet || is_view_only(id) || id == "edit.undo" || id == "edit.redo" {
             return;
         }
         // The audit trail: who changed what, on what basis. People's own edits are recorded once

@@ -37,7 +37,7 @@ pub fn set_server_url(url: String) {
 
 static REQUEST: std::sync::Mutex<Option<(bool, String, String)>> = std::sync::Mutex::new(None);
 
-/// Opens (or closes) the Agent pane on a tab (`cell`, `questions`, `notes`, `history`,
+/// Opens (or closes) the Agent pane on a tab (`cell`, `questions`, `notes`, `variants`, `history`,
 /// `connect`) with a heat map (`off`, `confidence`, `impact`), from the next frame.
 pub fn request_pane(open: bool, tab: &str, heat: &str) {
     if let Ok(mut r) = REQUEST.lock() {
@@ -55,6 +55,7 @@ pub(crate) enum Tab {
     Cell,
     Questions,
     Notes,
+    Variants,
     History,
     Connect,
 }
@@ -92,6 +93,10 @@ pub(crate) struct Palette {
     pub input: Color32,
     pub agent: Color32,
     pub person: Color32,
+    /// Alternatives and calculation methods.
+    pub variant: Color32,
+    /// A choice that changes the result materially.
+    pub material: Color32,
 }
 
 pub(crate) fn palette(t: &Tokens) -> Palette {
@@ -105,6 +110,8 @@ pub(crate) fn palette(t: &Tokens) -> Palette {
         input: Color32::from_rgb(0xD9, 0x5D, 0x1E),
         agent: Color32::from_rgb(0x7B, 0x4F, 0xD6),
         person: t.accent,
+        variant: Color32::from_rgb(0x0E, 0x8C, 0x8C),
+        material: Color32::from_rgb(0xD9, 0x6A, 0x00),
     }
 }
 
@@ -128,6 +135,15 @@ pub(crate) fn fmt_num(v: f64) -> String {
         format!("{v:.3}")
     };
     s.replace(".00bn", "bn").replace(".00M", "M").replace(".0k", "k")
+}
+
+/// A value as the cell at `k` would show it (its number format), else [`fmt_num`].
+pub(crate) fn fmt_at(wb: &gridcraft_engine::model::Workbook, k: (usize, gridcraft_engine::core::CellRef), v: f64) -> String {
+    let code = wb.sheet(k.0).map(|sh| wb.styles.get(sh.style_id(k.1)).num_fmt.as_str().to_string()).unwrap_or_default();
+    if code.is_empty() || code.eq_ignore_ascii_case("general") || !v.is_finite() {
+        return fmt_num(v);
+    }
+    gridcraft_engine::display::format(&gridcraft_engine::core::Value::Number(v), &code, wb).text
 }
 
 /// Follows a link: `cell:Sheet1!B5` selects it, `note:n3` shows the note, a URL opens.
@@ -164,6 +180,7 @@ impl UiExtension for AgentUi {
             self.tab = match tab.as_str() {
                 "questions" => Tab::Questions,
                 "notes" => Tab::Notes,
+                "variants" => Tab::Variants,
                 "history" => Tab::History,
                 "connect" => Tab::Connect,
                 _ => Tab::Cell,

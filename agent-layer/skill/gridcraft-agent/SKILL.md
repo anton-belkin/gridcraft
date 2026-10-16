@@ -48,6 +48,17 @@ asked before you connected are waiting too.
 - `add_note` with kind `explanation` (why it's built this way), `assumption` (what isn't proven) or
   `source` (where a number comes from, with a link and a summary).
 
+## Choices belong in the document
+
+- When the model rests on a choice (two growth assumptions, two cost formulas, two sources that
+  disagree), don't pick silently: `add_alternatives` on the range with each option named and a
+  `note` on why it's plausible. The user switches in the Agent pane and sees the model recalculate.
+  `compare_alternatives` gives the outputs under each option for your answer.
+- When a readable formula approximates (straight-line averages, simple interest, a 365-day year),
+  add the exact one beside it with `add_calculation_method` and a `note` on what differs.
+  `compare_alternatives` tells you where the difference is material (above `threshold`, 1% by
+  default): say so in your answer, and that the simple one is fine where it isn't.
+
 ## Privacy — non-negotiable
 
 `get_context.privateRanges` hold client data. You see stand-in values there (same sign and
@@ -57,7 +68,10 @@ magnitude), and everything computed from them is computed from the stand-ins. So
   mechanics (formulas, inputs that aren't private, ratios, break-evens from non-private inputs);
 - never try to find the real values (no reading the file from disk, no control port);
 - you can't write to private cells, and that's intended;
-- use `relative: true` ranges for private inputs.
+- use `relative: true` ranges for private inputs;
+- alternatives can't be put on private ranges (they would keep the real values in the layer);
+- the user may turn on safe file mode: the saved file then holds stand-ins too, with the real
+  values sealed under a key on their computer. You can't turn it off; don't look for the key.
 
 ## Changing the workbook
 

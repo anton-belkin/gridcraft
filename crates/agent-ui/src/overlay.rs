@@ -5,7 +5,8 @@ use std::collections::HashMap;
 use egui::{Align2, Color32, Painter, Rect, Stroke, StrokeKind, Ui, pos2, vec2};
 use gridcraft_agent::analysis::{self, Swing};
 use gridcraft_agent::anchor;
-use gridcraft_agent::layer::{self, Layer, QuestionStatus};
+use gridcraft_agent::layer::{self, Layer, QuestionStatus, VariantKind};
+use gridcraft_agent::variants::{self, Comparison};
 use gridcraft_engine::DocState;
 use gridcraft_engine::core::{CellRef, RangeRef, Value};
 use gridcraft_ui_egui::SheetApp;
@@ -28,6 +29,7 @@ pub(crate) struct Sens {
 pub(crate) struct State {
     hover: Option<(usize, CellRef, f64)>,
     cache: HashMap<(u64, usize, u64, usize, CellRef), Sens>,
+    comparisons: Option<((u64, usize, u64), Vec<Comparison>)>,
 }
 
 /// Version of what an analysis depends on: the document, its workbook and its layer.
@@ -49,6 +51,19 @@ impl State {
         let s = Sens { base, swings };
         self.cache.insert(key, s.clone());
         s
+    }
+
+    /// Every set of alternatives and calculation methods compared, cached until something changes.
+    pub(crate) fn comparisons(&mut self, d: &DocState, l: &Layer) -> Vec<Comparison> {
+        let ver = version(d, l);
+        if let Some((v, list)) = &self.comparisons
+            && *v == ver
+        {
+            return list.clone();
+        }
+        let list: Vec<Comparison> = l.variants.iter().filter_map(|set| variants::compare(&d.wb, &d.calc, l, set)).collect();
+        self.comparisons = Some((ver, list.clone()));
+        list
     }
 }
 
@@ -118,6 +133,40 @@ pub(crate) fn paint(st: &mut AgentUi, app: &SheetApp, ui: &Ui, painter: &Painter
         let c = pos2(r.left() + 5.0, r.bottom() - 5.0);
         let pts = vec![pos2(c.x, c.y - 3.5), pos2(c.x + 3.5, c.y), pos2(c.x, c.y + 3.5), pos2(c.x - 3.5, c.y)];
         painter.add(egui::Shape::convex_polygon(pts, p.input, Stroke::NONE));
+    }
+
+    // Alternatives: two small tabs at the bottom right; a calculation method: "≈", amber where
+    // the choice changes a result materially (and those results get an amber underline).
+    if !l.variants.is_empty() {
+        for c in st.overlay.comparisons(d, &l) {
+            if c.place.sheet != si {
+                continue;
+            }
+            let r = cells.rect(c.place.range);
+            let color = if c.kind == VariantKind::Method && c.material() { p.material } else { p.variant };
+            match c.kind {
+                VariantKind::Alternatives => {
+                    let br = r.right_bottom();
+                    for (i, k) in [(0.0, 0.55), (1.0, 1.0)] {
+                        let x = br.x - 4.0 - (1.0 - i) * 7.0;
+                        let tab = Rect::from_min_max(pos2(x - 5.0, br.y - 7.0), pos2(x, br.y - 2.0));
+                        painter.rect_filled(tab, 1.0, color.gamma_multiply(k));
+                    }
+                }
+                VariantKind::Method => {
+                    painter.text(pos2(r.right() - 3.0, r.bottom() - 1.0), Align2::RIGHT_BOTTOM, "≈", theme::ui_bold(11.0), color);
+                    for row in c.rows.iter().filter(|x| x.material && x.key.0 == si && !c.place.range.contains(x.key.1)) {
+                        let o = cells.rect(RangeRef::cell(row.key.1));
+                        let y = o.bottom() - 1.5;
+                        let mut x = o.left() + 2.0;
+                        while x < o.right() - 2.0 {
+                            painter.line_segment([pos2(x, y), pos2((x + 3.0).min(o.right() - 2.0), y)], Stroke::new(1.5, p.material));
+                            x += 5.0;
+                        }
+                    }
+                }
+            }
+        }
     }
 
     // Notes: a triangle in the top-left corner (Excel's comments use the top right).

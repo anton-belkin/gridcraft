@@ -13,7 +13,7 @@ before changing anything outside the agent crates.
 
 | Path | What | Upstream? |
 | --- | --- | --- |
-| `crates/agent/` (`gridcraft-agent`) | The layer: data model, anchors, storage in the `.xlsx`, `agent.*` commands, privacy masking, trace, sensitivity, the in-app MCP server | fork only |
+| `crates/agent/` (`gridcraft-agent`) | The layer: data model, anchors, storage in the `.xlsx`, `agent.*` commands, privacy masking, trace, sensitivity, alternatives and calculation methods (`variants.rs`), the in-app MCP server | fork only |
 | `crates/agent-ui/` (`gridcraft-agent-ui`) | The Agent pane, cell badges, heat maps, hover card with the tornado chart, context-menu items; `examples/agent_snapshot.rs` renders it offscreen | fork only |
 | `apps/gridcraft/src/agent.rs` | Starts the layer in the desktop app (`--agent-port`, `--no-agent`) | fork only |
 | `agent-layer/` | The agent's skill, the rebase script | fork only |
@@ -64,6 +64,14 @@ upstream. Each one accepted upstream removes its lines from the patch.
   responses) and reaches the document through the app's own loopback control channel. Connecting an
   agent is one line of config. `/events` streams new questions, one JSON line each, for an agent's
   background monitor (`curl -sN …/events`).
+- **Choices live in the document.** "A or B?" is a set of alternatives on a range (values or
+  formulas, as typed), kept in the layer. Switching writes the option with `range.setValues`, an
+  ordinary undoable edit, so the model recalculates and undo works; the history records the switch,
+  not the cell edit. Which option is active is read from the cells (an edit by hand shows as
+  "edited"), never stored. A calculation method is the same thing with two options (simple,
+  exact) and a threshold: the difference is shown on the furthest results downstream and flagged
+  where it is material. Comparing evaluates every option on a scratch copy. Alternatives are
+  refused on private ranges: they would keep real values in the layer, which the agent can read.
 - **Analysis is deterministic.** The trace and the sensitivity are computed by the engine (the
   dependency graph, recalculation of a scratch copy). The agent explains them; it doesn't make them up.
 
@@ -110,8 +118,9 @@ Rules that keep it this way:
 Prototype. Done for GridCraft: question queue with live badges, agent notes with links, privacy
 gate, the calculation tree, sensitivity with reasoned ranges (tornado on hover, Impact heat map),
 the confidence heat map, decision history and audit trail, in-app MCP and event stream, storage
-in the `.xlsx`.
+in the `.xlsx`; alternatives in the document ("A or B?", Variants tab, switch and recalculate) and
+calculation methods side by side (simple vs exact, material differences flagged on the results).
 
-Next: export to a self-contained web page (WASM, prepared answers only), alternative formulas
-side by side, multi-dimensional sensitivity, a safe file mode for privacy, then WordCraft and
-DeckCraft (Excel → slide links with a back-reference in the workbook), built the same way.
+Next: export to a self-contained web page (WASM, prepared answers only), multi-dimensional
+sensitivity, a safe file mode for privacy, then WordCraft and DeckCraft (Excel → slide links
+with a back-reference in the workbook), built the same way.

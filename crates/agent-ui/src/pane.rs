@@ -4,14 +4,15 @@
 use egui::{Color32, RichText, Ui, vec2};
 use gridcraft_agent::analysis;
 use gridcraft_agent::anchor::{self, Place};
-use gridcraft_agent::layer::{self, Actor, Layer, Link, Note, Question, QuestionStatus};
+use gridcraft_agent::layer::{self, Actor, Layer, Link, Note, Question, QuestionStatus, VariantKind, VariantSet};
+use gridcraft_agent::variants::Comparison;
 use gridcraft_engine::core::{CellRef, RangeRef};
 use gridcraft_ui_egui::SheetApp;
 use gridcraft_ui_egui::theme::{self, Tokens};
 use serde_json::{Value as Json, json};
 
 use crate::overlay::{self, clip, kind_label};
-use crate::{AgentUi, Heat, Palette, Tab, fmt_num, follow, palette};
+use crate::{AgentUi, Heat, Palette, Tab, fmt_at, fmt_num, follow, palette};
 
 #[derive(Default)]
 pub(crate) struct State {
@@ -52,6 +53,7 @@ pub(crate) fn show(st: &mut AgentUi, app: &mut SheetApp, ui: &mut Ui) {
                     (Tab::Cell, "Cell".to_string()),
                     (Tab::Questions, if ready > 0 { format!("Questions ({ready})") } else { "Questions".into() }),
                     (Tab::Notes, "Notes".into()),
+                    (Tab::Variants, if l.variants.is_empty() { "Variants".into() } else { format!("Variants ({})", l.variants.len()) }),
                     (Tab::History, "History".into()),
                     (Tab::Connect, "Connect".into()),
                 ] {
@@ -65,6 +67,7 @@ pub(crate) fn show(st: &mut AgentUi, app: &mut SheetApp, ui: &mut Ui) {
                 Tab::Cell => cell_tab(st, app, ui, &l, &t, &p, &mut acts),
                 Tab::Questions => questions_tab(app, ui, &l, &t, &p, &mut acts),
                 Tab::Notes => notes_tab(st, app, ui, &l, &p, &mut acts),
+                Tab::Variants => variants_tab(st, app, ui, &l, &t, &p, &mut acts),
                 Tab::History => history_tab(app, ui, &l, &t, &p, &mut acts),
                 Tab::Connect => connect_tab(ui, &t),
             });
@@ -253,6 +256,15 @@ fn cell_tab(st: &mut AgentUi, app: &SheetApp, ui: &mut Ui, l: &Layer, t: &Tokens
         });
     }
 
+    // Alternatives and calculation methods on the selection.
+    if l.variants.iter().any(|v| hits(&v.anchor)) {
+        for c in st.overlay.comparisons(d, l).iter().filter(|c| c.place.sheet == si && c.place.range.intersects(&sel)) {
+            if let Some(set) = l.variants.iter().find(|v| v.id == c.id) {
+                variant_card(app, ui, set, c, t, p, acts, false);
+            }
+        }
+    }
+
     // Where does this number come from.
     let is_formula = sh.cell(c).is_some_and(|x| x.formula.is_some());
     if is_formula {
@@ -422,6 +434,137 @@ fn notes_tab(st: &mut AgentUi, app: &SheetApp, ui: &mut Ui, l: &Layer, p: &Palet
             note_card(app, ui, l, n, &t, p, acts, true, hl);
             if hl {
                 ui.scroll_to_cursor(Some(egui::Align::Center));
+            }
+        }
+    }
+}
+
+fn pct(x: f64) -> String {
+    if !x.is_finite() {
+        "∞".into()
+    } else if x < 0.001 {
+        format!("{:.2}%", x * 100.0)
+    } else {
+        format!("{:.1}%", x * 100.0)
+    }
+}
+
+/// A set of alternatives or a calculation method: switch between the options, and see what each
+/// does to the results.
+#[allow(clippy::too_many_arguments)]
+fn variant_card(app: &SheetApp, ui: &mut Ui, set: &VariantSet, c: &Comparison, t: &Tokens, p: &Palette, acts: &mut Vec<Act>, show_place: bool) {
+    let method = c.kind == VariantKind::Method;
+    let stripe = if method && c.material() { p.material } else { p.variant };
+    let Some(d) = app.session.active() else { return };
+    card(ui, t, stripe, |ui| {
+        ui.horizontal_wrapped(|ui| {
+            let head = match (method, c.title.is_empty()) {
+                (true, true) => "Calculation method".to_string(),
+                (true, false) => format!("Calculation method · {}", c.title),
+                (false, true) => "Alternatives · A or B?".to_string(),
+                (false, false) => format!("Alternatives · {}", c.title),
+            };
+            ui.label(RichText::new(head).color(p.variant).small().strong());
+            if show_place && ui.link(RichText::new(c.place.a1()).small()).clicked() {
+                acts.push(Act::Follow(format!("cell:{}", c.place.a1())));
+            }
+        });
+        ui.horizontal_wrapped(|ui| {
+            ui.label(RichText::new(if method { "Use" } else { "In the model:" }).small().color(t.text_dim));
+            for (i, name) in c.names.iter().enumerate() {
+                let on = c.current == Some(i);
+                let text = if on { RichText::new(name).strong() } else { RichText::new(name) };
+                if ui.selectable_label(on, text).on_hover_text(c.notes.get(i).map(String::as_str).unwrap_or("")).clicked() && !on {
+                    acts.push(Act::Run("agent.useVariant", json!({"id": c.id, "option": i})));
+                }
+            }
+        });
+        if c.current.is_none() {
+            ui.label(RichText::new("Edited since: the cells match none of the options").small().italics().color(p.pending));
+        }
+        if method {
+            for (o, name) in set.options.iter().zip(&c.names) {
+                let f = o
+                    .values
+                    .first()
+                    .and_then(|r| r.first())
+                    .map(|v| v.as_str().map(str::to_string).unwrap_or_else(|| v.to_string()))
+                    .unwrap_or_default();
+                ui.horizontal_wrapped(|ui| {
+                    ui.label(RichText::new(format!("{name:<6}")).small().monospace().color(t.text_dim));
+                    ui.label(RichText::new(clip(&f, 70)).small().monospace());
+                });
+            }
+        }
+        for (o, name) in set.options.iter().zip(&c.names) {
+            if !o.note.is_empty() {
+                ui.label(RichText::new(format!("{name}: {}", clip(&o.note, 160))).small().color(t.text_dim));
+            }
+        }
+        if c.rows.is_empty() {
+            return;
+        }
+        ui.add_space(3.0);
+        egui::Grid::new(("variant_grid", &c.id)).num_columns(c.names.len() + 2).spacing(vec2(10.0, 2.0)).striped(true).show(ui, |ui| {
+            ui.label("");
+            for (i, name) in c.names.iter().enumerate() {
+                let r = RichText::new(clip(name, 12)).small().strong();
+                ui.label(if c.current == Some(i) { r.color(p.variant) } else { r.color(t.text_dim) });
+            }
+            ui.label(RichText::new("Δ").small().strong().color(t.text_dim));
+            ui.end_row();
+            for row in &c.rows {
+                let place = Place {
+                    sheet: row.key.0,
+                    sheet_name: d.wb.sheet(row.key.0).map(|x| x.name.clone()).unwrap_or_default(),
+                    range: RangeRef::cell(row.key.1),
+                };
+                let name = if row.label.is_empty() { place.range.a1() } else { clip(&row.label, 18) };
+                if ui.link(RichText::new(name).small()).on_hover_text(place.a1()).clicked() {
+                    acts.push(Act::Follow(format!("cell:{}", place.a1())));
+                }
+                for (i, v) in row.values.iter().enumerate() {
+                    let text = v.map(|v| fmt_at(&d.wb, row.key, v)).unwrap_or_else(|| "—".into());
+                    let r = RichText::new(text).small();
+                    ui.label(if c.current == Some(i) { r.strong() } else { r });
+                }
+                let diff = RichText::new(pct(row.rel_diff)).small();
+                ui.label(if row.material { diff.color(p.material).strong() } else { diff.color(t.text_dim) });
+                ui.end_row();
+            }
+        });
+        if let Some(th) = c.threshold {
+            let worst = c.rows.iter().filter(|r| r.material).max_by(|a, b| a.rel_diff.partial_cmp(&b.rel_diff).unwrap_or(std::cmp::Ordering::Equal));
+            let text = match worst {
+                Some(r) => {
+                    let what = if r.label.is_empty() { r.key.1.a1() } else { r.label.clone() };
+                    RichText::new(format!("Material: {} on {what} (threshold {})", pct(r.rel_diff), pct(th))).color(p.material).small().strong()
+                }
+                None => RichText::new(format!("Immaterial: at most {} (threshold {})", pct(c.max_rel_diff()), pct(th))).color(t.text_dim).small(),
+            };
+            ui.label(text);
+        }
+    });
+}
+
+fn variants_tab(st: &mut AgentUi, app: &SheetApp, ui: &mut Ui, l: &Layer, t: &Tokens, p: &Palette, acts: &mut Vec<Act>) {
+    if l.variants.is_empty() {
+        ui.label(
+            RichText::new("No alternatives yet. Your agent adds them (\"A or B?\", a simple and an exact formula) and you switch here.").italics(),
+        );
+        return;
+    }
+    let Some(d) = app.session.active() else { return };
+    let list = st.overlay.comparisons(d, l);
+    for kind in [VariantKind::Alternatives, VariantKind::Method] {
+        let group: Vec<&Comparison> = list.iter().filter(|c| c.kind == kind).collect();
+        if group.is_empty() {
+            continue;
+        }
+        ui.label(RichText::new(if kind == VariantKind::Method { "Calculation methods" } else { "Alternatives" }).strong());
+        for c in group {
+            if let Some(set) = l.variants.iter().find(|v| v.id == c.id) {
+                variant_card(app, ui, set, c, t, p, acts, true);
             }
         }
     }
