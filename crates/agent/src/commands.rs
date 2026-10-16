@@ -51,6 +51,7 @@ pub static ALL: &[&[CommandSpec]] = &[
     crate::topics::SPECS,
     crate::proposals::SPECS,
     crate::filecontext::SPECS,
+    crate::setranges::SPECS,
     crate::variants::SPECS,
     crate::stress::SPECS,
     crate::safe::SPECS,

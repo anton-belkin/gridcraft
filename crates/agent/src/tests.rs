@@ -201,6 +201,20 @@ fn every_agent_command_survives_empty_params() {
             json!({"range": "ZZ!A1", "cell": "XFD1048576", "id": "q999", "text": "x", "low": 1e308, "high": -1e308, "depth": 99999}),
         );
     }
+    // set_ranges with hostile shapes: the whole sheet, junk types, ragged rows, a topic that isn't.
+    let mut s = model();
+    for p in [
+        json!({"reason": "x", "ranges": [{"range": "A1:XFD1048576", "values": 1}]}),
+        json!({"reason": "x", "ranges": [{"range": "A1:B2", "values": [[1], [2, 3, 4]], "formulas": [[null, "=1/0"], 7]}]}),
+        json!({"reason": "x", "ranges": [{"range": "A1", "values": [[{"a": 1}]], "format": {"bold": "yes", "numberFormat": 5, "fontSize": "big", "fill": [1], "align": 3}}]}),
+        json!({"reason": "x", "ranges": [{"range": "XFD1048576", "formulas": "=XFD1048576+1"}], "topic": "nope"}),
+        json!({"reason": "x", "ranges": "nope"}),
+        json!({"reason": "x", "ranges": [{"values": 1}, null, 3]}),
+        json!({"reason": "x", "actor": "agent", "ranges": (0..300).map(|i| json!({"range": format!("A{}", i + 1), "values": i})).collect::<Vec<_>>()}),
+    ] {
+        let _ = s.execute("agent.setRanges", p);
+    }
+    assert!(s.active().is_some());
 }
 
 #[test]
@@ -1872,4 +1886,94 @@ fn file_context_reaches_the_agent_stays_in_the_file_and_undoes() {
     layer::write_into(&mut wb, &l);
     assert_eq!(layer::read_from(&wb).file_context, l.file_context);
     assert_eq!(crate::export::shared_layer(&l, false).file_context, l.file_context);
+}
+
+// ---------------------------------------------------------------- set_ranges
+
+fn text_at(s: &Session, a: &str) -> String {
+    let d = s.active().unwrap();
+    let sh = d.wb.active().unwrap();
+    gridcraft_engine::display::cell_text(&d.wb, sh, gridcraft_engine::core::CellRef::parse(a).unwrap())
+}
+
+#[test]
+fn set_ranges_writes_many_cells_as_one_step() {
+    let mut b = McpLocal(model());
+    let call = |b: &mut McpLocal, args: Value| crate::mcp::call(b, "set_ranges", &args);
+    let depth = b.0.active().unwrap().undo.len();
+    let log = layer::get(b.0.active().unwrap()).log.len();
+    let r = call(
+        &mut b,
+        json!({"reason": "2026 plan", "source": "sales plan", "ranges": [
+            {"range": "C2:C5", "values": [[126], [5300], [72], [104000]]},
+            {"range": "C6:C7", "formulas": [["C2*C3"], ["=C6-C3*C4-C5"]], "format": {"bold": true, "numberFormat": "#,##0"}},
+            {"range": "D2:D7", "values": "2026"},
+            {"range": "E2", "values": "=not a formula"}
+        ]}),
+    )
+    .unwrap();
+    assert_eq!((r["ranges"].clone(), r["cells"].clone()), (json!(4), json!(13)));
+    let s = &b.0;
+    assert_eq!(num(s, "C7"), 126.0 * 5300.0 - 5300.0 * 72.0 - 104000.0);
+    assert_eq!(text_at(s, "C6"), "667,800");
+    assert_eq!(text_at(s, "D5"), "2026");
+    assert_eq!(text_at(s, "E2"), "=not a formula", "a value that looks like a formula stays text");
+    // One undo step, labelled as the agent's; one history entry with the reason and source.
+    let d = s.active().unwrap();
+    assert_eq!(d.undo.len(), depth + 1);
+    assert_eq!(d.undo.last().unwrap().label, "(agent): set 4 ranges");
+    let l = layer::get(d);
+    assert_eq!(l.log.len(), log + 1);
+    let e = l.log.last().unwrap();
+    assert_eq!((e.actor, e.command.as_str(), e.source.as_str()), (crate::Actor::Agent, "agent.setRanges", "sales plan"));
+    assert!(e.text.contains("C2:C5") && e.text.contains("2026 plan"), "{}", e.text);
+    // Undone in one go.
+    b.0.execute("edit.undo", json!({})).unwrap();
+    assert!(text_at(&b.0, "C7").is_empty());
+    assert_eq!(num(&b.0, "B2"), 120.0);
+    assert!(text_at(&b.0, "D5").is_empty());
+}
+
+#[test]
+fn set_ranges_refuses_the_whole_call() {
+    let mut b = McpLocal(model());
+    b.0.execute("agent.private", json!({"range": "B4:B5"})).unwrap();
+    let call = |b: &mut McpLocal, args: Value| crate::mcp::call(b, "set_ranges", &args);
+    let before = num(&b.0, "B2");
+    // Client data: nothing changes, and the cells are named.
+    let e = call(&mut b, json!({"reason": "x", "ranges": [{"range": "B2", "values": 1}, {"range": "B3:B5", "values": 0}]})).unwrap_err();
+    assert!(e.contains("B4") && e.contains("B5") && e.contains("client data"), "{e}");
+    assert_eq!(num(&b.0, "B2"), before);
+    // Shapes that don't match, unknown formats, too many cells, no reason.
+    assert!(
+        call(&mut b, json!({"reason": "x", "ranges": [{"range": "C1:D2", "values": [[1, 2, 3]]}]})).unwrap_err().contains("2 row(s) × 2 column(s)")
+    );
+    assert!(call(&mut b, json!({"reason": "x", "ranges": [{"range": "C1", "format": {"sparkle": true}}]})).unwrap_err().contains("unknown format"));
+    assert!(call(&mut b, json!({"reason": "x", "ranges": [{"range": "A1:Z5000", "values": 0}]})).unwrap_err().contains("at most"));
+    assert!(call(&mut b, json!({"ranges": [{"range": "C1", "values": 1}]})).unwrap_err().contains("reason"));
+    assert!(call(&mut b, json!({"reason": "x", "ranges": []})).is_err());
+}
+
+#[test]
+fn set_ranges_in_a_topic_is_one_proposal_step() {
+    let mut s = model();
+    let t = s.execute("agent.ask", json!({"range": "B7", "text": "Plan for 2026?"})).unwrap()["topic"].as_str().unwrap().to_string();
+    s.execute(
+        "agent.setRanges",
+        json!({"topic": t, "reason": "2026 column", "actor": "agent", "ranges": [{"range": "C2:C5", "values": [[126], [5300], [72], [104000]]}, {"range": "C7", "formulas": "=C2*C3-C3*C4-C5"}]}),
+    )
+    .unwrap();
+    // Nothing changed yet; the proposal holds one step with both ranges.
+    assert!(text_at(&s, "C7").is_empty());
+    let e = layer::get(s.active().unwrap()).topic(&t).unwrap().edits.clone().unwrap();
+    assert_eq!(e.options[0].steps.len(), 1);
+    let ch = s.execute("agent.proposalChanges", json!({"topic": t})).unwrap();
+    assert_eq!(ch["changes"].as_array().unwrap().len(), 5);
+    // Applied by the person: one undo step.
+    let depth = s.active().unwrap().undo.len();
+    s.execute("agent.applyProposal", json!({"topic": t})).unwrap();
+    assert_eq!(num(&s, "C7"), 126.0 * 5300.0 - 5300.0 * 72.0 - 104000.0);
+    assert_eq!(s.active().unwrap().undo.len(), depth + 1);
+    s.execute("edit.undo", json!({})).unwrap();
+    assert!(text_at(&s, "C7").is_empty());
 }

@@ -109,8 +109,13 @@ magnitude), and everything computed from them is computed from the stand-ins. So
 
 ## Changing the workbook
 
-Only through `run_command`, with a `reason` and, when there is one, a `source`. Every change is
-recorded as yours in the history the user sees.
+Only through `run_command` or `set_ranges`, with a `reason` and, when there is one, a `source`.
+Every change is recorded as yours in the history the user sees.
+
+**Prefer `set_ranges` for more than one cell.** One call writes the values, formulas and formats of
+several ranges (`values` / `formulas` as 2-D arrays matching each range, or one value for the whole
+range; `format` {bold, numberFormat, fill, align, …}) as one undo step and one history entry. Each
+tool call costs you a turn: a table filled cell by cell takes a second a cell.
 
 **In a topic, propose; don't edit.** `run_command {topic, command, params, reason}` runs the command
 on the topic's draft and records it in the topic's proposal; the workbook doesn't change. The user

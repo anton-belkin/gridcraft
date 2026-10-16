@@ -42,6 +42,7 @@ pub mod runner;
 pub mod safe;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod server;
+pub mod setranges;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod stdio;
 pub mod stress;
@@ -195,7 +196,9 @@ impl Observer for Keeper {
         links::refresh(d);
         let changed = result.is_ok() && before.is_some_and(|(uid, ptr)| uid == d.uid && ptr != Arc::as_ptr(&d.wb) as usize);
         let quiet = commands::QUIET.with(std::cell::Cell::get) > 0;
-        if !changed || quiet || is_view_only(id) || id == "edit.undo" || id == "edit.redo" {
+        // Commands that write their own entry (one for many changes) aren't logged again.
+        let self_logged = matches!(id, "agent.setRanges" | "agent.applyProposal");
+        if !changed || quiet || self_logged || is_view_only(id) || id == "edit.undo" || id == "edit.redo" {
             return;
         }
         // The audit trail: who changed what, on what basis. People's own edits are recorded once

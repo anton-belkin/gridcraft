@@ -287,6 +287,25 @@ upstream. Each one accepted upstream removes its lines from the patch.
     selection or the view: a cell or range (outlined), a topic's places (`topic:`), a place
     (`place:`); a removed place outlines the neighbours it was between. A target off screen or on
     another sheet gets an edge hint ("↓ C40", "→ Sheet2!B4").
+- **Many cells in one call** (`setranges.rs`): `set_ranges {ranges: [{range, values?, formulas?,
+  format?}], reason, source?, topic?, option?}` is the command `agent.setRanges`. Values and
+  formulas are 2-D arrays matching each range (one value fills it; a value that starts with `=` is
+  text); `format` maps onto `home.*` (bold, italic, underline, strikethrough, wrap, numberFormat,
+  fill, fontColor, fontSize, fontName, align, valign). The whole call is checked first (ranges,
+  shapes, formats, at most 200 ranges and 100,000 cells, and the privacy gate, which refuses the
+  whole call and names the client-data cells), then runs the `range.setValues` / `home.*`
+  commands quietly with their history entries set aside: one undo step "(agent): set N ranges",
+  one history entry with the reason and source. With `topic` it is one step of the proposal.
+  Commands that write their own entry (`agent.setRanges`, `agent.applyProposal`) aren't logged
+  again by the observer.
+- **Latency of the agent path.** A command from the agent reaches the UI thread at once (the
+  control server wakes egui); with the window visible it waits at most one frame (≈17 ms at 60 Hz),
+  hidden or idle under a millisecond. Two things made it slow: a draft of a proposal was built
+  from a fresh `DocState`, which recalculates the whole workbook (0.4–1.3 s per `run_command
+  {topic}` on a 5,000-row model, and the pane rebuilt it after every edit), and the registry's
+  heartbeat came from UI frames, so an idle or hidden window went stale after 30 s and the hub
+  stopped listing GridCraft. Drafts now start from the accepted document's calculated state (only
+  the steps recalculate: 2 ms per call, 20 ms per rebuild), and the heartbeat has its own thread.
 - **Analysis is deterministic.** The trace and the sensitivity are computed by the engine (the
   dependency graph, recalculation of a scratch copy). The agent explains them; it doesn't make them up.
 - **Several inputs at once, bounded.** The worst and best combination moves 3–12 inputs inside

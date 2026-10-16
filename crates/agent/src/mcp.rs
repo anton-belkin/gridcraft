@@ -18,7 +18,8 @@ mark inputs with reasoned ranges (set_input_range), say how sure you are (set_co
 When the model rests on a choice, put both sides in the document (add_alternatives) instead of picking one; when a readable \
 formula approximates, add the exact one beside it (add_calculation_method) and say where the difference matters. Use \
 worst_case and risk_matrix to find what to check first. \
-Change the workbook only with run_command, giving a reason and a source. In a topic, PROPOSE: run_command with \
+Change the workbook only with run_command or set_ranges, giving a reason and a source; prefer set_ranges for more \
+than one cell (one call, one undo step, instead of a call per cell). In a topic, PROPOSE: run_command with \
 `topic` records the change in the topic's proposal without touching the workbook; the person applies it in the document. \
 Don't ask for confirmation in the chat; offer options (option B, C… with describe_option) when there's a real choice. \
 Reads mark cells a pending proposal would change (pending), and questions carry pendingNearby: don't contradict them. \
@@ -275,6 +276,24 @@ pub fn tools() -> Vec<Value> {
             false,
         ),
         tool(
+            "set_ranges",
+            "Write many cells in ONE call: values, formulas and formats of several ranges, as one undo step and one history entry. Prefer it to run_command for more than one cell. `values` / `formulas` are 2-D arrays matching the range (rows × columns; a single value fills the range). `format`: {bold, italic, underline, strikethrough, wrap, numberFormat (\"Currency\", \"0.0%\", …), fill (\"#FFF2CC\"), fontColor, fontSize, fontName, align: left|center|right, valign}. Refused whole if any range touches client data. With `topic` it is one step of that topic's proposal (nothing changes until the person applies it). At most 100,000 cells.",
+            json!({
+                "ranges": {"type": "array", "description": "The ranges", "items": {"type": "object", "properties": {
+                    "range": {"type": "string", "description": "A1 range, e.g. \"B2:D5\" or \"Model!A1\""},
+                    "values": {"description": "2-D array of values (or one value for the whole range)"},
+                    "formulas": {"description": "2-D array of formulas (\"=B2*C2\"; or one for the whole range)"},
+                    "format": {"type": "object", "description": "bold, italic, numberFormat, fill, fontColor, align, …"}
+                }, "required": ["range"]}},
+                "reason": s("Why"),
+                "source": s("What it is based on"),
+                "topic": s("Topic id or number: propose instead of changing"),
+                "option": s("Option letter (A, B, C…), default A")
+            }),
+            &["ranges", "reason"],
+            false,
+        ),
+        tool(
             "get_file_context",
             "The file's own context: what the document is, for whom, house rules, background, facts gathered. Not tied to any place; get_context and every question carry a short summary.",
             json!({}),
@@ -406,6 +425,7 @@ fn call_tool(b: &mut dyn Backend, name: &str, args: &Value) -> Result<Value, Str
         "risk_matrix" => exec(b, "agent.risk", pick(args, &["cell"])),
         "use_alternative" => exec(b, "agent.useVariant", pick(args, &["id", "option"])),
         "run_command" => exec(b, "agent.exec", pick(args, &["command", "params", "reason", "source", "topic", "option"])),
+        "set_ranges" => exec(b, "agent.setRanges", pick(args, &["ranges", "reason", "source", "topic", "option"])),
         "get_file_context" => exec(b, "agent.fileContext", json!({})),
         "add_file_context" => exec(b, "agent.addFileContext", pick(args, &["title", "kind", "text"])),
         "update_file_context" => exec(b, "agent.updateFileContext", pick(args, &["id", "title", "text"])),
