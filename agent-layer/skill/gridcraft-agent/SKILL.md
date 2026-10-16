@@ -39,6 +39,8 @@ investigate.
 
 ## For each question
 
+⟦n⟧ in a question is what the user pointed at while speaking, see `refs`.
+
 1. `claim_question` at once: the cell shows the user you are on it.
 2. Investigate: `get_context` (once per session), `read_range` around the cell, `trace_number` for
    where a number comes from, `sensitivity` for what moves it. The trace and sensitivity are computed

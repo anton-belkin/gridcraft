@@ -27,7 +27,9 @@ pass that document (and your listener) on every call. Questions carry their docu
 PING: a question with kind \"ping\" is a connection check: answer it at once with \"here\", don't investigate. \
 CHANNEL: when GridCraft sends questions to this session, each arrives as <channel source=\"gridcraft\" question_id=\"q3\" \
 range=\"Sheet1!B7\">question text</channel>: claim_question with that id, investigate, answer_question. Keep it short; \
-the user is waiting in the spreadsheet.";
+the user is waiting in the spreadsheet. \
+VOICE: ⟦n⟧ in a question is what the user pointed at while speaking (expanded as ⟦n: Sheet1!C16 · label = value⟧), see refs; \
+resolve \"this\", \"that one\", \"это\" from those and the context.";
 
 /// Tools that take a `listener` (AItoCraft): calls refresh it.
 const LISTENER_TOOLS: &[&str] = &["list_questions", "wait_for_questions", "claim_question", "answer_question"];
@@ -91,7 +93,7 @@ pub fn tools() -> Vec<Value> {
         ),
         tool(
             "list_questions",
-            "Questions the user asked on cells. status: pending (new), working (claimed), answered, open (pending+working) or all.",
+            "Questions the user asked on cells. status: pending (new), working (claimed), answered, open (pending+working) or all. A spoken question carries ⟦n: Sheet1!C16 · label = value⟧ where the user pointed at a cell while speaking; refs lists them.",
             json!({"status": {"type": "string", "enum": ["pending", "working", "answered", "open", "all"]}}),
             &[],
             true,

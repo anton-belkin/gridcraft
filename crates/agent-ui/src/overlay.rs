@@ -217,16 +217,19 @@ pub(crate) fn paint(st: &mut AgentUi, app: &SheetApp, ui: &Ui, painter: &Painter
         painter.add(egui::Shape::convex_polygon(pts, p.note, Stroke::NONE));
     }
 
-    // Questions: a badge in the top-right corner.
+    // Questions: a badge in the top-right corner, on the cell asked about and on every cell
+    // pointed at while it was spoken.
     for q in &l.questions {
-        let Some(pl) = on_sheet(&q.anchor) else { continue };
-        let r = cells.rect(pl.range);
-        if !pl.range.is_single() {
-            painter.rect_stroke(r, 0.0, Stroke::new(1.0, status_color(&p, q.status, q.seen).gamma_multiply(0.6)), StrokeKind::Inside);
+        for id in std::iter::once(&q.anchor).chain(q.refs.iter().map(|r| &r.anchor)) {
+            let Some(pl) = on_sheet(id) else { continue };
+            let r = cells.rect(pl.range);
+            if !pl.range.is_single() {
+                painter.rect_stroke(r, 0.0, Stroke::new(1.0, status_color(&p, q.status, q.seen).gamma_multiply(0.6)), StrokeKind::Inside);
+            }
+            badge(painter, r, q.status, q.seen, &p, ui.input(|i| i.time));
         }
-        badge(painter, r, q.status, q.seen, &p, ui.input(|i| i.time));
     }
-    if l.questions.iter().any(|q| q.status == QuestionStatus::Working && !q.is_ping()) {
+    if l.questions.iter().any(|q| matches!(q.status, QuestionStatus::Working | QuestionStatus::Transcribing) && !q.is_ping()) {
         ui.ctx().request_repaint_after(std::time::Duration::from_millis(120));
     }
 
@@ -239,6 +242,8 @@ fn status_color(p: &Palette, s: QuestionStatus, seen: bool) -> Color32 {
         QuestionStatus::Working => p.working,
         QuestionStatus::Answered if seen => p.seen,
         QuestionStatus::Answered => p.answered,
+        QuestionStatus::Transcribing => p.transcribing,
+        QuestionStatus::Failed => p.failed,
     }
 }
 
@@ -252,7 +257,7 @@ fn badge(painter: &Painter, cell: Rect, s: QuestionStatus, seen: bool, p: &Palet
         QuestionStatus::Answered => 7.0,
         _ => 9.0,
     };
-    if s == QuestionStatus::Working {
+    if matches!(s, QuestionStatus::Working | QuestionStatus::Transcribing) {
         let k = 0.55 + 0.45 * ((time * 4.0).sin() * 0.5 + 0.5) as f32;
         color = color.gamma_multiply(k);
     }
@@ -260,6 +265,11 @@ fn badge(painter: &Painter, cell: Rect, s: QuestionStatus, seen: bool, p: &Palet
     let tr = cell.right_top();
     let pts = vec![tr, pos2(tr.x, tr.y + size), pos2(tr.x - size, tr.y)];
     painter.add(egui::Shape::convex_polygon(pts, color, Stroke::NONE));
+}
+
+/// `⟦2⟧` → `[2]` where a marker can't be drawn as a bubble.
+pub(crate) fn plain_markers(text: &str) -> String {
+    text.replace('⟦', "[").replace('⟧', "]")
 }
 
 /// Red (0) → amber → green (1).
@@ -301,7 +311,7 @@ fn hover(st: &mut AgentUi, app: &SheetApp, ui: &Ui, d: &DocState, l: &Layer, cel
     }
     let here = |id: &str| l.anchor(id).and_then(|a| anchor::resolve(&d.wb, a)).is_some_and(|pl| pl.sheet == si && pl.range.contains(c));
     let notes: Vec<_> = l.notes.iter().filter(|n| here(&n.anchor)).collect();
-    let questions: Vec<_> = l.questions.iter().filter(|q| here(&q.anchor)).collect();
+    let questions: Vec<_> = l.questions.iter().filter(|q| here(&q.anchor) || q.refs.iter().any(|r| here(&r.anchor))).collect();
     let private = l.private.iter().any(|id| here(id));
     let input = l.inputs.iter().find(|i| here(&i.anchor));
     let slides: Vec<_> = links::uses_at(&d.wb, l, si, Some(&RangeRef::cell(c))).into_iter().map(|(_, u)| u).collect();
@@ -332,9 +342,13 @@ fn hover(st: &mut AgentUi, app: &SheetApp, ui: &Ui, d: &DocState, l: &Layer, cel
                         QuestionStatus::Pending => ("Question waiting", p.pending),
                         QuestionStatus::Working => ("The agent is working on it", p.working),
                         QuestionStatus::Answered => ("Answered", p.answered),
+                        QuestionStatus::Transcribing => ("Spoken · transcribing…", p.transcribing),
+                        QuestionStatus::Failed => ("Spoken · not transcribed", p.failed),
                     };
                     ui.label(egui::RichText::new(status).color(color).small().strong());
-                    ui.label(egui::RichText::new(&q.text).italics());
+                    if !q.text.is_empty() {
+                        ui.label(egui::RichText::new(plain_markers(&q.text)).italics());
+                    }
                     if let Some(a) = &q.answer {
                         ui.label(clip(&a.text, 180));
                     }

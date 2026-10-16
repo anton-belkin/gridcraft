@@ -138,10 +138,15 @@ fn question_card(app: &SheetApp, ui: &mut Ui, l: &Layer, q: &Question, t: &Token
         QuestionStatus::Working => ("The agent is working on it", p.working),
         QuestionStatus::Answered if !q.seen => ("Answer ready", p.answered),
         QuestionStatus::Answered => ("Answered", p.seen),
+        QuestionStatus::Transcribing => ("Transcribing what you said…", p.transcribing),
+        QuestionStatus::Failed => ("Not transcribed", p.failed),
     };
     card(ui, t, color, |ui| {
         ui.horizontal_wrapped(|ui| {
             ui.label(RichText::new(status).color(color).small().strong());
+            if q.spoken {
+                ui.label(RichText::new("· spoken").small().color(t.text_dim));
+            }
             if show_place
                 && let Some(pl) = place_of(app, l, &q.anchor)
                 && ui.link(RichText::new(pl.a1()).small()).clicked()
@@ -149,13 +154,65 @@ fn question_card(app: &SheetApp, ui: &mut Ui, l: &Layer, q: &Question, t: &Token
                 acts.push(Act::Follow(format!("cell:{}", pl.a1())));
             }
         });
-        ui.label(RichText::new(&q.text).italics());
+        if q.status == QuestionStatus::Failed {
+            ui.label(RichText::new(&q.error).small().color(p.failed));
+            ui.horizontal(|ui| {
+                if ui.small_button("Retry").on_hover_text("Transcribe the recording again").clicked() {
+                    acts.push(Act::Follow(format!("voice-retry:{}", q.id)));
+                }
+                if ui.small_button("Dismiss").on_hover_text("Drop this question and its recording").clicked() {
+                    acts.push(Act::Follow(format!("voice-dismiss:{}", q.id)));
+                }
+            });
+        }
+        spoken_text(app, ui, l, q, acts);
         if let Some(a) = &q.answer {
             ui.add_space(3.0);
             ui.label(&a.text);
             links(ui, &a.links, acts);
             if !q.seen && ui.small_button("Got it").clicked() {
                 acts.push(Act::Run("agent.seen", json!({"id": q.id})));
+            }
+        }
+    });
+}
+
+/// A question's text; a marker `⟦n⟧` (a cell pointed at while speaking) is a numbered bubble that
+/// selects that cell.
+fn spoken_text(app: &SheetApp, ui: &mut Ui, l: &Layer, q: &Question, acts: &mut Vec<Act>) {
+    if q.refs.is_empty() {
+        if !q.text.is_empty() {
+            ui.label(RichText::new(&q.text).italics());
+        }
+        return;
+    }
+    let p = palette(&Tokens::get(ui.ctx()));
+    ui.horizontal_wrapped(|ui| {
+        ui.spacing_mut().item_spacing.x = 3.0;
+        let mut rest = q.text.as_str();
+        loop {
+            let Some(i) = rest.find('⟦') else {
+                if !rest.trim().is_empty() {
+                    ui.label(RichText::new(rest.trim()).italics());
+                }
+                break;
+            };
+            let (before, after) = rest.split_at(i);
+            if !before.trim().is_empty() {
+                ui.label(RichText::new(before.trim()).italics());
+            }
+            let after = &after['⟦'.len_utf8()..];
+            let Some(j) = after.find('⟧') else { break };
+            let n: u32 = after[..j].trim().parse().unwrap_or(0);
+            rest = &after[j + '⟧'.len_utf8()..];
+            let place = q.refs.iter().find(|r| r.n == n).and_then(|r| place_of(app, l, &r.anchor));
+            let (rect, resp) = ui.allocate_exact_size(vec2(16.0, 14.0), egui::Sense::click());
+            crate::voice_bubble(ui.painter(), rect.min, n, p.person);
+            let resp = resp.on_hover_text(place.as_ref().map_or_else(|| "The cells were deleted".to_string(), |pl| pl.a1()));
+            if resp.clicked()
+                && let Some(pl) = place
+            {
+                acts.push(Act::Follow(format!("cell:{}", pl.a1())));
             }
         }
     });
@@ -216,7 +273,7 @@ fn cell_tab(st: &mut AgentUi, app: &SheetApp, ui: &mut Ui, l: &Layer, t: &Tokens
     ui.add_space(6.0);
 
     let hits = |id: &str| l.anchor(id).and_then(|a| anchor::resolve(&d.wb, a)).is_some_and(|pl| pl.sheet == si && pl.range.intersects(&sel));
-    let qs: Vec<&Question> = l.questions.iter().filter(|q| hits(&q.anchor)).collect();
+    let qs: Vec<&Question> = l.questions.iter().filter(|q| hits(&q.anchor) || q.refs.iter().any(|r| hits(&r.anchor))).collect();
     for q in &qs {
         question_card(app, ui, l, q, t, p, acts, false);
         // Reading it here is reading it.
@@ -441,9 +498,10 @@ fn questions_tab(app: &SheetApp, ui: &mut Ui, l: &Layer, t: &Tokens, p: &Palette
         return;
     }
     let order = |q: &Question| match (q.status, q.seen) {
+        (QuestionStatus::Failed, _) => 0,
         (QuestionStatus::Answered, false) => 0,
         (QuestionStatus::Working, _) => 1,
-        (QuestionStatus::Pending, _) => 2,
+        (QuestionStatus::Pending | QuestionStatus::Transcribing, _) => 2,
         _ => 3,
     };
     let mut list: Vec<&Question> = l.questions.iter().filter(|q| !q.is_ping()).collect();

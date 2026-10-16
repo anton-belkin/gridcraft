@@ -62,6 +62,24 @@ pub enum QuestionStatus {
     /// An agent has taken it.
     Working,
     Answered,
+    /// Spoken, being transcribed: not with the agent yet (kept in memory only, never saved).
+    Transcribing,
+    /// The transcription failed: the reader can retry or dismiss it (memory only).
+    Failed,
+}
+
+impl QuestionStatus {
+    /// Not a question for the agent yet: a spoken one still turning into text.
+    pub fn is_draft(self) -> bool {
+        matches!(self, QuestionStatus::Transcribing | QuestionStatus::Failed)
+    }
+}
+
+/// What the reader pointed at while speaking: marker `⟦n⟧` in the question's text.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct QuestionRef {
+    pub n: u32,
+    pub anchor: String,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -87,6 +105,15 @@ pub struct Question {
     /// The reader has opened the answer.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub seen: bool,
+    /// Cells pointed at while the question was spoken (`anchor` stays the main one).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub refs: Vec<QuestionRef>,
+    /// Asked by voice.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub spoken: bool,
+    /// Why the transcription failed.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub error: String,
     /// Empty for a reader's question; [`PING`] for a connection check (never shown as a question,
     /// never saved).
     #[serde(default, skip_serializing_if = "String::is_empty")]
@@ -359,7 +386,7 @@ impl Layer {
     /// Anchors nothing refers to any more.
     pub fn unused_anchors(&self) -> Vec<String> {
         let used = |id: &str| {
-            self.questions.iter().any(|q| q.anchor == id)
+            self.questions.iter().any(|q| q.anchor == id || q.refs.iter().any(|r| r.anchor == id))
                 || self.notes.iter().any(|n| n.anchor == id)
                 || self.inputs.iter().any(|i| i.anchor == id)
                 || self.private.iter().any(|p| p == id)
@@ -448,9 +475,10 @@ pub fn write_into(wb: &mut Workbook, layer: &Layer) {
     p.parts.retain(|q| !ours.contains(&q.name));
     p.rels.retain(|r| !(r.rel_type == REL_CUSTOM_XML && ours.iter().any(|n| n == &r.target || r.target.ends_with(n.as_str()))) && r.id != REL_ID);
     if !layer.is_empty() {
-        // Connection checks belong to this session, not to the file.
+        // Connection checks belong to this session, not to the file; spoken questions still
+        // being transcribed live in memory only.
         let mut layer = layer.clone();
-        layer.questions.retain(|q| !q.is_ping());
+        layer.questions.retain(|q| !q.is_ping() && !q.status.is_draft());
         let json = serde_json::to_string(&layer).unwrap_or_default();
         // CDATA can't hold `]]>`; JSON only has it inside strings, where `]` means the same.
         let json = json.replace("]]>", "\\u005d\\u005d>");

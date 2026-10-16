@@ -14,7 +14,8 @@ before changing anything outside the agent crates.
 | Path | What | Upstream? |
 | --- | --- | --- |
 | `crates/agent/` (`gridcraft-agent`) | The layer: data model, anchors, storage in the `.xlsx`, `agent.*` commands, privacy masking, trace, sensitivity, alternatives and calculation methods (`variants.rs`), worst and best combinations and the risk matrix (`stress.rs`), safe file mode (`safe.rs`), Excel → slide links (`links.rs`), the in-app MCP server | fork only |
-| `crates/agent-ui/` (`gridcraft-agent-ui`) | The Agent pane, cell badges, heat maps, hover card with the tornado chart, context-menu items; `examples/agent_snapshot.rs` renders it offscreen | fork only |
+| `crates/agent-ui/` (`gridcraft-agent-ui`) | The Agent pane, cell badges, heat maps, hover card with the tornado chart, context-menu items; voice questions (`voice.rs`, native only); `examples/agent_snapshot.rs` renders it offscreen | fork only |
+| [`anton-belkin/craft-voice`](https://github.com/anton-belkin/craft-voice) (git dependency of `gridcraft-agent-ui`) | Microphone capture, local Whisper (candle), model download, the splice of pointing into the transcript; shared with WordCraft and DeckCraft | separate repo |
 | `apps/gridcraft/src/agent.rs` | Starts the layer in the desktop app (`--agent-port`, `--no-agent`, `--goto`) | fork only |
 | `apps/gridcraft-web/src/agent.rs` | Starts the layer in the web app (no server); opens a workbook embedded in an exported page, read-only | fork only |
 | `crates/agent/src/export.rs`, `examples/export_html.rs` | `agent.exportHtml`: one HTML file with the web app and the workbook | fork only |
@@ -45,6 +46,10 @@ lists them; there are about twenty lines, almost all insertions:
   `agent::start` before the app is built, the two dependencies).
 - `Cargo.toml`: the two workspace dependencies.
 - `xtask/src/layers.rs`: the two crates in the layer table, and their order within L6.
+- `packaging/macos/Info.plist.in`: `NSMicrophoneUsageDescription` (one line); `packaging/macos/entitlements.plist`:
+  `com.apple.security.device.audio-input`, which the hardened runtime needs for the microphone (one line).
+- `Cargo.lock`: an entry for `zip 8.6.0` (see "Voice questions"); `rebase.sh` puts it back after
+  taking upstream's lock.
 
 The hooks know nothing about agents: they are generic extension points, written to be proposed
 upstream. Each one accepted upstream removes its lines from the patch.
@@ -196,6 +201,60 @@ upstream. Each one accepted upstream removes its lines from the patch.
   coordinate search from the two extremes. The work is capped by evaluations (3,000 by default,
   20,000 at most) and by evaluations × cells under the inputs, so a big model gets fewer.
 
+- **Voice questions: the reader's rhythm, by voice.** Hold ⌥ Option (Alt elsewhere) for a
+  moment, or click the microphone on the Agent tab, speak, and click the cells you mean while
+  speaking; release (or click again) and it is asked. No preview, no confirmation, nothing to wait
+  for: the question goes on the cells at once with a "transcribing" flag (status `transcribing`,
+  anchors on the selection and on every cell pointed at, so they move with edits), Whisper
+  transcribes it on a worker thread, and `agent.spoken` puts the text in (status `pending`): from
+  then on it is an ordinary question (`/events`, the channel, the background agent). A failed
+  transcription is a red flag with Retry and Dismiss, never a dialog. Esc cancels a recording.
+  - *Pointing is not interpreted.* Every click and selection change while recording is a pointer
+    at the moment it began; `craft_voice::splice` puts `⟦n⟧` into the transcript where the reader
+    was in their speech (Whisper's segment timestamps, interpolated over the segment's characters,
+    rounded to a word boundary; a click in silence goes to the nearer end of the speech). No
+    matching of "this"/"это": the agent resolves it. The question keeps `refs: [{n, anchor}]`
+    beside its main `anchor` (old files load as before). Agent-facing reads expand the markers:
+    `⟦1: Sheet1!C16 · Revenue · FY2028 = 1,234⟧`, values masked like every other read; the raw
+    text is `spokenText`. The skill has one line about it. A click's place is read a frame after
+    the button comes up (the extension hook runs before the grid handles the frame's input, so
+    reading it at once gave the cell selected before), a drag counts once with its final range,
+    and the same place pointed at again within a second adds no marker. Each transcription is
+    logged with its segments' times and the pointers' times (text only), so a marker that lands
+    in the wrong place can be explained afterwards.
+  - *Drafts never reach the file or the agent.* `transcribing` and `failed` questions are kept out
+    of `agent.questions` (and so out of MCP, `/events`, the channel and the background agent) and
+    out of the saved layer.
+  - *Audio stays in memory*, in the UI crate only (the engine never sees it): from key-down until
+    the text is in, or the reader dismisses it; then it is dropped. Nothing is written to disk and
+    nothing leaves the machine but the one-time model download.
+  - *The model is the reader's choice on the Agent tab*, off by default: Whisper small (q5_1,
+    190 MB) or large-v3-turbo (q5_0, 574 MB, labelled slower). An app setting (`voice.json` beside
+    `agent-keys`; `GRIDCRAFT_VOICE_SETTINGS` moves it), never the workbook's. Picking a model that
+    isn't downloaded downloads it now, with progress on the ribbon; a downloaded one loads when the
+    reader starts speaking (load and warm-up take 1–3 s, less than the question), and is let go
+    after 15 minutes without a question. `agent.voiceModel {model}` and `agent.voiceStatus` do the
+    same through the control channel and MCP. `GRIDCRAFT_VOICE_LANGUAGES=ru,en` limits language
+    detection.
+  - *The models* come from Hugging Face, [`ggerganov/whisper.cpp`](https://huggingface.co/ggerganov/whisper.cpp)
+    at revision `5359861c`, `ggml-small-q5_1.bin` and `ggml-large-v3-turbo-q5_0.bin`: OpenAI's
+    Whisper weights (MIT) as converted by whisper.cpp (MIT). Checked against their SHA-256,
+    converted once into GGUF, kept in `~/Library/Application Support/ArtCraft/voice-models` (shared
+    by the ArtCraft apps; `CRAFT_VOICE_MODELS` moves it). Not assets of this repository: nothing is
+    committed, so they have no ATTRIBUTION.md row.
+  - *Microphone permission.* The bundled app asks with `NSMicrophoneUsageDescription`, and the
+    hardened runtime needs the `audio-input` entitlement (both in `packaging/macos`). A binary run
+    with `cargo run` has no Info.plist: macOS asks on behalf of the app that started it (Terminal,
+    iTerm, VS Code…), which needs microphone access under Privacy & Security; a denied microphone
+    delivers silence, which GridCraft reports as "is microphone access allowed?".
+  - *Dependency note.* Every published candle depends on `zip` 7.x/8.x and crates.io has yanked
+    every `zip` before 9.0.3. Cargo uses a yanked version only when `Cargo.lock` already names it,
+    so the lock carries `zip 8.6.0` (used by candle only to read `.npz`, which nothing here does).
+    On Linux, `cpal` needs ALSA headers (`libasound2-dev`).
+  - *Speed* on a MacBook Pro M1 Pro (candle on Metal, median of 3, after warm-up): small 1.1–1.5 s
+    for 5 s of speech, 2.8–3.4 s for 15 s; turbo 2.1–2.2 s and 3.0–3.5 s. Memory while loaded:
+    0.65 GB and 1.3 GB.
+
 ## Running it
 
 ```bash
@@ -256,7 +315,8 @@ confidence in it, Risk tab); safe file mode (client data saved as stand-ins, rea
 under a key kept on this computer; export for standard Excel); GridCraft's side of Excel → slide
 links (copy as linked source, `link.read`, "used on slides" with Go to Slide, `--goto`); the app
 starting the agent itself (into the user's own Claude Code session as channel events, or as a
-background agent per workbook). `agent-layer/demo/build-demo.sh`
+background agent per workbook); voice questions with pointing (hold ⌥, speak, click the cells;
+local Whisper through `craft-voice`). `agent-layer/demo/build-demo.sh`
 builds a demo workbook with all of it and renders each feature.
 
 Next: WordCraft and DeckCraft are built the same way in their own forks (anton-belkin/wordcraft,

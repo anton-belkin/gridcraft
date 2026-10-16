@@ -14,6 +14,12 @@ gridcraft-engine = { workspace = true }
 gridcraft-ui-egui = { workspace = true }
 egui = { workspace = true }
 serde_json = { workspace = true }
+log = { workspace = true }
 
 [dev-dependencies]
 egui_kittest = { workspace = true, features = ["wgpu", "snapshot"] }
+gridcraft-mcp = { workspace = true }
+
+# Voice questions (native only): microphone, local Whisper, pointing markers.
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+craft-voice = { git = "https://github.com/anton-belkin/craft-voice", rev = "93f74521c8169c9578b8fd0b04a76d15dc6e2d02" }

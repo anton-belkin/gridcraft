@@ -16,7 +16,7 @@ use serde_json::{Value as Json, json};
 
 use crate::analysis;
 use crate::anchor::{self, Place};
-use crate::layer::{self, Actor, Answer, Confidence, Input, Layer, Link, Note, Question, QuestionStatus};
+use crate::layer::{self, Actor, Answer, Confidence, Input, Layer, Link, Note, Question, QuestionRef, QuestionStatus};
 
 macro_rules! spec {
     ($kind:ident $id:literal, $label:literal, $params:literal, $run:expr) => {
@@ -60,7 +60,9 @@ pub static ALL: &[&[CommandSpec]] = &[
 
 pub static SPECS: &[CommandSpec] = &[
     // the reader's side
-    spec!(change "agent.ask", "Ask the Agent", "{range?: \"B5\" | \"Sheet1!B2:C4\" (default: selection), text}", ask),
+    spec!(change "agent.ask", "Ask the Agent", "{range?: \"B5\" | \"Sheet1!B2:C4\" (default: selection), text, refs?: [{n, range}] (what ⟦n⟧ in the text points at), spoken?: bool, transcribing?: bool (spoken, text still coming: not with the agent until agent.spoken)}", ask),
+    spec!(change "agent.spoken", "Spoken Question Transcribed", "{id, text} — the text is ready: the question goes to the agent; {id, error} — the transcription failed; {id} — transcribing again", spoken),
+    spec!(change "agent.removeQuestion", "Dismiss Spoken Question", "{id} — a spoken question still being transcribed, or whose transcription failed", remove_question),
     spec!(change "agent.seen", "Mark Answer Read", "{id}", seen),
     spec!(change "agent.ping", "Check the Agent", "{} — asks \"is anyone there?\" (a question of kind ping, answered with \"here\"); the Agent tab shows whether and how fast an agent answered", ping),
     spec!(change "agent.private", "Mark as Client Data", "{range?, on?: bool (default true)} — the agent sees stand-in values there", private),
@@ -163,25 +165,85 @@ pub(crate) fn where_json(s: &Session, l: &Layer, anchor_id: &str) -> Json {
 // ---------------------------------------------------------------- reader's side
 
 fn ask(s: &mut Session, p: &Json) -> Result<Json> {
-    let text = text_p(p, "text", "agent.ask")?;
+    let transcribing = p.get("transcribing").and_then(Json::as_bool).unwrap_or(false);
+    let text = if transcribing { str_p(p, "text").unwrap_or("").chars().take(20_000).collect() } else { text_p(p, "text", "agent.ask")? };
+    let spoken = transcribing || p.get("spoken").and_then(Json::as_bool).unwrap_or(false);
     let place = place_p(s, p, "agent.ask")?;
     let a = anchor::anchor_at(s, &place)?;
+    let mut refs: Vec<QuestionRef> = vec![];
+    for r in p.get("refs").and_then(Json::as_array).map(Vec::as_slice).unwrap_or_default().iter().take(50) {
+        let n = r.get("n").and_then(Json::as_u64).and_then(|n| u32::try_from(n).ok()).ok_or_else(|| bad("agent.ask", "each ref needs `n`"))?;
+        let at = str_p(r, "range").or_else(|| str_p(r, "cell")).ok_or_else(|| bad("agent.ask", "each ref needs `range`"))?;
+        let d = s.doc()?;
+        let rp = anchor::parse_place(&d.wb, at, d.wb.active_sheet).ok_or_else(|| bad("agent.ask", format!("not a range: `{at}`")))?;
+        if refs.iter().any(|x| x.n == n) {
+            continue;
+        }
+        refs.push(QuestionRef { n, anchor: anchor::anchor_at(s, &rp)? });
+    }
     let id = layer::update(s.doc()?, |l| {
         let id = l.fresh_id("q");
         l.questions.push(Question {
             id: id.clone(),
             anchor: a,
             text,
-            status: QuestionStatus::Pending,
+            status: if transcribing { QuestionStatus::Transcribing } else { QuestionStatus::Pending },
             asked_at: crate::now_ms(),
             answer: None,
             seen: false,
+            refs,
+            spoken,
+            error: String::new(),
             kind: String::new(),
             answered_by: String::new(),
         });
         id
     });
     Ok(json!({"id": id, "range": place.a1()}))
+}
+
+/// A spoken question's transcription: done (the question goes to the agent), failed, or again.
+fn spoken(s: &mut Session, p: &Json) -> Result<Json> {
+    let id = text_p(p, "id", "agent.spoken")?;
+    let text: Option<String> = str_p(p, "text").map(str::trim).filter(|t| !t.is_empty()).map(|t| t.chars().take(20_000).collect());
+    let error: Option<String> = str_p(p, "error").map(|e| e.chars().take(2_000).collect());
+    let r = layer::update(s.doc()?, |l| {
+        let Some(q) = l.questions.iter_mut().find(|q| q.id == id) else { return Err(format!("no question `{id}`")) };
+        if !q.status.is_draft() {
+            return Err(format!("question `{id}` is already with the agent"));
+        }
+        match (text, error) {
+            (Some(t), _) => {
+                q.text = t;
+                q.error.clear();
+                q.status = QuestionStatus::Pending;
+                q.asked_at = crate::now_ms();
+            }
+            (None, Some(e)) => {
+                q.error = if e.trim().is_empty() { "The transcription failed".into() } else { e };
+                q.status = QuestionStatus::Failed;
+            }
+            (None, None) => {
+                q.error.clear();
+                q.status = QuestionStatus::Transcribing;
+            }
+        }
+        Ok(format!("{:?}", q.status).to_lowercase())
+    });
+    r.map(|status| json!({"id": id, "status": status})).map_err(|m| bad("agent.spoken", m))
+}
+
+fn remove_question(s: &mut Session, p: &Json) -> Result<Json> {
+    let id = text_p(p, "id", "agent.removeQuestion")?;
+    let r = layer::update(s.doc()?, |l| match l.questions.iter().position(|q| q.id == id) {
+        Some(i) if l.questions.get(i).is_some_and(|q| q.status.is_draft()) => {
+            l.questions.remove(i);
+            Ok(())
+        }
+        Some(_) => Err(format!("question `{id}` is with the agent already")),
+        None => Err(format!("no question `{id}`")),
+    });
+    r.map(|()| json!({"id": id})).map_err(|m| bad("agent.removeQuestion", m))
 }
 
 /// The ping's text, as the agent reads it.
@@ -201,7 +263,7 @@ fn ping(s: &mut Session, _p: &Json) -> Result<Json> {
             answer: None,
             seen: true,
             kind: layer::PING.into(),
-            answered_by: String::new(),
+            ..Question::default()
         });
         id
     });
@@ -273,7 +335,53 @@ fn question_json(s: &Session, l: &Layer, q: &Question, wb: &Workbook) -> Json {
             o["formula"] = json!(format!("={}", f.text.trim_start_matches('=')));
         }
     }
+    if !q.refs.is_empty() {
+        // What the reader pointed at while speaking: in the text where they pointed, and listed.
+        let refs: Vec<Json> = q.refs.iter().map(|r| ref_json(l, r, wb)).collect();
+        o["spokenText"] = json!(q.text);
+        o["text"] = json!(expand_refs(&q.text, &refs));
+        o["refs"] = json!(refs);
+    }
     o
+}
+
+/// A cell pointed at while speaking, as the caller may see it (masked for the agent).
+fn ref_json(l: &Layer, r: &QuestionRef, wb: &Workbook) -> Json {
+    let Some(place) = l.anchor(&r.anchor).and_then(|a| anchor::resolve(wb, a)) else {
+        return json!({"n": r.n, "range": Json::Null, "deleted": true});
+    };
+    let mut o = json!({"n": r.n, "range": place.a1()});
+    if let Some(sh) = wb.sheet(place.sheet) {
+        let c = place.range.start;
+        o["label"] = json!(analysis::label_of(sh, c));
+        if place.range.is_single() {
+            o["cellText"] = json!(gridcraft_engine::display::cell_text(wb, sh, c));
+            if let Some(f) = sh.cell(c).and_then(|x| x.formula.as_ref()) {
+                o["formula"] = json!(format!("={}", f.text.trim_start_matches('=')));
+            }
+        }
+    }
+    o
+}
+
+/// `⟦1⟧` → `⟦1: Sheet1!C16 · Revenue · FY2028 = 1,234⟧`.
+pub(crate) fn expand_refs(text: &str, refs: &[Json]) -> String {
+    let mut out = text.to_string();
+    for r in refs {
+        let Some(n) = r.get("n").and_then(Json::as_u64) else { continue };
+        let get = |k: &str| r.get(k).and_then(Json::as_str).unwrap_or("").to_string();
+        let mut what = if r.get("deleted").is_some() { "deleted cells".to_string() } else { get("range") };
+        let label = get("label");
+        if !label.is_empty() {
+            what.push_str(&format!(" · {label}"));
+        }
+        let value = get("cellText");
+        if !value.is_empty() {
+            what.push_str(&format!(" = {value}"));
+        }
+        out = out.replace(&format!("⟦{n}⟧"), &format!("⟦{n}: {what}⟧"));
+    }
+    out
 }
 
 static LAST_WAIT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
@@ -309,6 +417,10 @@ fn questions(s: &mut Session, p: &Json) -> Result<Json> {
 }
 
 fn status_matches(q: &Question, want: &str) -> bool {
+    // A spoken question still being transcribed has no text yet: not the agent's.
+    if q.status.is_draft() {
+        return want == "drafts";
+    }
     match want {
         "pending" => q.status == QuestionStatus::Pending,
         "working" => q.status == QuestionStatus::Working,
@@ -489,7 +601,7 @@ fn context(s: &mut Session, p: &Json) -> Result<Json> {
         "privacyNote": "Cells in privateRanges hold client data. You see stand-in values there (same sign and magnitude), and everything computed from them is recalculated from the stand-ins: never quote these numbers as real. Formulas are real.",
         "inputs": inputs,
         "safeFile": l.safe.as_ref().map(|x| json!({"on": true, "locked": x.sealed.is_some()})),
-        "openQuestions": l.questions.iter().filter(|q| q.status != QuestionStatus::Answered && !q.is_ping()).count(),
+        "openQuestions": l.questions.iter().filter(|q| matches!(q.status, QuestionStatus::Pending | QuestionStatus::Working) && !q.is_ping()).count(),
         "notes": l.notes.len(),
         "log": l.log.iter().rev().take(20).collect::<Vec<_>>(),
     }))
