@@ -136,6 +136,7 @@ pub(crate) fn view(
     copied: &dyn Fn(Step) -> bool,
     server: &str,
     working: Option<&Working>,
+    answered: bool,
 ) -> View {
     let folder = (!c.folder.is_empty() && std::path::Path::new(&c.folder).is_dir()).then(|| c.folder.clone());
     let background = |extra: &str| {
@@ -152,7 +153,8 @@ pub(crate) fn view(
         }
     };
     let listening = |who: &str| {
-        let ready = listener_ready(presence);
+        // Attached, a check answered, or the agent just answered here: it is evidently ready.
+        let ready = listener_ready(presence) || answered;
         if ready {
             let by = match presence {
                 Presence::Listening { label, .. } => format!(" ({label})"),
@@ -223,7 +225,15 @@ pub(crate) fn current(st: &AgentUi, app: &SheetApp) -> Option<View> {
     let uid = d.uid;
     let copied = |s: Step| st.context.copied.contains(&(uid, s));
     let w = working(d, now);
-    Some(view(&c, &setup, &presence, waiting, &copied, crate::server_url().unwrap_or("http://127.0.0.1:7980/mcp"), w.as_ref()))
+    let answered = answered_recently(d, now);
+    Some(view(&c, &setup, &presence, waiting, &copied, crate::server_url().unwrap_or("http://127.0.0.1:7980/mcp"), w.as_ref(), answered))
+}
+
+/// The agent answered a question of this document lately: after its work the lamp says Ready.
+const ANSWERED_MS: u64 = 10 * 60_000;
+
+pub(crate) fn answered_recently(d: &gridcraft_engine::DocState, now: u64) -> bool {
+    layer::get(d).questions.iter().filter(|q| !q.is_ping()).filter_map(|q| q.answer.as_ref()).any(|a| now.saturating_sub(a.at) <= ANSWERED_MS)
 }
 
 /// What the agent is working on in a document now: questions it claimed and hasn't answered (while
@@ -362,14 +372,14 @@ mod tests {
     #[test]
     fn no_context_needs_only_a_login() {
         let none = ctx(ContextKind::None, CodeVia::Session, "");
-        let v = view(&none, &checked(false), &Presence::Nobody, false, &|_| false, "url", None);
+        let v = view(&none, &checked(false), &Presence::Nobody, false, &|_| false, "url", None, false);
         assert_eq!(v.lamp, Lamp::NotReady);
         assert_eq!(v.steps, vec![(Step::LogIn, false)]);
         assert_eq!(v.next(), Some(Step::LogIn));
         // After the step: waiting until Claude is logged in.
-        assert_eq!(view(&none, &checked(false), &Presence::Nobody, true, &|_| false, "url", None).lamp, Lamp::Waiting);
+        assert_eq!(view(&none, &checked(false), &Presence::Nobody, true, &|_| false, "url", None, false).lamp, Lamp::Waiting);
         // Logged in: ready, and no Get ready at all.
-        let v = view(&none, &checked(true), &Presence::Nobody, false, &|_| false, "url", None);
+        let v = view(&none, &checked(true), &Presence::Nobody, false, &|_| false, "url", None, false);
         assert_eq!(v.lamp, Lamp::Ready);
         assert!(v.steps.is_empty());
     }
@@ -377,22 +387,25 @@ mod tests {
     #[test]
     fn cowork_installs_then_asks_and_is_ready_when_its_chat_listens() {
         let c = ctx(ContextKind::Cowork, CodeVia::Session, "");
-        let v = view(&c, &checked(true), &Presence::Nobody, false, &|_| false, "url", None);
+        let v = view(&c, &checked(true), &Presence::Nobody, false, &|_| false, "url", None, false);
         assert_eq!(v.lamp, Lamp::NotReady);
         assert_eq!(v.next(), Some(Step::InstallDesktop));
         let installed = Setup { desktop_hub: true, ..checked(true) };
-        let v = view(&c, &installed, &Presence::Nobody, false, &|_| false, "url", None);
+        let v = view(&c, &installed, &Presence::Nobody, false, &|_| false, "url", None, false);
         assert_eq!(v.next(), Some(Step::AskCowork));
         assert_eq!(v.steps, vec![(Step::InstallDesktop, true), (Step::AskCowork, false)]);
         // The phrase copied: waiting for the chat to attach.
-        let v = view(&c, &installed, &Presence::Nobody, true, &|s| s == Step::AskCowork, "url", None);
+        let v = view(&c, &installed, &Presence::Nobody, true, &|s| s == Step::AskCowork, "url", None, false);
         assert_eq!(v.lamp, Lamp::Waiting);
         assert!(v.steps.iter().all(|(_, d)| *d));
         // Something listens without having answered: still waiting (the app checks quietly).
-        assert_eq!(view(&c, &installed, &Presence::Listener(vec!["waiting for questions"]), false, &|_| false, "url", None).lamp, Lamp::Waiting);
+        assert_eq!(
+            view(&c, &installed, &Presence::Listener(vec!["waiting for questions"]), false, &|_| false, "url", None, false).lamp,
+            Lamp::Waiting
+        );
         // The chat attached: ready, every step ticked.
         let attached = Presence::Listening { label: "Cowork · Northwind".into(), seen_ms: 4_000, more: 0 };
-        let v = view(&c, &installed, &attached, false, &|_| false, "url", None);
+        let v = view(&c, &installed, &attached, false, &|_| false, "url", None, false);
         assert_eq!(v.lamp, Lamp::Ready);
         assert!(v.steps.iter().all(|(_, d)| *d));
         assert!(v.detail.contains("Cowork · Northwind"));
@@ -401,21 +414,21 @@ mod tests {
     #[test]
     fn claude_code_session_or_folder() {
         let session = ctx(ContextKind::Code, CodeVia::Session, "");
-        let v = view(&session, &checked(true), &Presence::Nobody, false, &|_| false, "url", None);
+        let v = view(&session, &checked(true), &Presence::Nobody, false, &|_| false, "url", None, false);
         assert_eq!(v.steps, vec![(Step::InstallCode, false), (Step::AskSession, false)]);
         let answering = Presence::Answering { checked_ms: 2_000, latency_ms: 900 };
-        assert_eq!(view(&session, &checked(true), &answering, false, &|_| false, "url", None).lamp, Lamp::Ready);
+        assert_eq!(view(&session, &checked(true), &answering, false, &|_| false, "url", None, false).lamp, Lamp::Ready);
         // A project folder: chosen, it is shown and the background client is ready.
         let none_yet = ctx(ContextKind::Code, CodeVia::Folder, "");
-        let v = view(&none_yet, &checked(true), &Presence::Nobody, false, &|_| false, "url", None);
+        let v = view(&none_yet, &checked(true), &Presence::Nobody, false, &|_| false, "url", None, false);
         assert_eq!((v.lamp, v.next()), (Lamp::NotReady, Some(Step::ChooseFolder)));
         let dir = std::env::temp_dir().display().to_string();
-        let v = view(&ctx(ContextKind::Code, CodeVia::Folder, &dir), &checked(true), &Presence::Nobody, false, &|_| false, "url", None);
+        let v = view(&ctx(ContextKind::Code, CodeVia::Folder, &dir), &checked(true), &Presence::Nobody, false, &|_| false, "url", None, false);
         assert_eq!(v.lamp, Lamp::Ready);
         assert_eq!(v.folder.as_deref(), Some(dir.as_str()));
         assert_eq!(v.steps, vec![(Step::ChooseFolder, true)]);
         // Not logged in: that comes first.
-        let v = view(&ctx(ContextKind::Code, CodeVia::Folder, &dir), &checked(false), &Presence::Nobody, false, &|_| false, "url", None);
+        let v = view(&ctx(ContextKind::Code, CodeVia::Folder, &dir), &checked(false), &Presence::Nobody, false, &|_| false, "url", None, false);
         assert_eq!(v.next(), Some(Step::LogIn));
     }
 
@@ -437,7 +450,7 @@ mod tests {
         for c in &all {
             for p in &presences {
                 for setup in [checked(false), checked(true), Setup::default()] {
-                    let v = view(c, &setup, p, false, &|_| false, "url", None);
+                    let v = view(c, &setup, p, false, &|_| false, "url", None, false);
                     let words = format!(
                         "{} {} {}",
                         v.detail,
@@ -457,19 +470,19 @@ mod tests {
         let attached = Presence::Listening { label: "Cowork · Acme".into(), seen_ms: 2_000, more: 0 };
         let one = Working { topics: vec![("t7".into(), 3)], by: "Cowork · Acme".into() };
         // Ready, until the agent works: then Working, never green, naming the topic and who.
-        assert_eq!(view(&c, &checked(true), &attached, false, &|_| false, "url", None).lamp, Lamp::Ready);
-        let v = view(&c, &checked(true), &attached, false, &|_| false, "url", Some(&one));
+        assert_eq!(view(&c, &checked(true), &attached, false, &|_| false, "url", None, false).lamp, Lamp::Ready);
+        let v = view(&c, &checked(true), &attached, false, &|_| false, "url", Some(&one), false);
         assert_eq!((v.lamp, v.label.as_str(), v.topic.as_deref()), (Lamp::Working, "Working… · topic 3", Some("t7")));
         assert!(v.detail.contains("Cowork · Acme"), "{}", v.detail);
         // Even over Waiting and Not ready; several topics: no single one to open.
         let two = Working { topics: vec![("t1".into(), 1), ("t7".into(), 3)], by: String::new() };
-        let v = view(&c, &checked(true), &Presence::Nobody, false, &|_| false, "url", Some(&two));
+        let v = view(&c, &checked(true), &Presence::Nobody, false, &|_| false, "url", Some(&two), false);
         assert_eq!((v.lamp, v.label.as_str(), v.topic), (Lamp::Working, "Working…", None));
         // No context, background client: the same.
         let none = ctx(ContextKind::None, CodeVia::Session, "");
-        assert_eq!(view(&none, &checked(false), &Presence::Nobody, false, &|_| false, "url", Some(&one)).lamp, Lamp::Working);
+        assert_eq!(view(&none, &checked(false), &Presence::Nobody, false, &|_| false, "url", Some(&one), false).lamp, Lamp::Working);
         // Nothing to work on: the usual state and label.
-        let v = view(&c, &checked(true), &attached, false, &|_| false, "url", Some(&Working::default()));
+        let v = view(&c, &checked(true), &attached, false, &|_| false, "url", Some(&Working::default()), false);
         assert_eq!((v.lamp, v.label.as_str()), (Lamp::Ready, "Ready"));
     }
 
@@ -489,9 +502,18 @@ mod tests {
         assert_eq!(w.topics, vec![(topic.clone(), 1)]);
         // No agent call for 90 s: it isn't working any more.
         assert!(working(s.active().unwrap(), now() + 91_000).is_none());
-        // Answered: done.
+        // Answered: done, and the lamp is back to Ready (green), not grey, for a while.
+        assert!(!answered_recently(s.active().unwrap(), now()));
         s.execute("agent.answer", serde_json::json!({"id": id, "text": "Because.", "actor": "agent"})).unwrap();
         assert!(working(s.active().unwrap(), now()).is_none());
+        assert!(answered_recently(s.active().unwrap(), now()));
+        assert!(!answered_recently(s.active().unwrap(), now() + 11 * 60_000));
+        let c = AgentContext { kind: ContextKind::Cowork, ..AgentContext::default() };
+        let setup = Setup { cli: true, logged_in: true, checked_at: 1, ..Setup::default() };
+        let after = view(&c, &setup, &Presence::Nobody, false, &|_| false, "url", None, answered_recently(s.active().unwrap(), now()));
+        assert_eq!((after.lamp, after.label.as_str()), (Lamp::Ready, "Ready"));
+        let before = view(&c, &setup, &Presence::Nobody, false, &|_| false, "url", None, false);
+        assert_eq!(before.lamp, Lamp::NotReady);
         // A proposal step shows work for a few seconds.
         s.execute("agent.exec", serde_json::json!({"topic": topic, "command": "cell.set", "params": {"cell": "B2", "input": 6}, "actor": "agent"}))
             .unwrap();

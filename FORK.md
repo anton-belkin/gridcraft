@@ -174,6 +174,8 @@ upstream. Each one accepted upstream removes its lines from the patch.
     90 s), or a proposal step recorded in the last 10 s (`proposals::building`). One topic:
     "Working… · topic 3", a click opens it; the tooltip names the listener. Only the lamp and the
     Agent button's small blue pulse repaint for it, at about 30 fps, and only while it shows.
+    When the work ends the lamp says green Ready: an answer the agent wrote in this document in
+    the last 10 minutes counts as proof it is there (Anton), even with no listener attached.
   - *The lamp*: green Ready (a listener attached to this document recently or a check answered;
     or the background client is usable: `claude` logged in, the folder there), amber Waiting
     (after a Get ready step until a listener attaches, or while something listens that hasn't
