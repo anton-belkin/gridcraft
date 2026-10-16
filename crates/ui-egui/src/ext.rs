@@ -52,6 +52,11 @@ pub trait UiExtension {
     fn ribbon_tabs(&self) -> Vec<&'static str> {
         Vec::new()
     }
+    /// Keytips of those tabs: (tab, letters after Alt or F10), e.g. `("Agent", "G")`. A sequence the
+    /// built-in table already has is ignored.
+    fn ribbon_keytips(&self) -> Vec<(&'static str, &'static str)> {
+        Vec::new()
+    }
     /// Draws the content of one of [`UiExtension::ribbon_tabs`] when it is the active tab, inside
     /// the ribbon card (a horizontal row, 76 px high, like the built-in tabs).
     fn ribbon_tab(&mut self, _app: &mut SheetApp, _ui: &mut Ui, _tab: &str) {}
@@ -61,11 +66,15 @@ thread_local! {
     static EXTENSIONS: RefCell<Vec<Box<dyn UiExtension>>> = RefCell::new(Vec::new());
     /// The extensions' ribbon tabs, by name.
     static TABS: RefCell<Vec<&'static str>> = const { RefCell::new(Vec::new()) };
+    /// Their keytips: (tab, sequence).
+    static KEYTIPS: RefCell<Vec<(&'static str, &'static str)>> = const { RefCell::new(Vec::new()) };
 }
 
 /// Adds a UI extension (on the UI thread).
 pub fn register(ext: Box<dyn UiExtension>) {
     TABS.with(|t| t.borrow_mut().extend(ext.ribbon_tabs()));
+    let free = ext.ribbon_keytips().into_iter().filter(|(_, seq)| crate::keytips::keytip_table::lookup(seq).is_none());
+    KEYTIPS.with(|k| k.borrow_mut().extend(free));
     EXTENSIONS.with(|e| e.borrow_mut().push(ext));
 }
 
@@ -103,6 +112,16 @@ pub(crate) fn ribbon_tabs() -> Vec<&'static str> {
     TABS.with(|t| t.borrow().clone())
 }
 
+/// The extension tab a keytip sequence opens.
+pub(crate) fn keytip_tab(seq: &str) -> Option<&'static str> {
+    KEYTIPS.with(|k| k.borrow().iter().find(|(_, s)| *s == seq).map(|(t, _)| *t))
+}
+
+/// An extension tab's keytip.
+pub(crate) fn tab_keytip(tab: &str) -> Option<&'static str> {
+    KEYTIPS.with(|k| k.borrow().iter().find(|(t, _)| *t == tab).map(|(_, s)| *s))
+}
+
 /// `tab` belongs to an extension.
 pub(crate) fn is_ribbon_tab(tab: &str) -> bool {
     TABS.with(|t| t.borrow().contains(&tab))
@@ -128,4 +147,31 @@ pub(crate) fn context_menu(app: &mut SheetApp, ui: &mut Ui) -> bool {
     let mut close = false;
     each(|x| close |= x.context_menu(app, ui));
     close
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct Tabs;
+    impl UiExtension for Tabs {
+        fn ribbon_tabs(&self) -> Vec<&'static str> {
+            vec!["Agent", "Other"]
+        }
+        fn ribbon_keytips(&self) -> Vec<(&'static str, &'static str)> {
+            vec![("Agent", "G"), ("Other", "A")]
+        }
+    }
+
+    #[test]
+    fn extension_tabs_and_their_keytips() {
+        register(Box::new(Tabs));
+        assert!(ribbon_tabs().contains(&"Agent"));
+        assert!(is_ribbon_tab("Agent") && !is_ribbon_tab("Home"));
+        assert_eq!(keytip_tab("G"), Some("Agent"));
+        assert_eq!(tab_keytip("Agent"), Some("G"));
+        // A is the Data tab's: an extension can't take a built-in sequence.
+        assert_eq!(keytip_tab("A"), None);
+        assert_eq!(tab_keytip("Other"), None);
+    }
 }

@@ -18,36 +18,6 @@ use std::time::Duration;
 use gridcraft_mcp::{Backend, Remote};
 use serde_json::{Value, json};
 
-/// When an agent last called the server (ms since the epoch), and how many event streams are
-/// open: whether an agent is connected.
-static LAST_CALL: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-static STREAMS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-
-/// (last call in ms since the epoch, open event streams).
-pub fn activity() -> (u64, usize) {
-    (LAST_CALL.load(std::sync::atomic::Ordering::Relaxed), STREAMS.load(std::sync::atomic::Ordering::Relaxed))
-}
-
-/// An agent called within the last two minutes, or is watching for questions.
-pub fn agent_connected() -> bool {
-    let (last, streams) = activity();
-    streams > 0 || (last > 0 && crate::now_ms().saturating_sub(last) < 120_000)
-}
-
-/// Counts an open stream while it lives.
-struct Stream;
-impl Stream {
-    fn open() -> Stream {
-        STREAMS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        Stream
-    }
-}
-impl Drop for Stream {
-    fn drop(&mut self) {
-        STREAMS.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
-    }
-}
-
 /// Default port of the agent server.
 pub const DEFAULT_PORT: u16 = 7980;
 /// Largest request body accepted.
@@ -172,7 +142,6 @@ fn backend<'a>(slot: &'a mut Option<Remote>, control: &str) -> Result<&'a mut Re
 }
 
 fn post_mcp(w: &mut TcpStream, req: &Request, control: &str, slot: &mut Option<Remote>) -> std::io::Result<()> {
-    LAST_CALL.store(crate::now_ms(), std::sync::atomic::Ordering::Relaxed);
     let Ok(msg) = serde_json::from_slice::<Value>(&req.body) else {
         let e = json!({"jsonrpc": "2.0", "id": null, "error": {"code": -32700, "message": "parse error"}});
         return respond(w, "400 Bad Request", "application/json", e.to_string().as_bytes());
@@ -187,7 +156,7 @@ fn post_mcp(w: &mut TcpStream, req: &Request, control: &str, slot: &mut Option<R
     }
 }
 
-fn handle_any(b: &mut dyn Backend, msg: &Value) -> Option<Value> {
+pub(crate) fn handle_any(b: &mut dyn Backend, msg: &Value) -> Option<Value> {
     match msg {
         Value::Array(batch) => {
             let out: Vec<Value> = batch.iter().filter_map(|m| crate::mcp::handle(b, m)).collect();
@@ -200,7 +169,6 @@ fn handle_any(b: &mut dyn Backend, msg: &Value) -> Option<Value> {
 /// The `GET /mcp` stream: in "my session" mode, each new pending question as a channel event.
 /// Questions that wait while the mode is off are sent when it is switched on.
 fn channel_stream(mut w: TcpStream, control: &str) {
-    let _open = Stream::open();
     if w.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n: connected\n\n")
         .is_err()
     {
@@ -245,7 +213,6 @@ fn channel_stream(mut w: TcpStream, control: &str) {
 
 /// Streams new pending questions, one JSON object per line, until the client goes away.
 fn events(mut w: TcpStream, control: &str) {
-    let _open = Stream::open();
     if w.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: application/x-ndjson\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n").is_err() {
         return;
     }

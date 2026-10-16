@@ -29,6 +29,17 @@ use gridcraft_ui_egui::theme::Tokens;
 use serde_json::json;
 
 static SERVER: OnceLock<String> = OnceLock::new();
+static STDIO_ENTRY: OnceLock<serde_json::Value> = OnceLock::new();
+
+/// The `claude_desktop_config.json` entry that starts this app in stdio mode (for Connect Cowork).
+pub fn set_stdio_entry(entry: serde_json::Value) {
+    let _ = STDIO_ENTRY.set(entry);
+}
+
+#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+pub(crate) fn stdio_entry() -> Option<serde_json::Value> {
+    STDIO_ENTRY.get().cloned()
+}
 
 /// Registers the agent UI (call once, on the UI thread, before the first frame).
 pub fn install() {
@@ -64,6 +75,7 @@ pub fn request_pane(open: bool, tab: &str, heat: &str) {
     }
 }
 
+#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
 pub(crate) fn server_url() -> Option<&'static str> {
     SERVER.get().map(String::as_str)
 }
@@ -293,6 +305,10 @@ impl UiExtension for AgentUi {
         vec![ribbon::TAB]
     }
 
+    fn ribbon_keytips(&self) -> Vec<(&'static str, &'static str)> {
+        vec![(ribbon::TAB, ribbon::KEYTIP)]
+    }
+
     fn ribbon_tab(&mut self, app: &mut SheetApp, ui: &mut Ui, tab: &str) {
         if tab == ribbon::TAB {
             ribbon::show(self, app, ui);
@@ -354,10 +370,8 @@ impl AgentUi {
         } else {
             ("Agent".to_string(), t.accent)
         };
-        // The Agent tab shows the status; the button is for when it isn't in view and something
-        // waits for the reader.
-        let tab_in_view = app.ui.ribbon_tab == ribbon::TAB && !app.ui.ribbon_collapsed;
-        if tab_in_view || (ready == 0 && waiting == 0) || (self.open && ready == 0) {
+        // The Agent tab shows the status; the button only while the ribbon is collapsed.
+        if !app.ui.ribbon_collapsed || (self.open && ready == 0 && waiting == 0) {
             return;
         }
         let pos = egui::pos2(cells.right() - 14.0, cells.bottom() - 14.0);

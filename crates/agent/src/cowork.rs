@@ -1,13 +1,14 @@
-//! Connect Cowork: puts GridCraft into Claude Desktop's local MCP servers
-//! (`claude_desktop_config.json`, entry `gridcraft` → `gridcraft --agent-stdio`), so Claude Desktop
-//! and Cowork reach the open workbook. In Cowork there is no background monitor: the agent waits
-//! for questions with `wait_for_questions`.
+//! Connecting Claude Desktop (and Cowork in it) to the agent layer: the `gridcraft` entry in
+//! `claude_desktop_config.json`, pointing at this app's stdio mode (`gridcraft --agent-stdio
+//! --control 127.0.0.1:7979`). WordCraft and DeckCraft add `wordcraft` and `deckcraft` the same way.
 //!
-//! Claude Desktop keeps that file in memory and writes it back when it quits, so an edit made
-//! while it runs is lost: the entry is written only while Claude is closed. The file is backed
-//! up first, and no other server or setting is touched.
+//! Claude Desktop keeps that file in memory and writes it back when it quits, so an entry added
+//! while it runs is lost. [`connect`] therefore writes at once only when Claude isn't running;
+//! otherwise it waits (in the background) until Claude has quit, then writes. Other servers and
+//! settings are kept as they are, and the old file is copied aside first.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 
 use gridcraft_engine::cmd::CommandSpec;
 use gridcraft_engine::{Result, Session};
@@ -15,122 +16,205 @@ use serde_json::{Value as Json, json};
 
 use crate::commands::{bad, spec, str_p};
 
-/// The server's name in Claude Desktop (WordCraft and DeckCraft use `wordcraft` and `deckcraft`).
+/// The server's name in the config.
 pub const SERVER_NAME: &str = "gridcraft";
+/// The app's flag for the stdio MCP mode.
+pub const STDIO_FLAG: &str = "--agent-stdio";
+/// Longest wait for Claude to quit.
+const WAIT_SECS: u64 = 30 * 60;
 
 pub static SPECS: &[CommandSpec] = &[spec!(
     query "agent.connectCowork",
     "Connect Cowork",
-    "{exe?: path of gridcraft (default: this app)} — adds `gridcraft` to Claude Desktop's MCP servers (backing the file up first); refused while Claude Desktop runs, since it rewrites the file when it quits",
+    "{control?: port (default 7979)} — adds `gridcraft` to Claude Desktop's MCP servers (backing the file up); while Claude Desktop runs, waits for it to quit (it rewrites the file then) and writes after → {state}",
     connect_cmd
 )];
 
-thread_local! {
-    static CONFIG_PATH: std::cell::RefCell<Option<PathBuf>> = const { std::cell::RefCell::new(None) };
-    static RUNNING: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
-}
-
-/// Overrides for tests: the config file, and whether Claude Desktop "is running".
-pub fn set_thread_overrides(path: Option<PathBuf>, running: Option<bool>) {
-    CONFIG_PATH.with(|c| *c.borrow_mut() = path);
-    RUNNING.with(|r| r.set(running));
-}
-
-/// Claude Desktop's config file.
+/// Where Claude Desktop keeps its config on this system (never the real file in tests).
 pub fn config_path() -> Option<PathBuf> {
-    if let Some(p) = CONFIG_PATH.with(|c| c.borrow().clone()) {
-        return Some(p);
-    }
-    // Tests never touch the real file.
     if cfg!(test) {
         return None;
     }
     let home = std::env::var_os("HOME").map(PathBuf::from);
     if cfg!(target_os = "macos") {
         home.map(|h| h.join("Library/Application Support/Claude/claude_desktop_config.json"))
-    } else if cfg!(windows) {
+    } else if cfg!(target_os = "windows") {
         std::env::var_os("APPDATA").map(|a| PathBuf::from(a).join("Claude").join("claude_desktop_config.json"))
     } else {
         home.map(|h| h.join(".config/Claude/claude_desktop_config.json"))
     }
 }
 
-/// Claude Desktop is open.
-pub fn claude_running() -> bool {
-    if let Some(r) = RUNNING.with(std::cell::Cell::get) {
-        return r;
+/// The config entry that starts `exe` in stdio mode, reaching the app's control channel on
+/// `control_port`.
+pub fn entry(exe: &Path, control_port: u16) -> Json {
+    json!({"command": exe.to_string_lossy(), "args": [STDIO_FLAG, "--control", format!("127.0.0.1:{control_port}")]})
+}
+
+/// What the config says about us.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Configured {
+    /// No Claude Desktop config on this machine.
+    NoClaude,
+    Missing,
+    /// There, but pointing somewhere else (another build).
+    Different,
+    Yes,
+}
+
+pub fn configured(path: &Path, want: &Json) -> Configured {
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return if path.parent().is_some_and(Path::exists) { Configured::Missing } else { Configured::NoClaude };
+    };
+    let Ok(v) = serde_json::from_str::<Json>(&text) else { return Configured::Missing };
+    match v.get("mcpServers").and_then(|s| s.get(SERVER_NAME)) {
+        None => Configured::Missing,
+        Some(e) if e == want => Configured::Yes,
+        Some(_) => Configured::Different,
     }
+}
+
+/// Adds (or replaces) our entry, keeping everything else; copies the old file to
+/// `<file>.bak-gridcraft-<time>` first. Refuses a file that isn't a JSON object.
+pub fn write(path: &Path, want: &Json) -> std::result::Result<Option<PathBuf>, String> {
+    let (mut v, backup) = match std::fs::read_to_string(path) {
+        Ok(text) => {
+            let v: Json = serde_json::from_str(&text).map_err(|e| format!("{} isn't valid JSON ({e}); not touching it", path.display()))?;
+            if !v.is_object() {
+                return Err(format!("{} isn't a JSON object; not touching it", path.display()));
+            }
+            let mut name = path.as_os_str().to_os_string();
+            name.push(format!(".bak-gridcraft-{}", crate::now_ms()));
+            let backup = PathBuf::from(name);
+            std::fs::write(&backup, text).map_err(|e| format!("backup {}: {e}", backup.display()))?;
+            (v, Some(backup))
+        }
+        Err(_) => {
+            if let Some(dir) = path.parent() {
+                std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+            }
+            (json!({}), None)
+        }
+    };
+    let Some(o) = v.as_object_mut() else { return Err("not a JSON object".into()) };
+    let servers = o.entry("mcpServers").or_insert_with(|| json!({}));
+    let Some(servers) = servers.as_object_mut() else { return Err("`mcpServers` isn't an object; not touching it".into()) };
+    servers.insert(SERVER_NAME.into(), want.clone());
+    let mut text = serde_json::to_string_pretty(&v).map_err(|e| e.to_string())?;
+    text.push('\n');
+    // Through a temporary file, so a crash never leaves half a config.
+    let mut tmp = path.as_os_str().to_os_string();
+    tmp.push(".gridcraft-tmp");
+    let tmp = PathBuf::from(tmp);
+    std::fs::write(&tmp, text).map_err(|e| format!("{}: {e}", tmp.display()))?;
+    std::fs::rename(&tmp, path).map_err(|e| format!("{}: {e}", path.display()))?;
+    Ok(backup)
+}
+
+/// Whether Claude Desktop is running (macOS and Windows; elsewhere it is assumed not to be).
+/// Tests assume it is, so nothing is ever written behind their back.
+pub fn claude_running() -> bool {
     if cfg!(test) {
         return true;
     }
     if cfg!(target_os = "macos") {
-        // The app's own process (its helpers are "Claude Helper.app/…", Claude Code is lowercase).
-        std::process::Command::new("/usr/bin/pgrep").args(["-f", "Claude.app/Contents/MacOS/Claude"]).output().is_ok_and(|o| o.status.success())
+        let Ok(out) = std::process::Command::new("/bin/ps").args(["-axo", "comm="]).output() else { return false };
+        String::from_utf8_lossy(&out.stdout).lines().any(|l| l.trim_end().ends_with("/Claude.app/Contents/MacOS/Claude"))
+    } else if cfg!(target_os = "windows") {
+        let Ok(out) = std::process::Command::new("tasklist").args(["/FI", "IMAGENAME eq Claude.exe", "/NH"]).output() else { return false };
+        String::from_utf8_lossy(&out.stdout).contains("Claude.exe")
     } else {
         false
     }
 }
 
-/// GridCraft is already in Claude Desktop's config.
-pub fn connected() -> bool {
-    config_path()
-        .and_then(|p| std::fs::read_to_string(p).ok())
-        .and_then(|t| serde_json::from_str::<Json>(&t).ok())
-        .is_some_and(|v| v.pointer(&format!("/mcpServers/{SERVER_NAME}")).is_some())
+/// Where connecting stands.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub enum State {
+    #[default]
+    Idle,
+    /// Waiting for Claude Desktop to quit.
+    Waiting,
+    /// Written; Claude must be (re)opened to load it.
+    Done {
+        backup: Option<PathBuf>,
+    },
+    Failed(String),
 }
 
-/// What connecting did.
-#[derive(Clone, Debug, PartialEq)]
-pub enum Outcome {
-    /// Written; the backup of the previous file, if there was one.
-    Written { path: PathBuf, backup: Option<PathBuf> },
-    /// Already there with the same command.
-    Unchanged { path: PathBuf },
-    /// Claude Desktop is open: quit it first.
-    ClaudeRunning,
+static STATE: Mutex<State> = Mutex::new(State::Idle);
+
+fn set(s: State) {
+    match STATE.lock() {
+        Ok(mut g) => *g = s,
+        Err(p) => *p.into_inner() = s,
+    }
 }
 
-/// Adds (or updates) the `gridcraft` entry, touching nothing else.
-pub fn connect(exe: &str) -> std::result::Result<Outcome, String> {
-    let path = config_path().ok_or("no folder for Claude Desktop's settings")?;
-    let entry = json!({"command": exe, "args": ["--agent-stdio"]});
-    let mut config: Json = match std::fs::read_to_string(&path) {
-        Ok(text) if !text.trim().is_empty() => {
-            serde_json::from_str(&text).map_err(|e| format!("{} isn't valid JSON ({e}): fix or move it first", path.display()))?
-        }
-        Ok(_) => json!({}),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => json!({}),
-        Err(e) => return Err(format!("{}: {e}", path.display())),
+pub fn state() -> State {
+    match STATE.lock() {
+        Ok(g) => g.clone(),
+        Err(p) => p.into_inner().clone(),
+    }
+}
+
+/// Adds the entry now if Claude Desktop isn't running, else as soon as it has quit.
+pub fn connect(want: Json) {
+    let Some(path) = config_path() else {
+        set(State::Failed("no place for Claude Desktop's config on this system".into()));
+        return;
     };
-    if !config.is_object() {
-        return Err(format!("{} isn't a JSON object: fix or move it first", path.display()));
+    if !claude_running() {
+        set(match write(&path, &want) {
+            Ok(backup) => State::Done { backup },
+            Err(e) => State::Failed(e),
+        });
+        return;
     }
-    if config.pointer(&format!("/mcpServers/{SERVER_NAME}")) == Some(&entry) {
-        return Ok(Outcome::Unchanged { path });
+    if state() == State::Waiting {
+        return;
     }
-    if claude_running() {
-        return Ok(Outcome::ClaudeRunning);
-    }
-    let backup = if path.exists() {
-        let b = path.with_file_name(format!("claude_desktop_config.json.bak-{}", crate::now_ms()));
-        std::fs::copy(&path, &b).map_err(|e| format!("backing up {}: {e}", path.display()))?;
-        Some(b)
-    } else {
-        if let Some(dir) = path.parent() {
-            std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+    set(State::Waiting);
+    let spawned = std::thread::Builder::new().name("cowork-connect".into()).spawn(move || {
+        for _ in 0..WAIT_SECS {
+            std::thread::sleep(std::time::Duration::from_secs(1));
+            if claude_running() {
+                continue;
+            }
+            // Let it finish writing its own copy first.
+            std::thread::sleep(std::time::Duration::from_millis(1500));
+            if claude_running() {
+                continue;
+            }
+            set(match write(&path, &want) {
+                Ok(backup) => State::Done { backup },
+                Err(e) => State::Failed(e),
+            });
+            return;
         }
-        None
-    };
-    let servers = config.as_object_mut().map(|o| o.entry("mcpServers").or_insert_with(|| json!({})));
-    match servers {
-        Some(Json::Object(m)) => {
-            m.insert(SERVER_NAME.into(), entry);
-        }
-        _ => return Err("`mcpServers` in Claude Desktop's settings isn't an object".into()),
+        set(State::Failed("Claude Desktop didn't quit within 30 minutes; press Connect Cowork again".into()));
+    });
+    if spawned.is_err() {
+        set(State::Failed("couldn't start waiting for Claude to quit".into()));
     }
-    let text = serde_json::to_string_pretty(&config).map_err(|e| e.to_string())?;
-    gridcraft_engine::io::write_file(&path.display().to_string(), text.as_bytes()).map_err(|e| e.to_string())?;
-    Ok(Outcome::Written { path, backup })
+}
+
+/// The entry for this very executable.
+pub fn this_entry(control_port: u16) -> Option<Json> {
+    std::env::current_exe().ok().map(|exe| entry(&exe, control_port))
+}
+
+pub fn state_json(s: &State) -> Json {
+    match s {
+        State::Idle => json!({"state": "idle"}),
+        State::Waiting => {
+            json!({"state": "waiting", "message": "Quit Claude with ⌘Q: GridCraft adds itself once Claude has quit; then open Claude again."})
+        }
+        State::Done { backup } => {
+            json!({"state": "done", "backup": backup.as_ref().map(|b| b.display().to_string()), "message": "Added to Claude Desktop: open Claude, and the gridcraft tools are in Cowork and chats."})
+        }
+        State::Failed(e) => json!({"state": "failed", "message": e}),
+    }
 }
 
 fn connect_cmd(_s: &mut Session, p: &Json) -> Result<Json> {
@@ -138,26 +222,8 @@ fn connect_cmd(_s: &mut Session, p: &Json) -> Result<Json> {
     if str_p(p, "actor") == Some("agent") || crate::commands::AGENT_DEPTH.with(std::cell::Cell::get) > 0 {
         return Err(bad(CMD, "only a person connects Claude Desktop"));
     }
-    let exe = match str_p(p, "exe") {
-        Some(e) => e.to_string(),
-        None => std::env::current_exe().map(|x| x.display().to_string()).map_err(|e| bad(CMD, e.to_string()))?,
-    };
-    Ok(match connect(&exe).map_err(|e| bad(CMD, e))? {
-        Outcome::Written { path, backup } => json!({
-            "written": true,
-            "path": path.display().to_string(),
-            "backup": backup.map(|b| b.display().to_string()),
-            "message": "GridCraft is in Claude Desktop's MCP servers (gridcraft). Open Claude: in Cowork and chats, ask it to watch this workbook (it waits for your questions with wait_for_questions).",
-        }),
-        Outcome::Unchanged { path } => json!({
-            "written": false,
-            "path": path.display().to_string(),
-            "message": "GridCraft is already connected to Claude Desktop. If Claude doesn't list it, quit Claude with ⌘Q and open it again.",
-        }),
-        Outcome::ClaudeRunning => json!({
-            "written": false,
-            "claudeRunning": true,
-            "message": "Claude Desktop is open, and it rewrites its settings when it quits: an edit now would be lost. Quit Claude with ⌘Q (not just the window), then press Connect Cowork again, then open Claude.",
-        }),
-    })
+    let control = p.get("control").and_then(Json::as_u64).and_then(|c| u16::try_from(c).ok()).unwrap_or(7979);
+    let want = this_entry(control).ok_or_else(|| bad(CMD, "this program's path isn't known"))?;
+    connect(want);
+    Ok(state_json(&state()))
 }

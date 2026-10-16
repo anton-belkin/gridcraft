@@ -214,8 +214,9 @@ pub fn show(app: &mut SheetApp, ui: &mut Ui) {
                         if resp.double_clicked() {
                             app.ui.ribbon_collapsed = !collapsed;
                         }
+                        // fork:agent — extension tabs have keytips too (`.or_else` below)
                         if app.keytips.prefix() == Some("")
-                            && let Some(sequence) = keytip_table::tab_sequence(tab)
+                            && let Some(sequence) = keytip_table::tab_sequence(tab).or_else(|| crate::ext::tab_keytip(tab))
                         {
                             keytip(app, ui, sequence, pos2(r.center().x, r.bottom() - 1.0));
                         }

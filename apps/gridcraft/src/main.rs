@@ -231,6 +231,7 @@ fn icon() -> Option<egui::IconData> {
 }
 
 fn main() -> eframe::Result<()> {
+    agent::stdio_if_asked(); // fork:agent — `--agent-stdio` serves MCP over stdio and exits
     // First, so the panic hook and every start-up warning are recorded (`logging`).
     let logger = logging::install();
     // Commands catch their panics (`Session::execute`), but the default hook only prints to
