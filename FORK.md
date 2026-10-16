@@ -20,7 +20,7 @@ before changing anything outside the agent crates.
 | `apps/gridcraft-web/src/agent.rs` | Starts the layer in the web app (no server); opens a workbook embedded in an exported page, read-only | fork only |
 | `crates/agent/src/export.rs`, `examples/export_html.rs` | `agent.exportHtml`: one HTML file with the web app and the workbook | fork only |
 | `agent-layer/` | The agent's skill, the rebase script, `export-web.sh` (builds the web app, exports a page), `demo/build-demo.sh` | fork only |
-| `crates/engine/src/ext.rs` | **Hook**: extension commands and command observers | new file in an upstream crate |
+| `crates/engine/src/ext.rs` | **Hook**: extension commands, command observers, custom undo steps | new file in an upstream crate |
 | `crates/ui-egui/src/ext.rs` | **Hook**: UI extensions (ribbon tabs, side panel, cell painting, context menu, per-frame) | new file in an upstream crate |
 | lines marked `fork:agent` | The only edits to upstream files | patch |
 
@@ -32,6 +32,9 @@ lists them; there are about twenty lines, almost all insertions:
 - `crates/engine/src/lib.rs`: `pub mod ext;`, observers called before and after each command in
   `Session::execute`, extension commands listed in `Session::commands`.
 - `crates/engine/src/cmd/mod.rs`: `find_command` also finds extension commands.
+- `crates/engine/src/lib.rs` (`HistoryEntry::step`) and `crates/engine/src/cmd/edit.rs` (undo and
+  redo): an extension's own undo steps, interleaved with the workbook snapshots
+  (`ext::push_undo_step`); a step entry keeps the workbook as it is and runs the step.
 - `crates/ui-egui/src/ribbon.rs`: extension tabs added to the tab row, an extension's tab drawn by
   the extension, a match arm so the built-in fallback doesn't draw under it, and extension tabs'
   keytip badges (four lines).

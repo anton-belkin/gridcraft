@@ -599,9 +599,11 @@ fn undo(s: &mut Session, p: &Json) -> Result<Json> {
     let d = s.doc_mut()?;
     let mut label = String::new();
     let now = d.wb.clone();
+    let mut own = Vec::new(); // fork:agent
     for _ in 0..steps {
         let Some(e) = d.undo.pop() else { break };
-        let cur = crate::HistoryEntry { label: e.label.clone(), wb: d.wb.clone(), selection: d.selection.clone() };
+        let Some(e) = crate::ext::take_step(e, &mut d.redo, &mut label, &mut own) else { continue }; // fork:agent
+        let cur = crate::HistoryEntry { label: e.label.clone(), wb: d.wb.clone(), selection: d.selection.clone(), step: None }; // fork:agent
         d.redo.push(cur);
         label = e.label.clone();
         d.wb = e.wb;
@@ -610,6 +612,7 @@ fn undo(s: &mut Session, p: &Json) -> Result<Json> {
     super::extra::keep_watch_list(&now, &mut d.wb);
     d.calc.rebuild(&d.wb);
     d.revision += 1;
+    crate::ext::run_steps(s, own, true); // fork:agent
     Ok(json!({"undone": label}))
 }
 
@@ -618,9 +621,11 @@ fn redo(s: &mut Session, p: &Json) -> Result<Json> {
     let d = s.doc_mut()?;
     let mut label = String::new();
     let now = d.wb.clone();
+    let mut own = Vec::new(); // fork:agent
     for _ in 0..steps {
         let Some(e) = d.redo.pop() else { break };
-        let cur = crate::HistoryEntry { label: e.label.clone(), wb: d.wb.clone(), selection: d.selection.clone() };
+        let Some(e) = crate::ext::take_step(e, &mut d.undo, &mut label, &mut own) else { continue }; // fork:agent
+        let cur = crate::HistoryEntry { label: e.label.clone(), wb: d.wb.clone(), selection: d.selection.clone(), step: None }; // fork:agent
         d.undo.push(cur);
         label = e.label.clone();
         d.wb = e.wb;
@@ -629,6 +634,7 @@ fn redo(s: &mut Session, p: &Json) -> Result<Json> {
     super::extra::keep_watch_list(&now, &mut d.wb);
     d.calc.rebuild(&d.wb);
     d.revision += 1;
+    crate::ext::run_steps(s, own, false); // fork:agent
     Ok(json!({"redone": label}))
 }
 

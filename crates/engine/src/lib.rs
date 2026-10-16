@@ -62,6 +62,7 @@ pub struct HistoryEntry {
     pub label: String,
     pub wb: Arc<Workbook>,
     pub selection: Selection,
+    pub step: Option<Arc<dyn ext::UndoStep>>, // fork:agent — an extension's own step instead of a snapshot
 }
 
 /// The clipboard: a block of cells (with formulas and styles) or marching-ants reference.
@@ -352,7 +353,7 @@ impl Session {
             && let Some(d) = self.docs.iter_mut().find(|d| d.uid == uid)
             && !Arc::ptr_eq(&d.wb, &wb)
         {
-            d.undo.push(HistoryEntry { label: spec.label.trim_end_matches('…').to_string(), wb, selection: sel });
+            d.undo.push(HistoryEntry { label: spec.label.trim_end_matches('…').to_string(), wb, selection: sel, step: None }); // fork:agent
             if d.undo.len() > UNDO_LIMIT {
                 d.undo.remove(0);
             }
