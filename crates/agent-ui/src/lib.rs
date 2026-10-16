@@ -242,6 +242,8 @@ impl UiExtension for AgentUi {
             if ctx.input(|i| i.viewport().close_requested()) {
                 gridcraft_agent::registry::remove();
             } else {
+                let focused = ctx.input(|i| i.viewport().focused).unwrap_or(true);
+                gridcraft_agent::docs::note_focus(&app.session, focused, gridcraft_agent::now_ms());
                 gridcraft_agent::registry::tick(&app.session);
                 ctx.request_repaint_after(std::time::Duration::from_secs(5));
             }

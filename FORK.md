@@ -165,7 +165,8 @@ upstream. Each one accepted upstream removes its lines from the patch.
   `~/aitocraft/PROTOCOL.md`, v1). GridCraft announces itself in
   `ArtCraft/agents/gridcraft-<pid>.json` (`registry.rs`: written atomically on changes, at most once
   a second, a 10 s heartbeat, removed when the window closes; stale entries of crashed instances
-  swept; titles and paths only, no content). Documents have ids `gridcraft:<pid>:<doc uid>`. Every
+  swept; titles and paths only, no content). Each document carries `focusedAt` (when its window last had focus with it active; the hub
+  picks "the open file" by it). Documents have ids `gridcraft:<pid>:<doc uid>`. Every
   MCP tool takes `document`: `agent.onDocument` runs the command with that document active for the
   length of the command and puts the active one back (control-channel commands run between frames,
   so the switch is never drawn; no engine hook needed). `list_documents`, `attach {label}` →

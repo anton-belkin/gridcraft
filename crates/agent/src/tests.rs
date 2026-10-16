@@ -1139,3 +1139,31 @@ fn registry_entry_contents_staleness_and_removal() {
     crate::registry::set_folder(None);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn registry_says_when_each_document_had_focus() {
+    let (mut s, first, second) = two_documents();
+    let (u1, u2) = (crate::docs::uid_of(&first).unwrap(), crate::docs::uid_of(&second).unwrap());
+    // Never focused yet: null.
+    let doc = |s: &Session, id: &str| crate::docs::documents(s).into_iter().find(|d| d["id"] == json!(id)).unwrap();
+    assert_eq!(doc(&s, &second)["focusedAt"], Value::Null);
+    // The window gains focus on the second document.
+    crate::docs::note_focus(&s, false, 1_000);
+    crate::docs::note_focus(&s, true, 2_000);
+    assert_eq!(crate::docs::focused_at(u2), Some(2_000));
+    // Staying focused doesn't move it (no rewrite every frame).
+    crate::docs::note_focus(&s, true, 3_000);
+    assert_eq!(crate::docs::focused_at(u2), Some(2_000));
+    // Switching documents while focused: the new one is now.
+    let i = crate::docs::index_of(&s, &first).unwrap();
+    s.set_active(i);
+    crate::docs::note_focus(&s, true, 4_000);
+    assert_eq!(crate::docs::focused_at(u1), Some(4_000));
+    assert_eq!(crate::docs::focused_at(u2), Some(2_000));
+    // Unfocused, then focused again.
+    crate::docs::note_focus(&s, false, 5_000);
+    crate::docs::note_focus(&s, true, 6_000);
+    assert_eq!(doc(&s, &first)["focusedAt"], json!(6_000));
+    let v = crate::registry::contents(&s, "http://127.0.0.1:7980/mcp", 7_000);
+    assert!(v["documents"].as_array().unwrap().iter().any(|d| d["focusedAt"] == json!(6_000)));
+}

@@ -125,6 +125,36 @@ pub fn touch_from(s: &Session, p: &Json) {
     }
 }
 
+// ---------------------------------------------------------------- focus
+
+/// When each document last had focus (its window focused while it was the active one), and what
+/// the last frame saw: (active document, window focused).
+static FOCUS: Mutex<(Option<HashMap<u64, u64>>, Option<(u64, bool)>)> = Mutex::new((None, None));
+
+/// Called every frame: when the window gains focus, or the active document changes while it has
+/// focus, that document's `focusedAt` is now.
+pub fn note_focus(s: &Session, window_focused: bool, now: u64) {
+    let Some(uid) = s.active().map(|d| d.uid) else { return };
+    let mut g = match FOCUS.lock() {
+        Ok(g) => g,
+        Err(p) => p.into_inner(),
+    };
+    let changed = g.1 != Some((uid, window_focused));
+    g.1 = Some((uid, window_focused));
+    if window_focused && changed {
+        g.0.get_or_insert_with(HashMap::new).insert(uid, now);
+    }
+}
+
+/// When a document last had focus (ms since the epoch).
+pub fn focused_at(uid: u64) -> Option<u64> {
+    let g = match FOCUS.lock() {
+        Ok(g) => g,
+        Err(p) => p.into_inner(),
+    };
+    g.0.as_ref().and_then(|m| m.get(&uid).copied())
+}
+
 // ---------------------------------------------------------------- documents
 
 /// A document as the registry and `list_documents` show it: no content, titles and paths only.
@@ -137,6 +167,7 @@ pub fn summary(d: &DocState, frontmost: bool) -> Json {
         "title": d.display_title(),
         "path": path,
         "frontmost": frontmost,
+        "focusedAt": focused_at(d.uid),
         "openQuestions": open,
         "listeners": listeners(d.uid).iter().map(|x| json!({"listener": x.id, "label": x.label, "lastSeen": x.last_seen})).collect::<Vec<_>>(),
     })
