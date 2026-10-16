@@ -1,5 +1,6 @@
 //! Multi-dimensional analysis: several inputs moved together within their reasoned ranges, to
-//! find the combinations that give an output its lowest and highest value.
+//! find the combinations that give an output its lowest and highest value — and the risk matrix
+//! (the agent's confidence in each input against its impact on the output).
 //!
 //! The search is deterministic and bounded: every corner of the box when there are few enough
 //! (else a fixed sample of them), a fixed sample of points inside, then a coordinate search from
@@ -31,6 +32,7 @@ const WORK_CAP: usize = 6_000_000;
 
 pub static SPECS: &[CommandSpec] = &[
     spec!(query "agent.stress", "Worst and Best Combination", "{cell?, inputs?: [cells] (default: the marked inputs it depends on, 3-12), maxEvals?: (default 3000, max 20000), masked?: bool (default true)} → the lowest and highest value of the output with every input inside its range, and the setting of each input there", stress_cmd),
+    spec!(query "agent.risk", "Risk Matrix", "{cell?, masked?: bool (default true)} → each input of the output with its impact (swing over its range) and the agent's confidence, ranked by impact × (1 − confidence)", risk_cmd),
 ];
 
 /// One input of the search.
@@ -370,4 +372,96 @@ fn stress_cmd(s: &mut Session, p: &Json) -> Result<Json> {
     let dims = pick_dims(&wb, &calc, &l, target, &chosen);
     let r = search(&wb, &calc, target, dims, max_evals).ok_or_else(|| bad(CMD, format!("{} has no numeric inputs to move", place.a1())))?;
     Ok(stress_json(&wb, &r))
+}
+
+// ---------------------------------------------------------------- risk matrix
+
+/// One input in the risk matrix.
+#[derive(Clone, Debug, PartialEq)]
+pub struct RiskRow {
+    pub key: Key,
+    pub label: String,
+    /// How far the output moves over the input's range.
+    pub swing: f64,
+    /// `swing` relative to the widest one (0..1).
+    pub impact: f64,
+    /// The agent's confidence in the input (0..1), if it gave one.
+    pub confidence: Option<f64>,
+    pub reason: String,
+    pub reasoned: bool,
+    /// impact × (1 − confidence); an input nobody vouched for counts as confidence 0.
+    pub score: f64,
+}
+
+impl RiskRow {
+    pub fn quadrant(&self) -> &'static str {
+        let sure = self.confidence.unwrap_or(0.0) >= 0.5;
+        match (self.impact >= 0.5, sure) {
+            (true, false) => "check first",
+            (true, true) => "watch",
+            (false, false) => "refine later",
+            (false, true) => "fine",
+        }
+    }
+}
+
+/// The agent's confidence on the cell: the smallest marked range that holds it.
+pub fn confidence_of(wb: &Workbook, l: &Layer, k: Key) -> Option<(f64, String)> {
+    l.confidence
+        .iter()
+        .filter_map(|c| {
+            l.anchor(&c.anchor).and_then(|a| anchor::resolve(wb, a)).filter(|p| p.sheet == k.0 && p.range.contains(k.1)).map(|p| (p.range.count(), c))
+        })
+        .min_by_key(|(n, _)| *n)
+        .map(|(_, c)| (c.level, c.reason.clone()))
+}
+
+/// Confidence × impact for each input of `target`, riskiest first.
+pub fn risk(wb: &Workbook, calc: &Calc, l: &Layer, target: Key) -> (Option<f64>, Vec<RiskRow>) {
+    let (base, swings) = analysis::sensitivity(wb, calc, l, target, MAX_DIMS);
+    let widest = swings.iter().map(|w| (w.at_high - w.at_low).abs()).fold(0.0, f64::max);
+    let mut rows: Vec<RiskRow> = swings
+        .iter()
+        .map(|w| {
+            let swing = (w.at_high - w.at_low).abs();
+            let impact = if widest > 0.0 { swing / widest } else { 0.0 };
+            let conf = confidence_of(wb, l, w.input);
+            let score = impact * (1.0 - conf.as_ref().map_or(0.0, |c| c.0));
+            RiskRow {
+                key: w.input,
+                label: w.label.clone(),
+                swing,
+                impact,
+                confidence: conf.as_ref().map(|c| c.0),
+                reason: conf.map(|c| c.1).unwrap_or_default(),
+                reasoned: w.reasoned,
+                score,
+            }
+        })
+        .collect();
+    rows.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+    (base, rows)
+}
+
+fn risk_cmd(s: &mut Session, p: &Json) -> Result<Json> {
+    let place = place_p(s, p, "agent.risk")?;
+    let target: Key = (place.sheet, place.range.start);
+    let (wb, calc, l) = view(s, p)?;
+    let (base, rows) = risk(&wb, &calc, &l, target);
+    Ok(json!({
+        "cell": place.a1(),
+        "value": base,
+        "inputs": rows.iter().map(|r| json!({
+            "cell": cell_a1(&wb, r.key),
+            "label": r.label,
+            "swing": r.swing,
+            "impact": r.impact,
+            "confidence": r.confidence,
+            "reason": r.reason,
+            "reasoned": r.reasoned,
+            "score": r.score,
+            "quadrant": r.quadrant(),
+        })).collect::<Vec<_>>(),
+        "note": "impact: the output's swing over the input's range, relative to the widest; confidence: set_confidence (none = 0). Start with \"check first\".",
+    }))
 }

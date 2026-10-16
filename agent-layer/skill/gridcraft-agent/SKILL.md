@@ -64,6 +64,8 @@ asked before you connected are waiting too.
 - `worst_case` moves 3–12 inputs together inside their reasoned ranges and returns the lowest and
   highest value of an output with where each input sits there. Mention when an input sits at the
   "wrong" end in the worst case (an interaction), and the gap to `oneAtATime`.
+- `risk_matrix` puts the inputs of an output on impact × your confidence. Work the "check first"
+  quadrant (high impact, low confidence) before anything else, then raise or explain the confidence.
 
 ## Privacy — non-negotiable
 

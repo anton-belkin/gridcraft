@@ -16,7 +16,7 @@ sources you used (href \"cell:Sheet1!B5\", \"note:n3\" or https URLs). Leave pre
 mark inputs with reasoned ranges (set_input_range), say how sure you are (set_confidence) and log decisions (log_decision). \
 When the model rests on a choice, put both sides in the document (add_alternatives) instead of picking one; when a readable \
 formula approximates, add the exact one beside it (add_calculation_method) and say where the difference matters. Use \
-worst_case to find what to check first. \
+worst_case and risk_matrix to find what to check first. \
 Change the workbook only with run_command, giving a reason and a source. PRIVACY: ranges listed in get_context.privateRanges \
 hold client data; you see stand-in values with the same sign and magnitude, and everything computed from them is computed \
 from the stand-ins. Never present those numbers as real; reason about the model's mechanics instead. You cannot write to \
@@ -169,6 +169,13 @@ pub fn tools() -> Vec<Value> {
             &["cell"],
             true,
         ),
+        tool(
+            "risk_matrix",
+            "The inputs of an output on a confidence × impact matrix: how far each moves the output over its range, against your set_confidence level. Ranked by impact × (1 − confidence); \"check first\" = high impact, low confidence.",
+            json!({"cell": s("Output cell")}),
+            &["cell"],
+            true,
+        ),
         tool("get_layer", "The whole agent layer: anchors, questions, notes, inputs, private ranges, confidence, history.", json!({}), &[], true),
         tool(
             "run_command",
@@ -235,6 +242,7 @@ pub fn call(b: &mut dyn Backend, name: &str, args: &Value) -> Result<Value, Stri
         "add_calculation_method" => exec(b, "agent.method", pick(args, &["cell", "exact", "simple", "threshold", "note", "title", "outputs"])),
         "compare_alternatives" => exec(b, "agent.compareVariants", pick(args, &["id"])),
         "worst_case" => exec(b, "agent.stress", pick(args, &["cell", "inputs", "maxEvals"])),
+        "risk_matrix" => exec(b, "agent.risk", pick(args, &["cell"])),
         "use_alternative" => exec(b, "agent.useVariant", pick(args, &["id", "option"])),
         "run_command" => exec(b, "agent.exec", pick(args, &["command", "params", "reason", "source"])),
         "list_commands" => {

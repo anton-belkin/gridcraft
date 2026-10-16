@@ -55,6 +55,7 @@ pub(crate) fn show(st: &mut AgentUi, app: &mut SheetApp, ui: &mut Ui) {
                     (Tab::Questions, if ready > 0 { format!("Questions ({ready})") } else { "Questions".into() }),
                     (Tab::Notes, "Notes".into()),
                     (Tab::Variants, if l.variants.is_empty() { "Variants".into() } else { format!("Variants ({})", l.variants.len()) }),
+                    (Tab::Risk, "Risk".into()),
                     (Tab::History, "History".into()),
                     (Tab::Connect, "Connect".into()),
                 ] {
@@ -69,6 +70,7 @@ pub(crate) fn show(st: &mut AgentUi, app: &mut SheetApp, ui: &mut Ui) {
                 Tab::Questions => questions_tab(app, ui, &l, &t, &p, &mut acts),
                 Tab::Notes => notes_tab(st, app, ui, &l, &p, &mut acts),
                 Tab::Variants => variants_tab(st, app, ui, &l, &t, &p, &mut acts),
+                Tab::Risk => risk_tab(st, app, ui, &l, &t, &p, &mut acts),
                 Tab::History => history_tab(app, ui, &l, &t, &p, &mut acts),
                 Tab::Connect => connect_tab(ui, &t),
             });
@@ -665,6 +667,113 @@ fn stress_view(ui: &mut Ui, d: &gridcraft_engine::DocState, r: &Stress, t: &Toke
             .small()
             .color(t.text_dim),
     );
+}
+
+fn risk_tab(st: &mut AgentUi, app: &SheetApp, ui: &mut Ui, l: &Layer, t: &Tokens, p: &Palette, acts: &mut Vec<Act>) {
+    let Some(d) = app.session.active() else { return };
+    let si = d.wb.active_sheet;
+    let c = d.selection.active;
+    if !overlay::is_formula_number(d, si, c) {
+        ui.label(RichText::new("Select a result (a formula) to see its inputs on the risk matrix: how much each can move it, against how sure your agent is about it.").italics());
+        return;
+    }
+    let (base, rows) = stress::risk(&d.wb, &d.calc, l, (si, c));
+    let label = d.wb.sheet(si).map(|sh| analysis::label_of(sh, c)).unwrap_or_default();
+    ui.horizontal_wrapped(|ui| {
+        ui.label(RichText::new(format!("Risk to {}", if label.is_empty() { c.a1() } else { label })).strong());
+        if let Some(b) = base {
+            ui.label(RichText::new(format!("= {}", fmt_at(&d.wb, (si, c), b))).color(t.text_dim));
+        }
+    });
+    if rows.is_empty() {
+        ui.label(RichText::new("No numeric inputs under this cell.").italics());
+        return;
+    }
+    let _ = st;
+    // The matrix: confidence → (left: guess, right: verified), impact ↑.
+    let w = ui.available_width().min(420.0);
+    let (rect, _) = ui.allocate_exact_size(vec2(w, w * 0.78), egui::Sense::hover());
+    let painter = ui.painter_at(rect);
+    let plot = egui::Rect::from_min_max(egui::pos2(rect.left() + 4.0, rect.top() + 16.0), egui::pos2(rect.right() - 4.0, rect.bottom() - 30.0));
+    let mid = plot.center();
+    let red = Color32::from_rgb(0xD0, 0x38, 0x38);
+    let amber = p.material;
+    let green = Color32::from_rgb(0x2E, 0x8B, 0x57);
+    for (q, color) in [
+        (egui::Rect::from_min_max(plot.left_top(), mid), red),
+        (egui::Rect::from_min_max(egui::pos2(mid.x, plot.top()), egui::pos2(plot.right(), mid.y)), amber),
+        (egui::Rect::from_min_max(egui::pos2(plot.left(), mid.y), egui::pos2(mid.x, plot.bottom())), amber),
+        (egui::Rect::from_min_max(mid, plot.right_bottom()), green),
+    ] {
+        painter.rect_filled(q, 0.0, color.gamma_multiply(0.10));
+    }
+    // Quadrant names outside the plot, so they never sit under a dot.
+    let font = theme::ui_bold(10.0);
+    painter.text(egui::pos2(plot.left(), plot.top() - 2.0), egui::Align2::LEFT_BOTTOM, "▲ high impact, unsure: check first", font.clone(), red);
+    painter.text(egui::pos2(plot.right(), plot.top() - 2.0), egui::Align2::RIGHT_BOTTOM, "watch", font.clone(), amber);
+    painter.text(egui::pos2(plot.left(), plot.bottom() + 2.0), egui::Align2::LEFT_TOP, "refine later", font.clone(), amber);
+    painter.text(egui::pos2(plot.right(), plot.bottom() + 2.0), egui::Align2::RIGHT_TOP, "fine", font, green);
+    painter.rect_stroke(plot, 0.0, egui::Stroke::new(1.0, t.separator), egui::StrokeKind::Inside);
+    painter.text(
+        egui::pos2(plot.center().x, rect.bottom() - 1.0),
+        egui::Align2::CENTER_BOTTOM,
+        "guess ← agent's confidence → verified",
+        theme::ui_font(10.0),
+        t.text_dim,
+    );
+    let pos = |r: &stress::RiskRow| {
+        let x = r.confidence.unwrap_or(0.0) as f32;
+        let y = r.impact as f32;
+        egui::pos2(plot.left() + 10.0 + x * (plot.width() - 20.0), plot.bottom() - 10.0 - y * (plot.height() - 20.0))
+    };
+    for r in &rows {
+        let at = pos(r);
+        let color = match r.quadrant() {
+            "check first" => red,
+            "fine" => green,
+            _ => amber,
+        };
+        if r.confidence.is_some() {
+            painter.circle_filled(at, 5.0, color);
+        } else {
+            painter.circle_stroke(at, 5.0, egui::Stroke::new(1.6, color));
+        }
+        let name = if r.label.is_empty() { r.key.1.a1() } else { clip(&r.label, 18) };
+        let right = at.x < plot.right() - 90.0;
+        let (anchor, off) = if right { (egui::Align2::LEFT_CENTER, vec2(8.0, 0.0)) } else { (egui::Align2::RIGHT_CENTER, vec2(-8.0, 0.0)) };
+        painter.text(at + off, anchor, name, theme::ui_font(10.0), t.text);
+    }
+    ui.label(
+        RichText::new("Impact: how far the input moves the result over its range (largest = top). Hollow: no confidence given yet.")
+            .small()
+            .color(t.text_dim),
+    );
+    ui.add_space(4.0);
+    egui::Grid::new("agent_risk_grid").num_columns(4).spacing(vec2(10.0, 2.0)).striped(true).show(ui, |ui| {
+        for h in ["Input", "Impact", "Confidence", ""] {
+            ui.label(RichText::new(h).small().strong().color(t.text_dim));
+        }
+        ui.end_row();
+        for r in &rows {
+            let place =
+                Place { sheet: r.key.0, sheet_name: d.wb.sheet(r.key.0).map(|x| x.name.clone()).unwrap_or_default(), range: RangeRef::cell(r.key.1) };
+            let name = if r.label.is_empty() { place.range.a1() } else { clip(&r.label, 22) };
+            if ui.link(RichText::new(name).small()).on_hover_text(place.a1()).clicked() {
+                acts.push(Act::Follow(format!("cell:{}", place.a1())));
+            }
+            ui.label(RichText::new(format!("{:.0}%", r.impact * 100.0)).small());
+            let conf = r.confidence.map_or("—".to_string(), |c| format!("{:.0}%", c * 100.0));
+            ui.label(RichText::new(conf).small()).on_hover_text(&r.reason);
+            let q = r.quadrant();
+            let color = match q {
+                "check first" => red,
+                "fine" => green,
+                _ => amber,
+            };
+            ui.label(RichText::new(q).small().color(color));
+            ui.end_row();
+        }
+    });
 }
 
 fn history_tab(app: &SheetApp, ui: &mut Ui, l: &Layer, t: &Tokens, p: &Palette, acts: &mut Vec<Act>) {

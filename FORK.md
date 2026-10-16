@@ -127,7 +127,8 @@ the confidence heat map, decision history and audit trail, in-app MCP and event 
 in the `.xlsx`; alternatives in the document ("A or B?", Variants tab, switch and recalculate) and
 calculation methods side by side (simple vs exact, material differences flagged on the results);
 multi-dimensional analysis (the worst and best combination of an output's inputs, against the
-single moves added up).
+single moves added up); the risk matrix (each input's impact on an output against the agent's
+confidence in it, Risk tab).
 
 Next: export to a self-contained web page (WASM, prepared answers only), a safe file mode for privacy, then WordCraft and DeckCraft (Excel → slide links
 with a back-reference in the workbook), built the same way.

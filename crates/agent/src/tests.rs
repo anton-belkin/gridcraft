@@ -363,3 +363,20 @@ fn stress_finds_an_interior_peak() {
     assert_eq!(r["highest"]["value"], json!(500000.0));
     assert_eq!(r["highest"]["inputs"][0]["at"], json!("inside"));
 }
+
+#[test]
+fn risk_matrix_ranks_impact_against_confidence() {
+    let mut s = stress_model();
+    s.execute("agent.confidence", json!({"range": "B2", "level": 0.95, "reason": "price list"})).unwrap();
+    s.execute("agent.confidence", json!({"range": "B8", "level": 0.2, "reason": "one quarter of data"})).unwrap();
+    let r = s.execute("agent.risk", json!({"cell": "B7", "masked": false})).unwrap();
+    let rows = r["inputs"].as_array().unwrap();
+    let get = |c: &str| rows.iter().find(|x| x["cell"] == json!(c)).unwrap().clone();
+    assert_eq!(get("Sheet1!B2")["confidence"], json!(0.95));
+    assert_eq!(get("Sheet1!B3")["confidence"], Value::Null);
+    // Ranked by impact × (1 − confidence): a confident input sinks.
+    let scores: Vec<f64> = rows.iter().map(|x| x["score"].as_f64().unwrap()).collect();
+    assert!(scores.windows(2).all(|w| w[0] >= w[1]));
+    assert_eq!(rows.last().unwrap()["cell"], json!("Sheet1!B2"));
+    assert!(rows.iter().any(|x| x["impact"] == json!(1.0)));
+}

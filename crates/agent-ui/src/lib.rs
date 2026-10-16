@@ -37,7 +37,7 @@ pub fn set_server_url(url: String) {
 
 static REQUEST: std::sync::Mutex<Option<(bool, String, String)>> = std::sync::Mutex::new(None);
 
-/// Opens (or closes) the Agent pane on a tab (`cell`, `questions`, `notes`, `variants`, `history`,
+/// Opens (or closes) the Agent pane on a tab (`cell`, `questions`, `notes`, `variants`, `risk`, `history`,
 /// `connect`) with a heat map (`off`, `confidence`, `impact`), from the next frame.
 pub fn request_pane(open: bool, tab: &str, heat: &str) {
     if let Ok(mut r) = REQUEST.lock() {
@@ -56,6 +56,7 @@ pub(crate) enum Tab {
     Questions,
     Notes,
     Variants,
+    Risk,
     History,
     Connect,
 }
@@ -181,6 +182,7 @@ impl UiExtension for AgentUi {
                 "questions" => Tab::Questions,
                 "notes" => Tab::Notes,
                 "variants" => Tab::Variants,
+                "risk" => Tab::Risk,
                 "history" => Tab::History,
                 "connect" => Tab::Connect,
                 _ => Tab::Cell,
