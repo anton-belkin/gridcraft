@@ -1,6 +1,6 @@
 # Architecture
 
-> **Last reviewed:** 2026-10-10 · **Last updated:** 2026-10-15 · **Change:** minor (Power Query direction: one model, M) · **Target:** Microsoft Excel (Microsoft 365)
+> **Last reviewed:** 2026-10-10 · **Last updated:** 2026-10-17 · **Change:** minor (Portuguese date names and Record.ToTable) · **Target:** Microsoft Excel (Microsoft 365)
 
 How GridCraft is built today. Rules for contributors are in [`AGENTS.md`](../AGENTS.md).
 
@@ -90,6 +90,11 @@ Adding an M function: add `(name, min, max)` to `library::FUNCTIONS`, implement 
 `call`, add a test with M as the Power Query Editor writes it and a hostile case;
 `every_library_function_dispatches` and the random-formula test cover dispatch and panics.
 
+The M library also provides bounded Portuguese full names/standard formatting and
+Record.ToTable. See [the library note](pq19-m-library.md) for the value/budget contract,
+tests and remaining limits. This addition does not change the proposed query model,
+editor, source permissions or storage architecture.
+
 ## Agent control
 
 - Desktop control channel: `gridcraft --control 7979`, JSON lines on localhost
@@ -117,6 +122,7 @@ rpm, tarball), FreeBSD, and web (WASM; WebGPU or WebGL2). Release workflows in
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-17 | minor | Bounded Portuguese date names/standard formatting and Record.ToTable; no query-model, editor or storage change |
 | 2026-10-15 | minor | Power Query direction: M is the one query model (steps as a codec, Excel's storage, Excel's cache as the oracle); seams for parallel work |
 | 2026-10-15 | minor | The M interpreter (`engine/query/m`) for Excel's Power Query queries |
 | 2026-10-14 | minor | Get & Transform data flow; the `external` crate (L6) |

@@ -398,6 +398,10 @@ pub fn names(culture: Option<&str>) -> Names {
             months: ["enero", "febrero", "marzo", "abril", "mayo", "junio", "julio", "agosto", "septiembre", "octubre", "noviembre", "diciembre"],
             days: ["domingo", "lunes", "martes", "miércoles", "jueves", "viernes", "sábado"],
         },
+        "pt" => Names {
+            months: ["janeiro", "fevereiro", "março", "abril", "maio", "junho", "julho", "agosto", "setembro", "outubro", "novembro", "dezembro"],
+            days: ["domingo", "segunda-feira", "terça-feira", "quarta-feira", "quinta-feira", "sexta-feira", "sábado"],
+        },
         "ru" => Names {
             months: ["январь", "февраль", "март", "апрель", "май", "июнь", "июль", "август", "сентябрь", "октябрь", "ноябрь", "декабрь"],
             days: ["воскресенье", "понедельник", "вторник", "среда", "четверг", "пятница", "суббота"],
@@ -428,6 +432,7 @@ pub fn patterns(culture: Option<&str>) -> Patterns {
         ("nl", _) => p("d-M-yyyy", "dddd d MMMM yyyy", "HH:mm", "HH:mm:ss"),
         ("fr", _) => p("dd/MM/yyyy", "dddd d MMMM yyyy", "HH:mm", "HH:mm:ss"),
         ("es", _) => p("dd/MM/yyyy", "dddd, d 'de' MMMM 'de' yyyy", "H:mm", "H:mm:ss"),
+        ("pt", _) => p("dd/MM/yyyy", "dddd, d 'de' MMMM 'de' yyyy", "HH:mm", "HH:mm:ss"),
         ("ru", _) => p("dd.MM.yyyy", "d MMMM yyyy 'г.'", "H:mm", "H:mm:ss"),
         ("ja" | "zh" | "ko", _) => p("yyyy/MM/dd", "yyyy'年'M'月'd'日'", "H:mm", "H:mm:ss"),
         _ => match crate::query::types::Culture::of(Some(&tag)).order {

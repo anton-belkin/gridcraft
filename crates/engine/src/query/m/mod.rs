@@ -238,3 +238,9 @@ fn walk_type(t: &TypeExpr, scope: &mut Vec<Rc<str>>, found: &mut Vec<String>, is
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod portuguese_tests;
+
+#[cfg(test)]
+mod record_to_table_tests;

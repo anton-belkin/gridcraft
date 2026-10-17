@@ -274,6 +274,7 @@ pub const FUNCTIONS: &[(&str, usize, usize)] = &[
     ("Record.FieldNames", 1, 1),
     ("Record.FieldValues", 1, 1),
     ("Record.HasFields", 2, 2),
+    ("Record.ToTable", 1, 1),
     ("Error.Record", 1, 3),
     ("List.FirstN", 2, 2),
     ("List.LastN", 1, 2),
