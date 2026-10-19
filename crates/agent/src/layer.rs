@@ -367,6 +367,8 @@ pub enum ContextKind {
     Cowork,
     /// The person's Claude Code session, or a project folder.
     Code,
+    /// Codex, connected through the external AItoCraft question worker.
+    Codex,
     /// No agent at all (not offered on the tab; `agent.agentMode off`).
     Off,
 }
@@ -392,6 +394,11 @@ pub struct AgentContext {
     /// Claude Code, project folder: where the background client runs.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub folder: String,
+    /// The Desktop chat that created this document; never inherited by another document.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub codex_thread_id: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub codex_thread_title: String,
 }
 
 /// A topic's status, with its free text and who set it.
