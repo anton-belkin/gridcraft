@@ -21,11 +21,13 @@ pub(crate) enum Step {
     InstallCode,
     AskSession,
     ChooseFolder,
+    CheckCodex,
 }
 
 impl Step {
     pub(crate) fn label(self) -> &'static str {
         match self {
+            Step::CheckCodex => "Connect Codex",
             Step::LogIn => "Log in to Claude",
             Step::InstallDesktop | Step::InstallCode => "Install AItoCraft",
             Step::AskCowork => "Ask Cowork to collaborate",
@@ -35,6 +37,7 @@ impl Step {
     }
     pub(crate) fn tip(self) -> &'static str {
         match self {
+            Step::CheckCodex => "Connects every open and new document to the shared Codex Desktop server.",
             Step::LogIn => "Opens a terminal with `claude auth login`",
             Step::InstallDesktop => "Adds AItoCraft to Claude Desktop, where Cowork runs: one connection for every Craft app",
             Step::AskCowork => "Copies the phrase for Claude: paste it into your Cowork chat",
@@ -109,6 +112,7 @@ pub(crate) struct View {
     pub steps: Vec<(Step, bool)>,
     /// The chosen project folder, when it's there.
     pub folder: Option<String>,
+    pub route: Option<cx::CodexRoute>,
 }
 
 impl View {
@@ -173,6 +177,17 @@ pub(crate) fn view(
             let (l, d) = background(if c.web { " It may also search and read the web." } else { " It sees only this document." });
             (l, d, login.into_iter().collect())
         }
+        (ContextKind::Codex, _) => {
+            // Old answers never prove a live connection: only this document's listener does.
+            let ready = matches!(presence, Presence::Listening { seen_ms, .. } if *seen_ms < 15_000);
+            let lamp = if ready { Lamp::Ready } else { Lamp::NotReady };
+            let detail = if ready {
+                "Codex Desktop is connected to this document. Ask a question; edits arrive as proposals."
+            } else {
+                "Codex is disconnected. Click Connect Codex to reconnect, or restart the Codex GridCraft launcher."
+            };
+            (lamp, detail.to_string(), if ready { vec![] } else { vec![(Step::CheckCodex, false)] })
+        }
         (ContextKind::Cowork, _) => {
             let (l, d) = listening("Your Cowork chat");
             let asked = copied(Step::AskCowork) || l == Lamp::Ready;
@@ -211,7 +226,23 @@ pub(crate) fn view(
         None => (lamp, lamp.label().to_string(), None, detail),
     };
     let detail = format!("{detail}\n\nGridCraft's MCP server: {server}");
-    View { ctx: c.clone(), lamp, label, topic, detail, steps, folder }
+    View { ctx: c.clone(), lamp, label, topic, detail, steps, folder, route: None }
+}
+
+/// Readiness in the Codex edition follows the persistent queue consumer, not a cached ping
+/// or an ephemeral model session that has already exited.
+fn connection(s: &gridcraft_engine::Session, c: &AgentContext, now: u64) -> Presence {
+    if c.kind != ContextKind::Codex {
+        return runner::presence(s);
+    }
+    let Some(d) = s.active() else { return Presence::Nobody };
+    let listener = gridcraft_agent::docs::listeners(d.uid)
+        .into_iter()
+        .find(|l| l.label.starts_with("Codex desktop bridge ·") && now.saturating_sub(l.last_seen) < 15_000);
+    match listener {
+        Some(l) => Presence::Listening { label: l.label, seen_ms: now.saturating_sub(l.last_seen), more: 0 },
+        None => Presence::Nobody,
+    }
 }
 
 /// The active document's group.
@@ -219,14 +250,60 @@ pub(crate) fn current(st: &AgentUi, app: &SheetApp) -> Option<View> {
     let d = app.session.active()?;
     let c = cx::effective(&layer::get(d));
     let setup = cx::setup();
-    let presence = runner::presence(&app.session);
     let now = gridcraft_agent::now_ms();
+    let presence = connection(&app.session, &c, now);
     let waiting = st.context.waiting.get(&d.uid).is_some_and(|t| now.saturating_sub(*t) < WAIT_MS);
     let uid = d.uid;
     let copied = |s: Step| st.context.copied.contains(&(uid, s));
     let w = working(d, now);
     let answered = answered_recently(d, now);
-    Some(view(&c, &setup, &presence, waiting, &copied, crate::server_url().unwrap_or("http://127.0.0.1:7980/mcp"), w.as_ref(), answered))
+    let mut v = view(&c, &setup, &presence, waiting, &copied, crate::server_url().unwrap_or("http://127.0.0.1:7980/mcp"), w.as_ref(), answered);
+    if c.kind == ContextKind::Codex {
+        v.route = cx::codex_route_for(uid);
+        if let Some(r) = &v.route {
+            v.detail = format!("{}\n\nИсходный чат: {}\n{}", r.detail, c.codex_thread_title, v.detail);
+            if r.status == "disconnected" {
+                v.lamp = Lamp::NotReady;
+                v.label = "Codex отключён".into();
+            } else if v.lamp != Lamp::Working {
+                match r.status.as_str() {
+                    "attention" => {
+                        v.lamp = Lamp::Waiting;
+                        v.label = "Проверьте доставку".into();
+                    }
+                    "missing" => {
+                        v.lamp = Lamp::Waiting;
+                        v.label = "Исходный чат недоступен".into();
+                    }
+                    "linkMissing" => {
+                        v.lamp = Lamp::Waiting;
+                        v.label = "Чат из ссылки недоступен".into();
+                    }
+                    "linked" => {
+                        v.label = "Чат по ссылке".into();
+                    }
+                    "fallback" => {
+                        v.lamp = Lamp::Ready;
+                        v.label = "Другой чат".into();
+                    }
+                    "queued" => {
+                        v.lamp = Lamp::Waiting;
+                        v.label = "Вопрос доставлен в чат".into();
+                    }
+                    "fresh" => {
+                        v.lamp = Lamp::Ready;
+                        v.label = if c.codex_thread_id.is_empty() { "Новый чат" } else { "Другой чат" }.into();
+                    }
+                    "unbound" => {
+                        v.lamp = Lamp::Ready;
+                        v.label = "Новый чат по вопросу".into();
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+    Some(v)
 }
 
 /// The agent answered a question of this document lately: after its work the lamp says Ready.
@@ -282,7 +359,7 @@ pub(crate) fn frame(st: &mut AgentUi, app: &mut SheetApp, ctx: &egui::Context) {
     let l = layer::get(d);
     let c = cx::effective(&l);
     let now = gridcraft_agent::now_ms();
-    let presence = runner::presence(&app.session);
+    let presence = connection(&app.session, &c, now);
     if listener_ready(&presence) {
         st.context.waiting.remove(&uid);
     }
@@ -294,7 +371,7 @@ pub(crate) fn frame(st: &mut AgentUi, app: &mut SheetApp, ctx: &egui::Context) {
         ctx.request_repaint_after(std::time::Duration::from_secs(2));
     }
     // Cowork and my session: something listens but hasn't answered for this document yet.
-    let listens = matches!(c.kind, ContextKind::Cowork) || (c.kind == ContextKind::Code && c.via == CodeVia::Session);
+    let listens = matches!(c.kind, ContextKind::Cowork | ContextKind::Codex) || (c.kind == ContextKind::Code && c.via == CodeVia::Session);
     if listens && !gridcraft_agent::read_only() {
         let quiet = runner::classify(None, &runner::signals(uid), runner::mode(), now);
         let unsure = matches!(quiet, Presence::Listener(_)) && !listener_ready(&presence) && !matches!(presence, Presence::Checking { .. });
@@ -319,6 +396,12 @@ pub(crate) fn run(st: &mut AgentUi, app: &mut SheetApp, ctx: &egui::Context, ste
         st.context.waiting.insert(uid, now);
     };
     match step {
+        Step::CheckCodex => {
+            wait(st);
+            if let Err(e) = app.run("agent.codexConnect", json!({})) {
+                app.message = Some(("Codex".into(), e.to_string()));
+            }
+        }
         Step::LogIn => match cx::log_in() {
             Ok(()) => wait(st),
             Err(e) => app.message = Some(("Log in to Claude".into(), e)),
@@ -519,5 +602,25 @@ mod tests {
             .unwrap();
         assert_eq!(working(s.active().unwrap(), now()).unwrap().topics.len(), 1);
         assert!(working(s.active().unwrap(), now() + 11_000).is_none());
+    }
+}
+
+#[cfg(test)]
+mod codex_tests {
+    use super::*;
+
+    #[test]
+    fn codex_requires_a_live_document_listener_even_after_an_old_answer() {
+        let c = AgentContext { kind: ContextKind::Codex, ..AgentContext::default() };
+        let v = view(&c, &Setup::default(), &Presence::Nobody, true, &|_| false, "url", None, true);
+        assert_eq!(v.lamp, Lamp::NotReady);
+        assert_eq!(v.next(), Some(Step::CheckCodex));
+        assert!(!v.detail.contains("Claude"));
+        let stale_ping = Presence::Answering { checked_ms: 0, latency_ms: 10 };
+        assert_eq!(view(&c, &Setup::default(), &stale_ping, false, &|_| false, "url", None, true).lamp, Lamp::NotReady);
+        let p = Presence::Listening { label: "Codex".into(), seen_ms: 0, more: 0 };
+        let v = view(&c, &Setup::default(), &p, false, &|_| false, "url", None, false);
+        assert_eq!(v.lamp, Lamp::Ready);
+        assert!(v.steps.is_empty());
     }
 }

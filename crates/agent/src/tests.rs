@@ -1607,6 +1607,38 @@ fn mcp_topics_tools() {
 static CONTEXT_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 #[test]
+fn codex_origin_roundtrips_but_is_never_inherited_and_routes_are_runtime_only() {
+    let _g = CONTEXT_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut s = model();
+    let id = "11111111-1111-4111-8111-111111111111";
+    assert!(s.execute("agent.codexOrigin", json!({"threadId": "../another?prompt=secret"})).is_err());
+    assert!(s.execute("agent.codexOrigin", json!({"threadId": id, "actor": "agent"})).is_err());
+    assert_eq!(s.execute("agent.codexOrigin", json!({"actor": "agent"})).unwrap()["threadId"], "");
+    let saved = s.execute("agent.codexOrigin", json!({"threadId": id, "title": "Origin chat"})).unwrap();
+    for status in ["linked", "linkMissing", "fallback"] {
+        let route = s.execute("agent.codexRoute", json!({"status": status, "threadId": id, "title": "Link chat"})).unwrap();
+        assert_eq!(route["status"], status);
+        assert_eq!(s.execute("agent.codexOrigin", json!({})).unwrap(), saved);
+    }
+    s.execute("agent.codexRoute", json!({"status": "fresh", "threadId": id, "title": "New chat"})).unwrap();
+    assert!(s.execute("agent.codexRoute", json!({"status": "matched", "actor": "agent"})).is_err());
+    let mut wb = (*s.active().unwrap().wb).clone();
+    layer::write_into(&mut wb, &layer::get(s.active().unwrap()));
+    let loaded = layer::read_from(&wb);
+    assert_eq!(loaded.context.as_ref().unwrap().codex_thread_id, id);
+    assert_eq!(loaded.context.as_ref().unwrap().codex_thread_title, "Origin chat");
+    assert!(!serde_json::to_string(&loaded).unwrap().contains("New chat"));
+    // Ordinary context changes preserve origin; app defaults for another file clear it.
+    s.execute("agent.agentContext", json!({"kind": "codex"})).unwrap();
+    assert_eq!(s.execute("agent.codexOrigin", json!({})).unwrap(), saved);
+    s.new_workbook();
+    assert_eq!(s.execute("agent.codexOrigin", json!({})).unwrap()["threadId"], "");
+    assert!(crate::context::codex_route_for(s.active().unwrap().uid).is_none());
+    crate::context::forget_last();
+    crate::runner::set_mode(crate::runner::Mode::Manual);
+}
+
+#[test]
 fn context_is_per_document_saved_in_it_and_undoable() {
     use crate::context;
     use crate::layer::{CodeVia, ContextKind};
