@@ -116,6 +116,7 @@ impl KeyTips {
                                     actions.push(Action::Tab(tab));
                                 }
                                 Some(keytip_table::Entry::Continue) => self.prefix = Some(next),
+                                None if let Some(tab) = crate::ext::keytip_tab(&next) => self.finish(Action::Tab(tab), &mut actions), // fork:agent
                                 Some(keytip_table::Entry::Finish(action)) => self.finish(action, &mut actions),
                                 // No complete sequence, but deeper ones start here: wait for
                                 // more input (Excel's two-letter units like Draw's "JI").

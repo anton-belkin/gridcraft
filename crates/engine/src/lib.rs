@@ -11,6 +11,7 @@ pub mod cf;
 mod clip_html;
 pub mod cmd;
 pub mod display;
+pub mod ext; // fork:agent — extension commands and observers
 pub mod fill;
 pub mod io;
 pub mod links;
@@ -61,6 +62,7 @@ pub struct HistoryEntry {
     pub label: String,
     pub wb: Arc<Workbook>,
     pub selection: Selection,
+    pub step: Option<Arc<dyn ext::UndoStep>>, // fork:agent — an extension's own step instead of a snapshot
 }
 
 /// The clipboard: a block of cells (with formulas and styles) or marching-ants reference.
@@ -310,7 +312,7 @@ impl Session {
     }
 
     pub fn commands(&self) -> Vec<CommandInfo> {
-        command_specs().iter().map(|c| c.info(self)).collect()
+        command_specs().iter().chain(ext::commands()).map(|c| c.info(self)).collect() // fork:agent — + extension commands
     }
 
     /// Runs a command by id. Undoable commands record a history step when the workbook changed.
@@ -320,8 +322,9 @@ impl Session {
         if let Err(why) = (spec.enabled)(self) {
             return Err(EngineError::Disabled(id.to_string(), why));
         }
-        let before = self.active().map(|d| (d.uid, d.wb.clone(), d.selection.clone()));
         let params = if params.is_null() { Json::Object(Default::default()) } else { params };
+        ext::before(self, id, &params); // fork:agent
+        let before = self.active().map(|d| (d.uid, d.wb.clone(), d.selection.clone()));
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| (spec.run)(self, &params)));
         let result = match result {
             Ok(r) => r,
@@ -350,13 +353,14 @@ impl Session {
             && let Some(d) = self.docs.iter_mut().find(|d| d.uid == uid)
             && !Arc::ptr_eq(&d.wb, &wb)
         {
-            d.undo.push(HistoryEntry { label: spec.label.trim_end_matches('…').to_string(), wb, selection: sel });
+            d.undo.push(HistoryEntry { label: spec.label.trim_end_matches('…').to_string(), wb, selection: sel, step: None }); // fork:agent
             if d.undo.len() > UNDO_LIMIT {
                 d.undo.remove(0);
             }
             d.redo.clear();
             d.revision += 1;
         }
+        ext::after(self, id, &params, &result); // fork:agent
         result
     }
 

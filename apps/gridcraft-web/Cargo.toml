@@ -16,6 +16,8 @@ path = "src/main.rs"
 [dependencies]
 gridcraft-engine = { workspace = true }
 gridcraft-ui-egui = { workspace = true }
+gridcraft-agent = { workspace = true } # fork:agent
+gridcraft-agent-ui = { workspace = true } # fork:agent
 egui = { workspace = true }
 log = { workspace = true }
 serde_json = { workspace = true }

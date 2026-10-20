@@ -38,6 +38,9 @@ pub const TABLE: &[(&str, Class)] = &[
     ("engine", Class::Layer(5)),
     ("ui-egui", Class::Layer(6)),
     ("mcp", Class::Layer(6)),
+    // fork:agent — the agent layer sits beside the UI and MCP, ordered within L6 (`FORK_ORDER`)
+    ("agent", Class::Layer(6)),
+    ("agent-ui", Class::Layer(6)),
     // L7 apps (exempt) and tooling (unchecked)
     ("gridcraft", Class::Layer(7)),
     ("cli", Class::Layer(7)),
@@ -49,8 +52,14 @@ pub const TABLE: &[(&str, Class)] = &[
 /// `calc` and `xlsx` both build on `model` but not on each other.
 pub const INTRA_LAYER_ORDER: &[&[&str]] = &[&["core", "numfmt"], &["formula", "functions"], &["model", "calc"], &["model", "xlsx"]];
 
+/// fork:agent — orderings of the agent layer's crates within L6.
+const FORK_ORDER: &[(&str, &str)] = &[("agent", "mcp"), ("agent-ui", "agent"), ("agent-ui", "mcp"), ("agent-ui", "ui-egui")];
+
 fn intra_layer_allowed(from: &str, to: &str) -> bool {
     let (from, to) = (short_name(from), short_name(to));
+    if FORK_ORDER.contains(&(from, to)) {
+        return true; // fork:agent
+    }
     INTRA_LAYER_ORDER.iter().any(|chain| match (chain.iter().position(|n| *n == from), chain.iter().position(|n| *n == to)) {
         (Some(f), Some(t)) => t < f,
         _ => false,

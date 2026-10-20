@@ -14,6 +14,7 @@ pub mod control;
 pub mod credits;
 pub mod dialogs;
 pub mod editor;
+pub mod ext; // fork:agent — UI extension points
 pub mod fonts;
 pub mod formula_bar;
 mod formula_locale;
@@ -1106,6 +1107,7 @@ impl SheetApp {
         if self.backstage.is_none() {
             self.ribbon_keys(&ctx);
         }
+        ext::frame(self, &ctx); // fork:agent
         ribbon::title_bar(self, ui);
         if self.backstage.is_some() {
             // File tab: the Backstage view replaces everything below the title bar.
@@ -1121,6 +1123,7 @@ impl SheetApp {
             }
             tabs::sheet_tabs(self, ui);
             pivot_pane::show(self, ui);
+            ext::side_panels(self, ui); // fork:agent
             panes::show(self, ui);
             egui::CentralPanel::default().frame(egui::Frame::NONE.fill(t.grid_bg)).show(ui, |ui| {
                 let g0 = now_ms();
@@ -1217,7 +1220,8 @@ impl SheetApp {
         // A named range that exactly matches shows its name.
         let sh = d.wb.active();
         if let Some(sh) = sh {
-            for n in &d.wb.names {
+            for n in d.wb.names.iter().filter(|n| !n.hidden) {
+                // fork:agent — hidden names stay hidden (as in Excel)
                 let target = n.formula.replace('$', "");
                 let (sheet, body) = match target.rsplit_once('!') {
                     Some((s, b)) => (Some(s.trim_matches('\'').to_string()), b.to_string()),

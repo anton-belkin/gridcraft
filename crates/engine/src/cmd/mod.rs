@@ -149,8 +149,8 @@ pub fn command_specs() -> &'static [CommandSpec] {
 }
 
 pub fn find_command(id: &str) -> Option<&'static CommandSpec> {
-    if let Some(spec) = command_specs().iter().find(|c| c.id == id) {
-        return Some(spec);
+    if let Some(spec) = command_specs().iter().find(|c| c.id == id).or_else(|| crate::ext::find(id)) {
+        return Some(spec); // fork:agent — extension commands too
     }
     // Commands registered by UI integration tests (pending keytips go live
     // the moment their command lands, with no table edit).

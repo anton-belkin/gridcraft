@@ -24,6 +24,9 @@ gridcraft-engine = { path = "crates/engine" }
 gridcraft-ui-egui = { path = "crates/ui-egui" }
 gridcraft-mcp = { path = "crates/mcp" }
 gridcraft-pdf = { path = "crates/pdf" }
+# fork:agent — the agent layer
+gridcraft-agent = { path = "crates/agent" }
+gridcraft-agent-ui = { path = "crates/agent-ui" }
 
 # foundation
 thiserror = "2"

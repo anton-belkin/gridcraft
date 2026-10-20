@@ -599,9 +599,11 @@ fn undo(s: &mut Session, p: &Json) -> Result<Json> {
     let d = s.doc_mut()?;
     let mut label = String::new();
     let now = d.wb.clone();
+    let mut own = Vec::new(); // fork:agent
     for _ in 0..steps {
         let Some(e) = d.undo.pop() else { break };
-        let cur = crate::HistoryEntry { label: e.label.clone(), wb: d.wb.clone(), selection: d.selection.clone() };
+        let Some(e) = crate::ext::take_step(e, &mut d.redo, &mut label, &mut own) else { continue }; // fork:agent
+        let cur = crate::HistoryEntry { label: e.label.clone(), wb: d.wb.clone(), selection: d.selection.clone(), step: None }; // fork:agent
         d.redo.push(cur);
         label = e.label.clone();
         d.wb = e.wb;
@@ -610,6 +612,7 @@ fn undo(s: &mut Session, p: &Json) -> Result<Json> {
     super::extra::keep_watch_list(&now, &mut d.wb);
     d.calc.rebuild(&d.wb);
     d.revision += 1;
+    crate::ext::run_steps(s, own, true); // fork:agent
     Ok(json!({"undone": label}))
 }
 
@@ -618,9 +621,11 @@ fn redo(s: &mut Session, p: &Json) -> Result<Json> {
     let d = s.doc_mut()?;
     let mut label = String::new();
     let now = d.wb.clone();
+    let mut own = Vec::new(); // fork:agent
     for _ in 0..steps {
         let Some(e) = d.redo.pop() else { break };
-        let cur = crate::HistoryEntry { label: e.label.clone(), wb: d.wb.clone(), selection: d.selection.clone() };
+        let Some(e) = crate::ext::take_step(e, &mut d.undo, &mut label, &mut own) else { continue }; // fork:agent
+        let cur = crate::HistoryEntry { label: e.label.clone(), wb: d.wb.clone(), selection: d.selection.clone(), step: None }; // fork:agent
         d.undo.push(cur);
         label = e.label.clone();
         d.wb = e.wb;
@@ -629,6 +634,7 @@ fn redo(s: &mut Session, p: &Json) -> Result<Json> {
     super::extra::keep_watch_list(&now, &mut d.wb);
     d.calc.rebuild(&d.wb);
     d.revision += 1;
+    crate::ext::run_steps(s, own, false); // fork:agent
     Ok(json!({"redone": label}))
 }
 
@@ -1246,6 +1252,9 @@ fn clear(s: &mut Session, p: &Json, what: &str) -> Result<Json> {
             };
             let cells: Vec<(CellRef, Cell)> =
                 cx.wb.sheet(sheet).map(|sh| sh.cells.iter_range(r).map(|(c, x)| (c, x.clone())).collect()).unwrap_or_default();
+            // Report every stored cell we touch, even beyond a million coordinates in a sparse
+            // selection. Removed formula anchors must also reach calc so their spills disappear.
+            cx.changed.extend(cells.iter().map(|(c, _)| (sheet, *c)));
             let mut cells = cells;
             if what == "contents" {
                 for (_, cell) in cells.iter_mut() {
@@ -1284,10 +1293,24 @@ fn clear(s: &mut Session, p: &Json, what: &str) -> Result<Json> {
                 sh.hyperlinks.retain(|c, _| !r.contains(*c));
             }
             if matches!(what, "all" | "formats") {
-                sh.merges.retain(|m| !r.contains_range(m));
-            }
-            for c in r.iter().take(1_000_000) {
-                cx.changed.push((sheet, c));
+                let mut unmerged = false;
+                sh.merges.retain(|m| {
+                    let keep = !r.contains_range(m);
+                    unmerged |= !keep;
+                    keep
+                });
+                if unmerged {
+                    // An empty merge can block a spill without storing any cells in this range.
+                    // As in Unmerge, retry blocked formula anchors that could reach the freed area.
+                    let reach = RangeRef::new(CellRef::new(0, 0), r.end);
+                    let blocked: Vec<_> = sh
+                        .cells
+                        .iter_range(reach)
+                        .filter(|(_, cell)| cell.formula.is_some() && cell.value == Value::Error(gridcraft_core::CellError::Spill))
+                        .map(|(c, _)| (sheet, c))
+                        .collect();
+                    cx.changed.extend(blocked);
+                }
             }
         }
         Ok(Json::Null)

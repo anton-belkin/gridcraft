@@ -8,6 +8,7 @@
 #![cfg_attr(all(target_os = "windows", not(debug_assertions)), windows_subsystem = "windows")]
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 
+mod agent; // fork:agent
 #[cfg(target_os = "macos")]
 mod apple_events;
 mod control_server;
@@ -230,6 +231,7 @@ fn icon() -> Option<egui::IconData> {
 }
 
 fn main() -> eframe::Result<()> {
+    agent::stdio_if_asked(); // fork:agent — `--agent-stdio` serves MCP over stdio and exits
     // First, so the panic hook and every start-up warning are recorded (`logging`).
     let logger = logging::install();
     // Commands catch their panics (`Session::execute`), but the default hook only prints to
@@ -251,6 +253,7 @@ fn main() -> eframe::Result<()> {
         }
     }));
     let args: Vec<String> = std::env::args().skip(1).collect();
+    let (args, agent_port) = agent::take_args(args); // fork:agent
     if args.iter().any(|a| a == "--version" || a == "-V") {
         println!("GridCraft {}", env!("CARGO_PKG_VERSION"));
         return Ok(());
@@ -300,7 +303,7 @@ fn main() -> eframe::Result<()> {
     let mut app = SheetApp::new(session, services());
     app.watch_desktop_theme();
     app.after_engine(); // Show warnings from the sample.
-    let control_port = control_port;
+    let control_port = agent::control_port(agent_port, control_port); // fork:agent
     load_prefs(&mut app);
     // Files named on the command line (a double-click on Windows and Linux) open as File › Open
     // opens them: a password-protected one asks for its password, and errors are shown, not
@@ -357,6 +360,7 @@ fn main() -> eframe::Result<()> {
                         Err(e) => log::error!("control channel on port {port}: {e}"),
                     }
                 }
+                agent::start(agent_port, control_port); // fork:agent
                 Ok(Box::new(App(
                     app,
                     #[cfg(target_os = "macos")]

@@ -178,6 +178,7 @@ pub fn show(app: &mut SheetApp, ui: &mut Ui) {
                     ui.add_space(8.0);
                     file_menu(app, ui);
                     let mut tabs: Vec<&str> = TABS.to_vec();
+                    tabs.extend(crate::ext::ribbon_tabs()); // fork:agent — extension tabs
                     let ctx_tabs = contextual_tabs(app);
                     tabs.extend(ctx_tabs.iter());
                     for tab in tabs {
@@ -213,8 +214,9 @@ pub fn show(app: &mut SheetApp, ui: &mut Ui) {
                         if resp.double_clicked() {
                             app.ui.ribbon_collapsed = !collapsed;
                         }
+                        // fork:agent — extension tabs have keytips too (`.or_else` below)
                         if app.keytips.prefix() == Some("")
-                            && let Some(sequence) = keytip_table::tab_sequence(tab)
+                            && let Some(sequence) = keytip_table::tab_sequence(tab).or_else(|| crate::ext::tab_keytip(tab))
                         {
                             keytip(app, ui, sequence, pos2(r.center().x, r.bottom() - 1.0));
                         }
@@ -233,6 +235,7 @@ pub fn show(app: &mut SheetApp, ui: &mut Ui) {
                 egui::ScrollArea::horizontal().scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden).show(ui, |ui| {
                     ui.horizontal(|ui| {
                         ui.spacing_mut().item_spacing = vec2(2.0, 2.0);
+                        crate::ext::ribbon_tab(app, ui); // fork:agent — an extension's tab draws itself
                         match app.ui.ribbon_tab.as_str() {
                             "Home" => home(app, ui),
                             "Insert" => insert(app, ui),
@@ -246,6 +249,7 @@ pub fn show(app: &mut SheetApp, ui: &mut Ui) {
                             "Table Design" => table_design(app, ui),
                             "Chart Design" => chart_design(app, ui),
                             crate::paper_view::TAB => crate::paper_view::ribbon_tab(app, ui),
+                            tab if crate::ext::is_ribbon_tab(tab) => {} // fork:agent
                             _ => home(app, ui),
                         }
                     });
