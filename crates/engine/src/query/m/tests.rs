@@ -439,6 +439,9 @@ fn hand_written_date_functions() {
         ("Date.DayOfWeek(#date(2026, 5, 17), Day.Monday)", "6"),
         ("Date.DayOfWeekName(#date(2026, 5, 17))", "\"Sunday\""),
         ("Date.DayOfWeekName(#date(2026, 5, 17), \"nl-NL\")", "\"zondag\""),
+        ("Date.DayOfWeekName(#date(2026, 5, 17), \"pt-BR\")", "\"domingo\""),
+        ("Date.MonthName(#date(2026, 3, 1), \"it-IT\")", "\"marzo\""),
+        ("Date.ToText(#date(2026, 5, 17), [Format=\"d\", Culture=\"pt-BR\"])", "\"17/05/2026\""),
         ("Date.MonthName(#date(2026, 5, 17), \"de-DE\")", "\"Mai\""),
         ("Date.QuarterOfYear(#date(2026, 5, 17))", "2"),
         ("Date.DayOfYear(#date(2026, 5, 17))", "137"),
@@ -652,6 +655,13 @@ fn hostile_formulas_end_in_errors() {
     assert!(run("{1..1000000000000}").is_err());
     assert!(run("Table.Group(#table({\"A\"}, {{1}}), \"A\", {\"x\"})").is_err());
     assert!(run("Table.RenameColumns(#table({\"A\", \"B\"}, {}), {\"A\", \"B\"})").unwrap_err().message.contains("already exists"));
+    // A million rows of 16,000 columns is refused before it takes the machine's memory, and
+    // `try` doesn't catch the limit.
+    let wide = "Table.FromColumns(List.Repeat({{1..1000000}}, 16000))";
+    assert_eq!(run(wide).unwrap_err().reason, super::eval::LIMIT);
+    assert!(run(&format!("try Table.RowCount({wide}) otherwise 0")).is_err());
+    let split = "Table.SplitColumn(Table.FromColumns({{1..1000000}}), \"Column1\", each {}, 16000)";
+    assert_eq!(run(split).unwrap_err().reason, super::eval::LIMIT);
     // Deep nesting is refused by the parser (no stack overflow).
     assert!(parser::parse(&format!("{}1{}", "(".repeat(5000), ")".repeat(5000))).is_err());
     let _ = run(&format!("{}1{}", "{".repeat(150), "}".repeat(150)));

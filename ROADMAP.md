@@ -2,7 +2,7 @@
 
 **Stage: alpha** · next: beta, ~25 points of "ready for real work" and ~160–240 h away
 
-> **Last reviewed:** 2026-10-11 · **Last updated:** 2026-10-15 · **Change:** minor (Excel's Power Query queries refresh through an M interpreter) · **Target:** Microsoft Excel (Microsoft 365)
+> **Last reviewed:** 2026-10-11 · **Last updated:** 2026-10-20 · **Change:** trivial (full-parity hours are the sum of the dimension rows, 660–1,080; the M library comes on top) · **Target:** Microsoft Excel (Microsoft 365)
 
 GridCraft aims at full Microsoft Excel parity, and at being better in places: faster, open (XLSX
 is the native format), fully scriptable by agents (MCP, control channel, CLI), and on the web.
@@ -22,11 +22,11 @@ This page is the summary. The detail is in:
 | Number | Value | Kind |
 |---|---|---|
 | **Feature breadth** (weighted) | **~77%** | estimated, anchored on two measurements: ribbon catalog 294 / 309 (95.1%), worksheet functions 513 / 523 (98.1%; 506 working, 96.7%) |
-| **Ready for real work** | **~50%** | estimated from written weights (51.6); [target-app-parity.md](docs/target-app-parity.md) |
+| **Ready for real work** | **~50%** | estimated from written weights (52.5); [target-app-parity.md](docs/target-app-parity.md) |
 | **Mainstream practitioner** | **~50%** | estimated: typical analyst/finance user, weekly features, × 0.90 interaction × 0.92 stability × 0.88 file exchange; [method](docs/target-app-parity.md#mainstream-practitioner) |
 | **Essentials user** | **~63%** | estimated: core features only, × 0.92 launch/stability × 0.95 clarity × 0.90 opening sent files; [method](docs/target-app-parity.md#essentials-user) |
 | Remaining to **beta** | **~160–240 Opus 5.5 agent-hours** | estimated; itemized in [roadmap.md](docs/roadmap.md#beta-gates) |
-| Remaining to **full parity** | **~670–1,060 Opus 5.5 agent-hours** | estimated; sum of the dimension rows below |
+| Remaining to **full parity** | **~660–1,080 Opus 5.5 agent-hours** | estimated; sum of the dimension rows below; the rest of the M library (100–170 h, [gaps.md](docs/gaps.md) §12) comes on top |
 
 | Audience | Ready % | Opus 5.5 agent wall-clock hours to ~95% | Work that dominates |
 |---|---|---|---|
@@ -67,7 +67,7 @@ collaboration, mobile, AI).
 | Platforms | ~80% (no iOS/Android; ahead on Linux, BSD, RISC-V) | 30–60 | [target-app-parity.md](docs/target-app-parity.md#platforms) |
 | Ecosystem / add-ins | ~10% (VBA out of scope; own scripts, MCP, CLI) | 25–40 | [target-app-parity.md](docs/target-app-parity.md#ecosystem-and-ai) |
 | AI features | ~15% (agent control strong; no in-app assistant) | 30–50 | [target-app-parity.md](docs/target-app-parity.md#ecosystem-and-ai) |
-| **Total** | **~50%** | **~670–1,060** | |
+| **Total** | **~50%** | **~660–1,080** (+100–170 M library) | |
 
 ## Features
 
@@ -196,6 +196,7 @@ Ranked; estimates in Opus 5.5 agent-hours. Detail and the full beta-gate list in
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-20 | trivial | Full-parity hours recomputed from the dimension rows (660–1,080); the rest of the M library (100–170 h) stated as coming on top; computed readiness 52.5 |
 | 2026-10-15 | minor | Get & Transform ~65% breadth / ~50% ready: Excel's Power Query queries refresh through an M interpreter; progress log row |
 | 2026-10-12 | minor | Rows auto-fit oversized fonts on open and whole-row/column formatting (#833); progress log row |
 | 2026-10-12 | minor | Progress log: multi-area row/column delete (#758) |

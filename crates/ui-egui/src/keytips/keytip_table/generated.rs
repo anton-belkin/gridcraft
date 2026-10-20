@@ -270,7 +270,7 @@ pub const SEQUENCES: &[(&str, Entry)] = &[
     ("AFF", Entry::Finish(Action::Command("edit.flashFill"))),     // Excel: Flash Fill
     ("AFO", Entry::Finish(Action::Pending("data.fromOtherSources"))), // pending; Excel: Get External Data: From Other Sources; gap #12; reserved until the command lands
     ("AFT", Entry::Finish(Action::Command("data.fromTextCsv"))), // Excel: Get External Data: From Text; Legacy Get External Data: From Text; GridCraft imports it as a query (From Text/CSV)
-    ("AFW", Entry::Finish(Action::Command("data.fromWeb"))),     // Excel: Get External Data: From Web
+    ("AFW", Entry::Finish(Action::Dialog("fromWeb"))),           // Excel: Get External Data: From Web
     ("AG", Entry::Continue),                                     // Excel: Group Menu; group level: containment(Group)
     ("AGA", Entry::Finish(Action::Pending("data.autoOutline"))), // pending; Excel: Auto Outline; Auto Outline; reserved until the command lands
     ("AGG", Entry::Finish(Action::Command("data.group"))),       // Excel: Group
@@ -284,8 +284,8 @@ pub const SEQUENCES: &[(&str, Entry)] = &[
     ("APND", Entry::Finish(Action::Command("data.fromMicrosoftQuery"))), // Excel: From Database (Microsoft Query); Microsoft Query is disabled with its reason
     ("APNE", Entry::Finish(Action::Command("data.powerQueryEditor"))),   // Excel: Launch Power Query Editor
     ("APNG", Entry::Finish(Action::Command("data.getData"))),            // Excel: Get Data (Power Query); containment(Get Data)
-    ("APNH", Entry::Finish(Action::Command("data.fromWeb"))), // Excel: From HTML; Legacy From HTML; GridCraft reads HTML tables with From Web
-    ("APNL", Entry::Finish(Action::Command("data.fromSqlServer"))), // Excel: From SQL Server ODBC
+    ("APNH", Entry::Finish(Action::Dialog("fromWeb"))), // Excel: From HTML; Legacy From HTML; GridCraft reads HTML tables with From Web
+    ("APNL", Entry::Finish(Action::Dialog("fromSqlServer"))), // Excel: From SQL Server ODBC
     ("APNS", Entry::Finish(Action::Command("data.dataSourceSettings"))), // Excel: Data Source Settings
     ("APNT", Entry::Finish(Action::Command("data.fromTextCsv"))), // Excel: From Text (Legacy); Legacy From Text; GridCraft imports it as a query (From Text/CSV)
     ("APR", Entry::Finish(Action::Command("data.recentSources"))), // Excel: Recent Sources

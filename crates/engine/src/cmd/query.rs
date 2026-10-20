@@ -1410,8 +1410,8 @@ fn enable_content(s: &mut Session, _: &Json) -> Result<Json> {
         d.calc.recalc_all(&mut wb);
         d.wb = std::sync::Arc::new(wb);
     }
-    let idx: Vec<usize> = s.doc()?.wb.queries.iter().enumerate().filter(|(_, q)| q.refresh.on_open).map(|(i, _)| i).collect();
-    let refreshed = if idx.is_empty() { json!(null) } else { refresh_indices(s, idx, vec![], true, None)? };
+    let (idx, excel) = refresh_on_open(&s.doc()?.wb);
+    let refreshed = if idx.is_empty() && excel.is_empty() { json!(null) } else { refresh_indices(s, idx, excel, true, None)? };
     Ok(json!({"enabled": true, "refreshed": refreshed}))
 }
 
@@ -1792,11 +1792,19 @@ fn m_text(s: &mut Session, p: &Json) -> Result<Json> {
 /// about).
 pub fn has_external_content(wb: &gridcraft_model::Workbook) -> bool {
     wb.queries.iter().any(|q| reaches_outside(wb, q, 0))
+        || wb.excel_queries.iter().any(|q| m::reaches_outside(&q.formula))
         || wb.sheets.iter().any(|sh| {
             sh.cells
                 .iter()
                 .any(|(_, c)| c.formula.as_ref().is_some_and(|f| f.text.len() >= 10 && f.text.to_ascii_uppercase().contains("WEBSERVICE(")))
         })
+}
+
+/// The queries set to refresh when the file opens: GridCraft's (by index) and Excel's (by name).
+fn refresh_on_open(wb: &gridcraft_model::Workbook) -> (Vec<usize>, Vec<String>) {
+    let idx = wb.queries.iter().enumerate().filter(|(_, q)| q.refresh.on_open).map(|(i, _)| i).collect();
+    let excel = wb.excel_queries.iter().filter(|q| q.refresh_on_open).map(|q| q.name.clone()).collect();
+    (idx, excel)
 }
 
 /// After a workbook is opened from a file: blocks its external content under the Prompt
@@ -1822,10 +1830,10 @@ pub fn after_open(s: &mut Session) -> Result<bool> {
                 d.calc.recalc_all(&mut wb);
                 d.wb = std::sync::Arc::new(wb);
             }
-            let idx: Vec<usize> = s.doc()?.wb.queries.iter().enumerate().filter(|(_, q)| q.refresh.on_open).map(|(i, _)| i).collect();
-            if !idx.is_empty() {
+            let (idx, excel) = refresh_on_open(&s.doc()?.wb);
+            if !idx.is_empty() || !excel.is_empty() {
                 // A failed refresh shows in the queries' status, not as a failed open.
-                let _ = refresh_indices(s, idx, vec![], true, None);
+                let _ = refresh_indices(s, idx, excel, true, None);
             }
             Ok(false)
         }

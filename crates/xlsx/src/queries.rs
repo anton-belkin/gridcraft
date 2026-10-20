@@ -50,16 +50,24 @@ pub fn read(cx: &mut Ctx<'_>, wb_rels: &[Rel]) -> (Vec<Query>, Vec<String>) {
         if let Ok(item_rels) = cx.pkg.rels(&r.target) {
             parts.extend(item_rels.into_iter().filter(|x| !x.external).map(|x| x.target));
         }
-        match serde_json::from_str::<Vec<Query>>(root.text.trim()) {
-            Ok(mut queries) => {
-                queries.truncate(gridcraft_model::query::MAX_QUERIES);
-                return (queries, parts);
-            }
-            Err(e) => {
-                cx.warn(format!("GridCraft's query definitions could not be read and were dropped: {e}"));
-                return (vec![], parts);
-            }
+        // Each query on its own: one this version can't read (a newer GridCraft's step, say)
+        // doesn't take the others with it.
+        let Ok(items) = serde_json::from_str::<Vec<serde_json::Value>>(root.text.trim()) else {
+            // Not even a list: the part is kept as it is (written back unchanged) and nothing is read.
+            cx.warn("GridCraft's query definitions could not be read; they are kept in the file unchanged");
+            return (vec![], vec![]);
+        };
+        let total = items.len();
+        let mut queries: Vec<Query> = items.into_iter().filter_map(|q| serde_json::from_value(q).ok()).collect();
+        let unreadable = total - queries.len();
+        if unreadable > 0 {
+            cx.warn(format!("{unreadable} of GridCraft's {total} queries could not be read and were dropped"));
         }
+        if queries.len() > gridcraft_model::query::MAX_QUERIES {
+            cx.warn(format!("The workbook has {} queries; GridCraft keeps the first {}", queries.len(), gridcraft_model::query::MAX_QUERIES));
+            queries.truncate(gridcraft_model::query::MAX_QUERIES);
+        }
+        return (queries, parts);
     }
     (vec![], vec![])
 }

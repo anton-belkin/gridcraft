@@ -107,6 +107,19 @@ impl MRecord {
     }
 }
 
+/// Most cells (rows × columns) one table may hold: a short formula could otherwise ask for more
+/// memory than the machine has (a million rows of 16,000 columns).
+pub const MAX_CELLS: usize = 64 * 1024 * 1024;
+
+/// Refuses a table of `rows` × `width` cells past `MAX_CELLS`. The error ends the refresh, as the
+/// other limits do (`try` doesn't catch it).
+pub fn check_cells(rows: usize, width: usize) -> MResult<()> {
+    if rows.saturating_mul(width.max(1)) > MAX_CELLS {
+        return Err(super::eval::limit(format!("A table can hold at most {MAX_CELLS} cells here.")));
+    }
+    Ok(())
+}
+
 /// A table: column names, the type each column is known to have, and rows as wide as the
 /// columns.
 #[derive(Clone, Debug, Default)]
@@ -130,11 +143,13 @@ impl MTable {
     pub fn row_record(&self, row: &[MValue]) -> MRecord {
         MRecord { names: self.names.clone(), values: row.to_vec() }
     }
-    /// Adds a row, padded or cut to the table's width; rows past `MAX_ROWS` are refused.
+    /// Adds a row, padded or cut to the table's width; rows past `MAX_ROWS` are refused, and so
+    /// is a row that takes the table past `MAX_CELLS`.
     pub fn push(&mut self, mut row: Vec<MValue>) -> MResult<()> {
         if self.rows.len() >= super::super::MAX_ROWS {
             return Err(MError::expr(format!("A table can hold at most {} rows here.", super::super::MAX_ROWS)));
         }
+        check_cells(self.rows.len() + 1, self.width())?;
         row.resize(self.width(), MValue::Null);
         self.rows.push(row);
         Ok(())

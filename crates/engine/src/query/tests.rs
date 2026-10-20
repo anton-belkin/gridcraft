@@ -694,6 +694,32 @@ fn trust_prompt_blocks_external_content_until_enabled() {
 }
 
 #[test]
+fn trust_prompt_blocks_a_workbook_whose_only_external_source_is_an_excel_query() {
+    let fake = Arc::new(Fake::default());
+    fake.file("/d/sales.csv", b"Region,Amount\nWest,9\n");
+    let formula = "let\r\n    Source = Csv.Document(File.Contents(\"/d/sales.csv\"),[Delimiter=\",\", Columns=2]),\r\n    #\"Promoted Headers\" = Table.PromoteHeaders(Source, [PromoteAllScalars=true])\r\nin\r\n    #\"Promoted Headers\"";
+    let bytes = gridcraft_xlsx::testing::power_query_workbook(formula);
+    let mut s = Session::new();
+    s.set_data_access(fake.clone());
+    let r = s.execute("file.open", json!({"name": "pq.xlsx", "base64": crate::io::base64_encode(&bytes)})).unwrap();
+    assert_eq!(r["externalBlocked"], true);
+    // Refresh doesn't read the file while the content is blocked.
+    let blocked = match s.execute("data.refreshAll", json!({})) {
+        Ok(_) => s.doc().unwrap().wb.excel_queries[0].error.clone().unwrap_or_default(),
+        Err(e) => e.to_string(),
+    };
+    assert!(blocked.contains("Security Warning"), "{blocked}");
+    assert_eq!(cell(&s, "Data", "A2"), Value::text("North"));
+    s.execute("data.enableContent", json!({})).unwrap();
+    s.execute("data.refreshAll", json!({})).unwrap();
+    assert_eq!(cell(&s, "Data", "A2"), Value::text("West"));
+    // A workbook whose Excel queries only read the workbook itself opens unblocked.
+    let local = gridcraft_xlsx::testing::power_query_workbook("Excel.CurrentWorkbook(){[Name=\"Raw\"]}[Content]");
+    let r = s.execute("file.open", json!({"name": "local.xlsx", "base64": crate::io::base64_encode(&local)})).unwrap();
+    assert_eq!(r["externalBlocked"], false);
+}
+
+#[test]
 fn webservice_and_filterxml_through_the_fetcher() {
     let fake = Arc::new(Fake::default());
     fake.page("https://api.example.com/xml", "application/xml", "<r><v>1</v><v>2</v><v>three</v></r>");
@@ -927,4 +953,10 @@ fn an_excel_workbook_refreshes_and_keeps_its_power_query_parts() {
     let (again, _) = crate::io::open_bytes("pq.xlsx", &out).unwrap();
     assert_eq!(again.excel_queries.len(), 1);
     assert_eq!(again.excel_queries[0].table.as_deref(), Some("Sales"));
+    // Renaming the table keeps the query loading into it.
+    s.execute("table.rename", json!({"table": "Sales", "name": "Revenue"})).unwrap();
+    assert_eq!(s.doc().unwrap().wb.excel_queries[0].table.as_deref(), Some("Revenue"));
+    let r = s.execute("data.refreshAll", json!({})).unwrap();
+    assert_eq!(r["excelQueries"][0]["rows"], 3, "{r}");
+    assert_eq!(cell(&s, "Data", "A2"), Value::text("East"));
 }

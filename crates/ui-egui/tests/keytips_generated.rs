@@ -1966,7 +1966,7 @@ fn keytip_aft_() {
 fn keytip_afw_() {
     let mut h = harness(blank());
     sequence(&mut h, "AFW", false);
-    assert!(h.state().message.is_some() || h.state().toast.is_some(), "AFW must invoke data.fromWeb and surface its missing-params error");
+    assert!(h.state().dialog.is_some(), "AFW must open the fromWeb dialog");
 }
 
 #[test]
@@ -2070,14 +2070,14 @@ fn keytip_apng_() {
 fn keytip_apnh_() {
     let mut h = harness(blank());
     sequence(&mut h, "APNH", false);
-    assert!(h.state().message.is_some() || h.state().toast.is_some(), "APNH must invoke data.fromWeb and surface its missing-params error");
+    assert!(h.state().dialog.is_some(), "APNH must open the fromWeb dialog");
 }
 
 #[test]
 fn keytip_apnl_() {
     let mut h = harness(blank());
     sequence(&mut h, "APNL", false);
-    assert!(h.state().message.is_some() || h.state().toast.is_some(), "APNL must invoke data.fromSqlServer and surface its missing-params error");
+    assert!(h.state().dialog.is_some(), "APNL must open the fromSqlServer dialog");
 }
 
 #[test]

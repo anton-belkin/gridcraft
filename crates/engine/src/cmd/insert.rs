@@ -522,6 +522,11 @@ fn table_rename(s: &mut Session, p: &Json) -> Result<Json> {
                 n.clone_from(&name);
             }
         }
+        for q in cx.wb.excel_queries.iter_mut() {
+            if q.table.as_deref().is_some_and(|t| t.eq_ignore_ascii_case(&old)) {
+                q.table = Some(name.clone());
+            }
+        }
         cx.structural = true;
         Ok(Json::Null)
     })

@@ -10,6 +10,9 @@ use odbc_api::{ConnectionOptions, Cursor, DataType, ResultSetMetadata};
 const BATCH: usize = 500;
 /// Longest text read from one field.
 const MAX_FIELD: usize = 32_767;
+/// Bytes one batch's buffer may take: wide text columns (`varchar(max)`, memo) each reserve the
+/// longest field for every row of the batch.
+const BATCH_BYTES: usize = 64 * 1024 * 1024;
 /// Most columns read.
 const MAX_COLUMNS: usize = 16_384;
 /// Seconds a statement may run.
@@ -128,7 +131,11 @@ fn run(conn: &odbc_api::Connection<'_>, sql: &str, max_rows: usize) -> Result<Db
         columns.push(cursor.col_name(col).unwrap_or_else(|_| format!("Column{i}")));
         kinds.push(cursor.col_data_type(col).map(kind).unwrap_or(Kind::Text));
     }
-    let buffer = TextRowSet::for_cursor(BATCH, &mut cursor, Some(MAX_FIELD)).map_err(fail)?;
+    // Fewer rows per batch, and shorter fields when there are very many columns, so one batch
+    // stays within BATCH_BYTES however many wide columns the result has.
+    let field = (BATCH_BYTES / n.max(1)).saturating_sub(1).clamp(255, MAX_FIELD);
+    let rows_per_batch = (BATCH_BYTES / n.max(1).saturating_mul(field + 1)).clamp(1, BATCH);
+    let buffer = TextRowSet::for_cursor(rows_per_batch, &mut cursor, Some(field)).map_err(fail)?;
     let mut block = cursor.bind_buffer(buffer).map_err(fail)?;
     let mut rows: Vec<Vec<Value>> = Vec::new();
     while let Some(batch) = block.fetch().map_err(fail)? {

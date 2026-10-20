@@ -405,8 +405,12 @@ pub fn notice_bar(app: &mut SheetApp, ui: &mut Ui) {
         // `cmd:` actions run a command (Enable Content); others open a dialog.
         match target.strip_prefix("cmd:") {
             Some(id) => {
-                app.run_or_alert(id, serde_json::json!({}));
-                app.notice = None;
+                // The bar stays while the content is still blocked (Enable Content failed), so
+                // the user can try again; a refresh that failed after enabling doesn't keep it.
+                let ok = app.run(id, serde_json::json!({})).map_err(|e| app.alert(e)).is_ok();
+                if ok || !app.session.active().is_some_and(|d| d.external_blocked) {
+                    app.notice = None;
+                }
             }
             None => app.open_dialog(&target, serde_json::json!({})),
         }

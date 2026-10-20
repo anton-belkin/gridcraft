@@ -8,7 +8,7 @@ use std::rc::Rc;
 use gridcraft_model::query::ColType;
 
 use super::super::eval::{Ev, is_limit};
-use super::super::value::{Key, MError, MFunc, MRecord, MResult, MTable, MType, MValue, key, sort_order};
+use super::super::value::{Key, MError, MFunc, MRecord, MResult, MTable, MType, MValue, check_cells, key, sort_order};
 use super::{Args, cant, convert, names_of, show, text};
 use crate::query::MAX_COLUMNS;
 
@@ -242,6 +242,7 @@ fn project(t: &MTable, names: &[Rc<str>], mode: MissingField) -> MResult<MTable>
         }
     }
     check_unique(&kept)?;
+    check_cells(t.rows.len(), kept.len())?;
     let types = idx.iter().map(|i| i.and_then(|i| t.types.get(i).copied()).unwrap_or_default()).collect();
     let rows = t.rows.iter().map(|r| idx.iter().map(|i| i.and_then(|i| r.get(i).cloned()).unwrap_or(MValue::Null)).collect()).collect();
     Ok(MTable { names: kept.into(), types, rows })
@@ -258,6 +259,7 @@ fn add_column(t: &MTable, name: &Rc<str>, ty: ColType, mut f: impl FnMut(&[MValu
     names.push(name.clone());
     let mut types = t.types.clone();
     types.push(ty);
+    check_cells(t.rows.len(), names.len())?;
     let mut rows = Vec::with_capacity(t.rows.len());
     for r in &t.rows {
         let v = f(r)?;
@@ -908,6 +910,7 @@ fn split_column(ev: &mut Ev<'_, '_>, a: &Args<'_>) -> MResult<MValue> {
         }
     }
     check_unique(&names)?;
+    check_cells(t.rows.len(), names.len())?;
     let mut rows = Vec::with_capacity(t.rows.len());
     for (r, p) in t.rows.iter().zip(parts) {
         let mut row = Vec::with_capacity(names.len());
@@ -1046,6 +1049,7 @@ fn group(ev: &mut Ev<'_, '_>, a: &Args<'_>) -> MResult<MValue> {
     check_unique(&names)?;
     let mut types: Vec<ColType> = key_cols.iter().map(|c| t.types.get(*c).copied().unwrap_or_default()).collect();
     types.extend(aggs.iter().map(|(_, _, ty)| *ty));
+    check_cells(groups.len(), names.len())?;
     let mut out = MTable { names: names.into(), types, rows: Vec::with_capacity(groups.len()) };
     for (_, rows) in groups {
         let Some(first) = rows.first().and_then(|i| t.rows.get(*i)) else { continue };
@@ -1132,6 +1136,7 @@ fn pivot(ev: &mut Ev<'_, '_>, a: &Args<'_>) -> MResult<MValue> {
     }
     // Rows come out in the order of the other columns' values, as Power Query's pivot gives them.
     groups.sort_by(|(a, _), (b, _)| a.iter().zip(b.iter()).map(|(x, y)| sort_order(x, y)).find(|o| o.is_ne()).unwrap_or(std::cmp::Ordering::Equal));
+    check_cells(groups.len(), names.len())?;
     let mut out = MTable { names: names.into(), types, rows: Vec::with_capacity(groups.len()) };
     for (mut row, cells) in groups {
         for c in cells {

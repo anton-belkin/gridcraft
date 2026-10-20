@@ -1,6 +1,6 @@
 # Function parity: worksheet functions and formulas
 
-> **Last reviewed:** 2026-10-15 · **Last updated:** 2026-10-15 · **Change:** minor (MEDIAN and AGGREGATE median avoid intermediate overflow) · **Target:** Microsoft Excel (Microsoft 365), Excel for Mac 16.113.4
+> **Last reviewed:** 2026-10-15 · **Last updated:** 2026-10-20 · **Change:** trivial (category rows: PERCENTOF and TRIMRANGE are in; totals match the rows) · **Target:** Microsoft Excel (Microsoft 365), Excel for Mac 16.113.4
 
 Excel's worksheet functions, category by category, against GridCraft's function library. Part of
 [target-app-parity.md](target-app-parity.md); gaps feed [gaps.md](gaps.md).
@@ -32,11 +32,11 @@ Excel's worksheet functions, category by category, against GridCraft's function 
 | Category | Excel | Ours | Working | % working | Missing |
 |---|---|---|---|---|---|
 | Statistical | 111 | 111 | 111 | 100% | — |
-| Math and trigonometry | 80 | 79 | 79 | 99% | PERCENTOF |
+| Math and trigonometry | 80 | 80 | 80 | 100% | — |
 | Financial | 55 | 55 | 55 | 100% | — |
 | Engineering | 54 | 54 | 54 | 100% | — |
 | Text | 50 | 48 | 48 | 96% | DETECTLANGUAGE, TRANSLATE |
-| Lookup and reference | 40 | 36 | 36 | 90% | GETPIVOTDATA, IMAGE, RTD, TRIMRANGE |
+| Lookup and reference | 40 | 37 | 37 | 93% | GETPIVOTDATA, IMAGE, RTD |
 | Compatibility | 40 | 40 | 40 | 100% | — |
 | Date and time | 25 | 25 | 25 | 100% | — |
 | Information | 22 | 21 | 21 | 95% | STOCKHISTORY |
@@ -46,10 +46,10 @@ Excel's worksheet functions, category by category, against GridCraft's function 
 | Web | 3 | 3 | 3 | 100% | — |
 | Add-in and Automation | 3 | 1 | 1 | 33% | CALL, REGISTER.ID |
 | AI and Python | 2 | 0 | 0 | 0% | COPILOT, PY |
-| **Total** | **523** | **505** | **498** | **95.2%** | 18 missing, 7 stubs |
+| **Total** | **523** | **513** | **506** | **96.7%** | 10 missing, 7 stubs |
 
 By the Excel version that introduced them (working / total): before 2010 346 / 360, 2010
-56 / 56, 2013 49 / 51, 2016 1 / 5, 2019 6 / 6, 2021 11 / 11, 2024 22 / 23, Microsoft 365 5 / 11.
+56 / 56, 2013 51 / 51, 2016 1 / 5, 2019 6 / 6, 2021 11 / 11, 2024 22 / 23, Microsoft 365 5 / 11.
 Dynamic-array and LAMBDA-era functions (FILTER, SORT, UNIQUE, XLOOKUP, VSTACK, TAKE, GROUPBY,
 PIVOTBY, REGEXTEST…) are all present.
 
@@ -112,6 +112,7 @@ workbooks; results checked in as data, not Excel files) and fixing what it finds
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-20 | trivial | Category rows updated for PERCENTOF and TRIMRANGE (both in) and WEBSERVICE/FILTERXML (Excel 2013, working); the Total row now sums the rows: 513 present, 506 working, 10 missing |
 | 2026-10-15 | minor | MEDIAN and AGGREGATE median use an overflow-safe midpoint (#1579); regressions cover finite extremes, tiny values and dependent recalculation |
 | 2026-10-14 | minor | WEBSERVICE (through the native web access, blocked with the workbook's external content) and FILTERXML (XPath 1.0 subset) work: 506 / 523 working |
 | 2026-10-13 | minor | Clear reports changed stored cells sparsely, including those beyond the first million coordinates; dependent formulas and removed spills update, while clearing empty merges still unblocks spills (#1032) |

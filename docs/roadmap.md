@@ -1,6 +1,6 @@
 # Roadmap detail
 
-> **Last reviewed:** 2026-10-11 · **Last updated:** 2026-10-14 · **Change:** minor (Get & Transform landed; data model remains) · **Target:** Microsoft Excel (Microsoft 365)
+> **Last reviewed:** 2026-10-11 · **Last updated:** 2026-10-20 · **Change:** trivial (the rest of the M library listed beside Get & Transform) · **Target:** Microsoft Excel (Microsoft 365)
 
 Forward-looking plan. The one-page summary is [`ROADMAP.md`](../ROADMAP.md); the ranked work
 list is [`gaps.md`](gaps.md); numbers and method are in
@@ -85,7 +85,7 @@ to check our files, and Windows machines with the reported GPU drivers.
 | Work | Gap | Hours |
 |---|---|---|
 | Localization: catalog past the ribbon, then twelve languages | #11 | 100–165 |
-| Get & Transform remainder and the data model | #12 | 30–60 |
+| Get & Transform remainder and the data model; the rest of the M library | #12 | 30–60; 100–170 |
 | Solver, Analysis ToolPak, Forecast Sheet | #13 | 22–35 |
 | Remaining functions, oracle suite | #15 | 18–30 |
 | Collaboration and review | #16 | 35–55 |
@@ -112,6 +112,7 @@ to check our files, and Windows machines with the reported GPU drivers.
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-20 | trivial | After-beta list: the rest of the M library (100–170 h) beside the Get & Transform remainder |
 | 2026-10-14 | minor | Get & Transform landed (M16 partly); remaining #12 work 30–60 h |
 | 2026-10-11 | minor | PivotTable calculated fields landed |
 | 2026-10-10 | minor | Current focus and M15 updated for the 10-10 merges |

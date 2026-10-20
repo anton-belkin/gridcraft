@@ -122,6 +122,27 @@ fn inferred(t: &MTable, col: usize) -> ColType {
     kind.unwrap_or(ColType::Any)
 }
 
+/// The library functions that read outside the workbook (files, folders, the web, databases).
+const EXTERNAL_SOURCES: [&str; 10] = [
+    "File.Contents",
+    "Folder.Files",
+    "Folder.Contents",
+    "Web.Contents",
+    "OData.Feed",
+    "Odbc.Query",
+    "Odbc.DataSource",
+    "Sql.Database",
+    "Sql.Databases",
+    "Access.Database",
+];
+
+/// Whether an M formula may read outside the workbook, so opening it under the Prompt setting
+/// shows the Security Warning. A text match: a formula that only mentions a source in a string
+/// counts too, which errs on the side of asking.
+pub fn reaches_outside(formula: &str) -> bool {
+    EXTERNAL_SOURCES.iter().any(|f| formula.contains(f))
+}
+
 /// The names a formula uses that GridCraft can't run: library functions it lacks and names
 /// that are neither variables, other queries (`is_query`) nor library names. Errors when the
 /// formula doesn't parse.

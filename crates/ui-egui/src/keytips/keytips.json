@@ -1808,8 +1808,8 @@
   },
   {
    "seq": "AFW",
-   "kind": "command",
-   "target": "data.fromWeb",
+   "kind": "dialog",
+   "target": "fromWeb",
    "excel": "Get External Data: From Web",
    "note": ""
   },
@@ -1905,15 +1905,15 @@
   },
   {
    "seq": "APNH",
-   "kind": "command",
-   "target": "data.fromWeb",
+   "kind": "dialog",
+   "target": "fromWeb",
    "excel": "From HTML",
    "note": "Legacy From HTML; GridCraft reads HTML tables with From Web"
   },
   {
    "seq": "APNL",
-   "kind": "command",
-   "target": "data.fromSqlServer",
+   "kind": "dialog",
+   "target": "fromSqlServer",
    "excel": "From SQL Server ODBC",
    "note": ""
   },

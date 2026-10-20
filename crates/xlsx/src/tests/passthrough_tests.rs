@@ -864,4 +864,16 @@ fn gridcraft_queries_round_trip_beside_kept_custom_xml() {
     let (broken, rep) = read_xlsx(&make_zip(&files)).unwrap();
     assert!(broken.queries.is_empty());
     assert!(rep.warnings.iter().any(|w| w.contains("query definitions")), "{:?}", rep.warnings);
+    // A query this version can't read (a newer source kind) drops alone; the others stay.
+    let json = serde_json::to_string(&vec![serde_json::to_value(&q).unwrap(), serde_json::json!({"name": "Future", "source": {"kind": "hologram"}})])
+        .unwrap();
+    let xml = json.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;");
+    parts.insert(
+        "customXml/gridcraftQueries.xml".into(),
+        format!(r#"<gridcraftQueries xmlns="urn:gridcraft:queries:1">{xml}</gridcraftQueries>"#).into_bytes(),
+    );
+    let files: Vec<(&str, &[u8])> = parts.iter().map(|(k, v)| (k.as_str(), v.as_slice())).collect();
+    let (partial, rep) = read_xlsx(&make_zip(&files)).unwrap();
+    assert_eq!(partial.queries, vec![q], "{:?}", rep.warnings);
+    assert!(rep.warnings.iter().any(|w| w.contains("1 of GridCraft's 2 queries")), "{:?}", rep.warnings);
 }
