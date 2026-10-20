@@ -90,10 +90,8 @@ Adding an M function: add `(name, min, max)` to `library::FUNCTIONS`, implement 
 `call`, add a test with M as the Power Query Editor writes it and a hostile case;
 `every_library_function_dispatches` and the random-formula test cover dispatch and panics.
 
-The M library also provides bounded Portuguese full names/standard formatting and
-Record.ToTable. See [the library note](pq19-m-library.md) for the value/budget contract,
-tests and remaining limits. This addition does not change the proposed query model,
-editor, source permissions or storage architecture.
+`Record.ToTable` copies field values without forcing them (held errors and lazy values stay as
+they are) and charges the evaluator budget per field before building rows.
 
 ## Agent control
 

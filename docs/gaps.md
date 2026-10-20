@@ -1,6 +1,6 @@
 # Gaps
 
-> **Last reviewed:** 2026-10-11 · **Last updated:** 2026-10-20 · **Change:** trivial (§12: privacy levels and native-query approval named among the M gaps) · **Target:** Microsoft Excel (Microsoft 365)
+> **Last reviewed:** 2026-10-11 · **Last updated:** 2026-10-20 · **Change:** trivial (§12: Portuguese date names, `Record.ToTable`; privacy levels and native-query approval named among the M gaps) · **Target:** Microsoft Excel (Microsoft 365)
 
 Every known shortfall against Excel, one entry each, ranked by user impact (what blocks someone
 using GridCraft for real work first). This is the work list: pick from the top, check the open
@@ -118,11 +118,13 @@ No alpha blockers: every core workflow passes the [alpha gate](roadmap.md#alpha-
 - Landed: the M functions people write by hand in custom columns (about 300 library functions in
   all): `Text.*` (padding, ranges, positions, `Text.Format`, character ranges like `{"0".."9"}`),
   `Date.*`/`DateTime.*`/`Time.*`/`Duration.*` (adding months, start and end of periods, week and
-  day names in eight languages, `Date.ToText` with .NET formats, the `Date.IsIn…` filters),
+  day names in eight languages with their standard date and time formats, `Date.ToText` with .NET
+  formats, the `Date.IsIn…` filters), `Record.ToTable`,
   `Number.ToText` with standard and custom formats, `Int64.From` and the other conversions,
   `Value.Is`/`Value.Type`, and more of `List.*` (`Accumulate`, `Generate`, `Union`, `Zip`…).
 - Missing: the data model and relationships (`data.relationships`); Excel's queries can't be
-  edited; the rest of the M library (records and tables as values beyond the basics, comparer
+  edited; the rest of the M library (records and tables as values beyond the basics and `Record.ToTable`; three-letter Portuguese
+  abbreviations and parsing textual months, comparer
   functions in sort, `#shared`, `Sql.Database` and other connectors, privacy levels (source isolation), approval of native
   database queries and query folding); the default culture is en-US; a table's saved sort isn't reapplied after a
   refresh (its filter and calculated columns are kept); a table an Excel query loads into loses
@@ -195,6 +197,7 @@ No alpha blockers: every core workflow passes the [alpha gate](roadmap.md#alpha-
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-20 | trivial | §12: Portuguese date names and formats, `Record.ToTable` (contributed by Herr-Enklo) |
 | 2026-10-20 | trivial | §12: privacy levels (source isolation) and approval of native database queries named among the missing M work; day names in eight languages |
 | 2026-10-15 | minor | §12: hand-written M functions (Text, Date, Time, Duration, Number formats, conversions, List extras; ~300 in all); the rest of the M library 100–170 h |
 | 2026-10-15 | minor | §12: Excel's Power Query queries refresh through an M interpreter (the M the Power Query Editor writes); the rest of the M library, editing M and the query table link on save remain |
