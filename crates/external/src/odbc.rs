@@ -17,6 +17,32 @@ const BATCH_BYTES: usize = 64 * 1024 * 1024;
 const MAX_COLUMNS: usize = 16_384;
 /// Seconds a statement may run.
 const QUERY_TIMEOUT: usize = 120;
+/// Seconds a whole ODBC call (connect, run, fetch) may take before the caller gets an error.
+/// Statement timeouts don't cover every driver (the text and Access drivers have none) or the
+/// fetch, so this bounds a refresh whatever the driver does.
+const CALL_DEADLINE: u64 = 180;
+
+const DEADLINE: std::time::Duration = std::time::Duration::from_secs(CALL_DEADLINE);
+
+/// Runs `work` on its own thread and waits at most `deadline`. A call past the deadline keeps
+/// running in the background (ODBC can't always be interrupted) and its result is dropped; the
+/// caller gets an error straight away.
+fn bounded<T: Send + 'static>(deadline: std::time::Duration, work: impl FnOnce() -> Result<T, String> + Send + 'static) -> Result<T, String> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::Builder::new()
+        .name("gridcraft-odbc".into())
+        .spawn(move || {
+            let _ = tx.send(work());
+        })
+        .map_err(|e| format!("Couldn't start the ODBC call: {e}"))?;
+    match rx.recv_timeout(deadline) {
+        Ok(r) => r,
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+            Err(format!("The data source didn't answer within {} seconds, so the read was abandoned.", deadline.as_secs()))
+        }
+        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => Err("The ODBC call ended without a result.".into()),
+    }
+}
 
 fn env() -> Result<&'static odbc_api::Environment, String> {
     odbc_api::environment().map_err(|e| format!("ODBC isn't available: {e}"))
@@ -63,12 +89,20 @@ fn display((schema, name): &(Option<String>, String)) -> String {
 
 /// Tables and views of the data source (`schema.table` where the source has schemas).
 pub fn tables(connection: &str) -> Result<Vec<String>, String> {
-    let conn = connect(connection)?;
-    Ok(list(&conn)?.iter().map(display).collect())
+    let connection = connection.to_string();
+    bounded(DEADLINE, move || {
+        let conn = connect(&connection)?;
+        Ok(list(&conn)?.iter().map(display).collect())
+    })
 }
 
 /// Every row of `table` (a name [`tables`] listed).
 pub fn table(connection: &str, table: &str, max_rows: usize) -> Result<DbTable, String> {
+    let (connection, table) = (connection.to_string(), table.to_string());
+    bounded(DEADLINE, move || read_table(&connection, &table, max_rows))
+}
+
+fn read_table(connection: &str, table: &str, max_rows: usize) -> Result<DbTable, String> {
     let conn = connect(connection)?;
     let found = list(&conn)?
         .into_iter()
@@ -86,8 +120,11 @@ pub fn table(connection: &str, table: &str, max_rows: usize) -> Result<DbTable, 
 
 /// The result of a SQL statement.
 pub fn query(connection: &str, sql: &str, max_rows: usize) -> Result<DbTable, String> {
-    let conn = connect(connection)?;
-    run(&conn, sql, max_rows)
+    let (connection, sql) = (connection.to_string(), sql.to_string());
+    bounded(DEADLINE, move || {
+        let conn = connect(&connection)?;
+        run(&conn, &sql, max_rows)
+    })
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -115,7 +152,8 @@ fn kind(t: DataType) -> Kind {
 
 fn run(conn: &odbc_api::Connection<'_>, sql: &str, max_rows: usize) -> Result<DbTable, String> {
     let fail = |e: odbc_api::Error| format!("The query failed: {e}");
-    // Drivers without statement timeouts (the text and Access drivers) answer HYC00: run without.
+    // Drivers without statement timeouts (the text and Access drivers) answer HYC00: run without;
+    // `bounded` still limits the whole call.
     let executed = match conn.execute(sql, (), Some(QUERY_TIMEOUT)) {
         Err(e) if e.to_string().contains("HYC00") => conn.execute(sql, (), None),
         other => other,
@@ -174,6 +212,20 @@ fn run(conn: &odbc_api::Connection<'_>, sql: &str, max_rows: usize) -> Result<Db
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[allow(clippy::disallowed_methods)] // this crate is never built for wasm
+    fn a_call_past_its_deadline_returns_an_error_without_waiting() {
+        let start = std::time::Instant::now();
+        let r: Result<(), String> = bounded(std::time::Duration::from_millis(50), || {
+            std::thread::sleep(std::time::Duration::from_secs(5));
+            Ok(())
+        });
+        assert!(r.unwrap_err().contains("didn't answer"));
+        assert!(start.elapsed() < std::time::Duration::from_secs(4));
+        assert_eq!(bounded(DEADLINE, || Ok(7)), Ok(7));
+        assert_eq!(bounded::<()>(DEADLINE, || Err("no".into())), Err("no".into()));
+    }
 
     #[test]
     fn reads_a_csv_through_the_access_text_driver_when_installed() {
