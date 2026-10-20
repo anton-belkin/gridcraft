@@ -662,6 +662,9 @@ fn hostile_formulas_end_in_errors() {
     assert!(run(&format!("try Table.RowCount({wide}) otherwise 0")).is_err());
     let split = "Table.SplitColumn(Table.FromColumns({{1..1000000}}), \"Column1\", each {}, 16000)";
     assert_eq!(run(split).unwrap_err().reason, super::eval::LIMIT);
+    // A pivot is refused while its groups are counted, before each one's cells are allocated.
+    let pivot = "Table.Pivot(Table.FromColumns({{1..5000}, {1..5000}, {1..5000}}), List.Transform({1..16000}, Text.From), \"Column2\", \"Column3\")";
+    assert_eq!(run(pivot).unwrap_err().reason, super::eval::LIMIT);
     // Deep nesting is refused by the parser (no stack overflow).
     assert!(parser::parse(&format!("{}1{}", "(".repeat(5000), ")".repeat(5000))).is_err());
     let _ = run(&format!("{}1{}", "{".repeat(150), "}".repeat(150)));

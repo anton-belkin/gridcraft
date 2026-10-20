@@ -1122,6 +1122,8 @@ fn pivot(ev: &mut Ev<'_, '_>, a: &Args<'_>) -> MResult<MValue> {
         let g = match index.get(&k) {
             Some(g) => *g,
             None => {
+                // Each new group reserves a cell per pivot value: refuse before allocating it.
+                check_cells(groups.len() + 1, names.len())?;
                 index.insert(k, groups.len());
                 groups.push((others.iter().map(|c| r.get(*c).cloned().unwrap_or(MValue::Null)).collect(), vec![vec![]; values.len()]));
                 groups.len() - 1

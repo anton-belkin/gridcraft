@@ -137,8 +137,17 @@ fn run(conn: &odbc_api::Connection<'_>, sql: &str, max_rows: usize) -> Result<Db
     let rows_per_batch = (BATCH_BYTES / n.max(1).saturating_mul(field + 1)).clamp(1, BATCH);
     let buffer = TextRowSet::for_cursor(rows_per_batch, &mut cursor, Some(field)).map_err(fail)?;
     let mut block = cursor.bind_buffer(buffer).map_err(fail)?;
+    // At MAX_FIELD a longer value is cut to what a cell holds anyway (Excel's 32,767-character
+    // cell limit). A shorter field (a very wide result) must not cut values silently: a value
+    // that doesn't fit fails the read instead.
+    let shortened = field < MAX_FIELD;
     let mut rows: Vec<Vec<Value>> = Vec::new();
-    while let Some(batch) = block.fetch().map_err(fail)? {
+    while let Some(batch) = block.fetch_with_truncation_check(shortened).map_err(|e| match e {
+        odbc_api::Error::TooLargeValueForBuffer { .. } => format!(
+            "The result has {n} columns and a value longer than the {field} bytes GridCraft can read per field at that width; select fewer columns."
+        ),
+        e => fail(e),
+    })? {
         for r in 0..batch.num_rows() {
             if rows.len() >= max_rows {
                 return Ok(DbTable { columns, rows });
