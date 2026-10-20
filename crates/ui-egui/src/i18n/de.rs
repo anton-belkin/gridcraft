@@ -798,6 +798,18 @@ pub(super) fn translate(text: &str) -> Option<&'static str> {
         "Contains…" => "Enthält…",
         "Does Not Contain…" => "Enthält nicht…",
         "Filter by Values…" => "Nach Werten filtern…",
+        // grid.rs cell and row/column header context menus.
+        "Cut" => "Ausschneiden",
+        "Copy" => "Kopieren",
+        "Insert…" => "Einfügen…",
+        "Delete…" => "Löschen…",
+        "Filter by Selected Cell's Value" => "Nach Wert der gewählten Zelle filtern",
+        "New Comment" => "Neuer Kommentar",
+        "Pick From Drop-down List…" => "Aus Dropdownliste auswählen…",
+        "Define Name…" => "Namen definieren…",
+        "Link…" => "Link…",
+        "Hide" => "Ausblenden",
+        "Unhide" => "Einblenden",
         _ => return None,
     })
 }
