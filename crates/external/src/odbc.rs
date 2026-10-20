@@ -23,23 +23,63 @@ const QUERY_TIMEOUT: usize = 120;
 const CALL_DEADLINE: u64 = 180;
 
 const DEADLINE: std::time::Duration = std::time::Duration::from_secs(CALL_DEADLINE);
+/// Most ODBC calls running at once, counting calls past their deadline that haven't returned yet.
+const MAX_RUNNING: usize = 4;
 
-/// Runs `work` on its own thread and waits at most `deadline`. A call past the deadline keeps
-/// running in the background (ODBC can't always be interrupted) and its result is dropped; the
-/// caller gets an error straight away.
-fn bounded<T: Send + 'static>(deadline: std::time::Duration, work: impl FnOnce() -> Result<T, String> + Send + 'static) -> Result<T, String> {
+/// The ODBC calls running now, by what they do (`query`, connection, SQL…). A call keeps its
+/// entry until its thread ends, past its deadline too.
+static RUNNING: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+
+fn running() -> std::sync::MutexGuard<'static, Vec<String>> {
+    RUNNING.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// A reserved place in [`RUNNING`], given back when the worker thread ends (or never starts).
+struct Slot(String);
+
+impl Drop for Slot {
+    fn drop(&mut self) {
+        let mut r = running();
+        if let Some(i) = r.iter().position(|k| *k == self.0) {
+            r.swap_remove(i);
+        }
+    }
+}
+
+/// Runs `work` on its own thread and waits at most `deadline`. ODBC can't always be interrupted,
+/// so a call past its deadline goes on in the background and its result is dropped; until it
+/// ends, the same call (`key`) isn't started again (a statement that writes would run twice),
+/// and at most `MAX_RUNNING` calls run at once.
+fn bounded<T: Send + 'static>(
+    deadline: std::time::Duration,
+    key: String,
+    work: impl FnOnce() -> Result<T, String> + Send + 'static,
+) -> Result<T, String> {
+    let slot = {
+        let mut r = running();
+        if r.contains(&key) {
+            return Err("This statement is still running on the data source from an earlier attempt; try again once it has finished.".into());
+        }
+        if r.len() >= MAX_RUNNING {
+            return Err(format!("{MAX_RUNNING} ODBC calls are still running on their data sources; try again once one has finished."));
+        }
+        r.push(key.clone());
+        Slot(key)
+    };
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::Builder::new()
         .name("gridcraft-odbc".into())
         .spawn(move || {
+            let _slot = slot;
             let _ = tx.send(work());
         })
         .map_err(|e| format!("Couldn't start the ODBC call: {e}"))?;
     match rx.recv_timeout(deadline) {
         Ok(r) => r,
-        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
-            Err(format!("The data source didn't answer within {} seconds, so the read was abandoned.", deadline.as_secs()))
-        }
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => Err(format!(
+            "The data source didn't answer within {} seconds. The statement may still be running there; GridCraft won't start it again until it has finished.",
+            deadline.as_secs()
+        )),
         Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => Err("The ODBC call ended without a result.".into()),
     }
 }
@@ -90,7 +130,7 @@ fn display((schema, name): &(Option<String>, String)) -> String {
 /// Tables and views of the data source (`schema.table` where the source has schemas).
 pub fn tables(connection: &str) -> Result<Vec<String>, String> {
     let connection = connection.to_string();
-    bounded(DEADLINE, move || {
+    bounded(DEADLINE, format!("tables\u{0}{connection}"), move || {
         let conn = connect(&connection)?;
         Ok(list(&conn)?.iter().map(display).collect())
     })
@@ -99,7 +139,7 @@ pub fn tables(connection: &str) -> Result<Vec<String>, String> {
 /// Every row of `table` (a name [`tables`] listed).
 pub fn table(connection: &str, table: &str, max_rows: usize) -> Result<DbTable, String> {
     let (connection, table) = (connection.to_string(), table.to_string());
-    bounded(DEADLINE, move || read_table(&connection, &table, max_rows))
+    bounded(DEADLINE, format!("table\u{0}{connection}\u{0}{table}"), move || read_table(&connection, &table, max_rows))
 }
 
 fn read_table(connection: &str, table: &str, max_rows: usize) -> Result<DbTable, String> {
@@ -121,7 +161,7 @@ fn read_table(connection: &str, table: &str, max_rows: usize) -> Result<DbTable,
 /// The result of a SQL statement.
 pub fn query(connection: &str, sql: &str, max_rows: usize) -> Result<DbTable, String> {
     let (connection, sql) = (connection.to_string(), sql.to_string());
-    bounded(DEADLINE, move || {
+    bounded(DEADLINE, format!("query\u{0}{connection}\u{0}{sql}"), move || {
         let conn = connect(&connection)?;
         run(&conn, &sql, max_rows)
     })
@@ -215,16 +255,47 @@ mod tests {
 
     #[test]
     #[allow(clippy::disallowed_methods)] // this crate is never built for wasm
-    fn a_call_past_its_deadline_returns_an_error_without_waiting() {
+    fn a_call_past_its_deadline_returns_an_error_and_holds_its_place_until_it_ends() {
+        let short = std::time::Duration::from_millis(50);
+        let (release, wait) = std::sync::mpsc::channel::<()>();
         let start = std::time::Instant::now();
-        let r: Result<(), String> = bounded(std::time::Duration::from_millis(50), || {
-            std::thread::sleep(std::time::Duration::from_secs(5));
+        let r: Result<(), String> = bounded(short, "slow".into(), move || {
+            let _ = wait.recv_timeout(std::time::Duration::from_secs(10));
             Ok(())
         });
-        assert!(r.unwrap_err().contains("didn't answer"));
-        assert!(start.elapsed() < std::time::Duration::from_secs(4));
-        assert_eq!(bounded(DEADLINE, || Ok(7)), Ok(7));
-        assert_eq!(bounded::<()>(DEADLINE, || Err("no".into())), Err("no".into()));
+        assert!(r.unwrap_err().contains("may still be running"));
+        assert!(start.elapsed() < std::time::Duration::from_secs(5));
+        // The same call isn't started again while the first one runs; others are.
+        assert!(bounded(DEADLINE, "slow".into(), || Ok(1)).unwrap_err().contains("still running"));
+        assert_eq!(bounded(DEADLINE, "other".into(), || Ok(7)), Ok(7));
+        assert_eq!(bounded::<()>(DEADLINE, "failing".into(), || Err("no".into())), Err("no".into()));
+        // At most MAX_RUNNING calls at once, counting the one past its deadline.
+        let mut holds = Vec::new();
+        for i in 1..MAX_RUNNING {
+            let (tx, rx) = std::sync::mpsc::channel::<()>();
+            let r: Result<(), String> = bounded(short, format!("held{i}"), move || {
+                let _ = rx.recv_timeout(std::time::Duration::from_secs(10));
+                Ok(())
+            });
+            assert!(r.is_err());
+            holds.push(tx);
+        }
+        assert!(bounded(DEADLINE, "one more".into(), || Ok(1)).unwrap_err().contains("ODBC calls are still running"));
+        // Once the calls end, their places are free again.
+        let _ = release.send(());
+        for tx in holds {
+            let _ = tx.send(());
+        }
+        let mut freed = false;
+        for _ in 0..200 {
+            if running().is_empty() {
+                freed = true;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(freed);
+        assert_eq!(bounded(DEADLINE, "slow".into(), || Ok(2)), Ok(2));
     }
 
     #[test]
