@@ -100,6 +100,20 @@ pub(crate) fn show(st: &mut AgentUi, app: &mut SheetApp, ui: &mut Ui) {
                 });
             });
             ui.separator();
+            // A layer this build couldn't read: kept in the file as it is, changes here aren't saved.
+            if let Some(why) = &l.origin.unreadable {
+                egui::Frame::NONE.fill(p.open.gamma_multiply(0.12)).corner_radius(4.0).inner_margin(6.0).show(ui, |ui| {
+                    ui.set_width(ui.available_width());
+                    ui.label(RichText::new("This file's agent layer couldn't be read").small().strong().color(p.open));
+                    ui.label(
+                        RichText::new(format!(
+                            "It may come from a newer GridCraft ({why}). It stays in the file exactly as it is: saving won't change it, and topics added here aren't saved."
+                        ))
+                        .small(),
+                    );
+                });
+                ui.add_space(4.0);
+            }
             if st.tab == Tab::Selection {
                 // The question box stays at the very bottom.
                 egui::Panel::bottom("agent_ask")
@@ -1495,12 +1509,21 @@ fn history_tab(app: &SheetApp, ui: &mut Ui, l: &Layer, t: &Tokens, p: &Palette, 
     }
     for e in l.log.iter().rev().take(300) {
         let (who, color) = match e.actor {
+            _ if e.kind == "warning" => ("Reading the file", p.open),
             Actor::Agent => ("Agent", p.agent),
             Actor::Human => ("You", p.person),
         };
         ui.horizontal_wrapped(|ui| {
             ui.label(RichText::new(who).small().strong().color(color));
-            ui.label(RichText::new(if e.kind == "decision" { "decided" } else { "changed" }).small().color(t.text_dim));
+            ui.label(
+                RichText::new(match e.kind.as_str() {
+                    "decision" => "decided",
+                    "warning" => "worked around",
+                    _ => "changed",
+                })
+                .small()
+                .color(t.text_dim),
+            );
             if let Some(a) = &e.anchor
                 && let Some(pl) = place_of(app, l, a)
                 && ui.link(RichText::new(pl.a1()).small()).clicked()

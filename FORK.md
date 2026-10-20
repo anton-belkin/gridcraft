@@ -73,6 +73,15 @@ upstream. Each one accepted upstream removes its lines from the patch.
   becomes topics on load). GridCraft
   keeps custom XML parts on open and save (`xlsx/passthrough.rs`), and so does Excel, so the layer
   survives a round trip through Excel.
+- **A layer from another build loses nothing** (fix from the review of PR #2). Reading used to
+  start from an empty layer when anything failed to deserialize (an unknown enum value such as
+  `"kind":"codex"`), and the next save deleted the part. Now: unknown enum values read as their
+  default (an unknown context kind as no context of the document's own); list entries are read one
+  by one and one that can't be read is left out, with a warning in History; and a save is a
+  three-way merge (`layer::merge3`) of the file's JSON, the layer as this build read it, and the
+  layer now: whatever this build didn't change goes back exactly as the file had it, unknown
+  fields, unknown values and unreadable entries included. A part that can't be read at all (not
+  JSON, too large) is never overwritten, and the pane says so.
 - **Anchors are hidden defined names** (`_GcAgent_<id>`). The engine and Excel move them with
   inserted and deleted rows and columns. The last known address is kept too: an undo that takes a
   name away gets it back.

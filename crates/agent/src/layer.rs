@@ -20,8 +20,168 @@ const REL_ID: &str = "rIdGcAgentLayer";
 /// Largest layer read back from a file.
 const MAX_PART: usize = 32 * 1024 * 1024;
 
+// ---------------------------------------------------------------- reading what a newer build wrote
+//
+// A layer written by another build may hold what this one doesn't know: an enum value, a field, an
+// entry it can't read. Nothing of it is lost: an unknown enum value reads as its default, an entry
+// that can't be read is left out with a warning in the history, and a save writes back everything
+// this build didn't change exactly as the file had it (see [`merge3`]). A layer that can't be read
+// at all is never overwritten.
+
+thread_local! {
+    /// What reading the layer had to work around (for the history).
+    static WARNINGS: std::cell::RefCell<Vec<String>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+fn warn(msg: String) {
+    WARNINGS.with(|w| {
+        let mut w = w.borrow_mut();
+        if w.len() < 50 && !w.contains(&msg) {
+            w.push(msg);
+        }
+    });
+}
+
+fn short_type<T>() -> &'static str {
+    std::any::type_name::<T>().rsplit("::").next().unwrap_or("value")
+}
+
+/// A field that can't be read takes its default (and the file keeps what it had).
+fn lenient<'de, D, T>(d: D) -> std::result::Result<T, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: serde::de::DeserializeOwned + Default,
+{
+    let v = serde_json::Value::deserialize(d)?;
+    Ok(serde_json::from_value(v).unwrap_or_else(|e| {
+        warn(format!("A {} couldn't be read ({e}); the file keeps it as it was.", short_type::<T>()));
+        T::default()
+    }))
+}
+
+/// A list whose entries are read one by one: an entry that can't be read is left out (the file
+/// keeps it as it was).
+fn lenient_vec<'de, D, T>(d: D) -> std::result::Result<Vec<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: serde::de::DeserializeOwned,
+{
+    let v = serde_json::Value::deserialize(d)?;
+    let serde_json::Value::Array(items) = v else {
+        warn(format!("A list of {} couldn't be read; the file keeps it as it was.", short_type::<T>()));
+        return Ok(vec![]);
+    };
+    Ok(items
+        .into_iter()
+        .filter_map(|x| {
+            let id = x.get("id").and_then(serde_json::Value::as_str).map(|i| format!(" {i}")).unwrap_or_default();
+            serde_json::from_value(x)
+                .map_err(|e| warn(format!("{} {id} couldn't be read ({e}): left out here, kept in the file as it was.", short_type::<T>())))
+                .ok()
+        })
+        .collect())
+}
+
+/// Reads an enum leniently: a value this build doesn't know is its default (the file keeps it).
+macro_rules! lenient_enum {
+    ($t:ident, [$($v:ident),*]) => {
+        impl<'de> Deserialize<'de> for $t {
+            fn deserialize<D: serde::Deserializer<'de>>(d: D) -> std::result::Result<Self, D::Error> {
+                let v = serde_json::Value::deserialize(d)?;
+                for x in [$($t::$v),*] {
+                    if serde_json::to_value(x).ok().as_ref() == Some(&v) {
+                        return Ok(x);
+                    }
+                }
+                warn(format!("An unknown {} {v} is read as {:?}; the file keeps it.", stringify!($t), $t::default()));
+                Ok($t::default())
+            }
+        }
+    };
+}
+
+/// What the file held, kept with the layer read from it. Never part of a comparison.
+#[derive(Clone, Debug, Default)]
+pub struct Origin {
+    /// The layer's JSON exactly as the file had it.
+    pub file: Option<Arc<serde_json::Value>>,
+    /// The same, as this build read it (written back as `file` where nothing changed).
+    pub read: Option<Arc<serde_json::Value>>,
+    /// The part couldn't be read at all: it is kept as it is and never overwritten.
+    pub unreadable: Option<String>,
+}
+
+impl PartialEq for Origin {
+    fn eq(&self, _other: &Origin) -> bool {
+        true
+    }
+}
+
+/// Keys that say which entry of a list is which.
+const IDENTITY: [&str; 4] = ["id", "seq", "anchor", "name"];
+
+fn identity(v: &serde_json::Value) -> Option<(&'static str, serde_json::Value)> {
+    IDENTITY.iter().find_map(|k| v.get(*k).filter(|x| !x.is_null()).map(|x| (*k, x.clone())))
+}
+
+/// What to write: `new` (the layer now), with what this build didn't change taken from `file` (the
+/// file's JSON) as it was. `read` is the file as this build read it. Where `new` equals `read`
+/// nothing changed: `file` goes back as it was, unknown fields and values included. Objects keep
+/// the keys this build doesn't know; lists keep the entries it couldn't read.
+pub fn merge3(file: &serde_json::Value, read: &serde_json::Value, new: &serde_json::Value) -> serde_json::Value {
+    use serde_json::Value;
+    if new == read {
+        return file.clone();
+    }
+    match (file, read, new) {
+        (Value::Object(f), Value::Object(r), Value::Object(n)) => {
+            let mut out = n.clone();
+            for (k, fv) in f {
+                match (r.get(k), n.get(k)) {
+                    // A key this build doesn't know.
+                    (None, None) => {
+                        out.insert(k.clone(), fv.clone());
+                    }
+                    (Some(rv), Some(nv)) => {
+                        out.insert(k.clone(), merge3(fv, rv, nv));
+                    }
+                    // Known and cleared now, or new now: as it is.
+                    _ => {}
+                }
+            }
+            Value::Object(out)
+        }
+        (Value::Array(f), Value::Array(r), Value::Array(n)) => {
+            let find = |list: &Vec<Value>, id: &(&str, Value)| list.iter().find(|x| x.get(id.0) == Some(&id.1)).cloned();
+            let mut out: Vec<Value> = n
+                .iter()
+                .map(|nv| match identity(nv) {
+                    Some(id) => match (find(f, &id), find(r, &id)) {
+                        (Some(fv), Some(rv)) => merge3(&fv, &rv, nv),
+                        _ => nv.clone(),
+                    },
+                    None => nv.clone(),
+                })
+                .collect();
+            // Entries the file had and this build couldn't read: kept, as they were.
+            if f.iter().all(|x| identity(x).is_some()) {
+                for fv in f {
+                    if let Some(id) = identity(fv)
+                        && find(r, &id).is_none()
+                        && find(n, &id).is_none()
+                    {
+                        out.push(fv.clone());
+                    }
+                }
+            }
+            Value::Array(out)
+        }
+        _ => new.clone(),
+    }
+}
+
 /// Who did something.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Actor {
     #[default]
@@ -54,7 +214,7 @@ pub struct Link {
     pub summary: String,
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum QuestionStatus {
     #[default]
@@ -223,7 +383,7 @@ pub struct LogEntry {
 }
 
 /// What a set of alternatives is.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum VariantKind {
     /// "A or B?": alternative assumptions or formulas for a range, both kept in the document.
@@ -313,7 +473,7 @@ pub struct LinkUse {
 }
 
 /// Where a topic stands.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Status {
     /// A question or doubt, no decision yet.
@@ -357,7 +517,7 @@ impl Status {
 
 /// What the agent knows, chosen on the Agent tab: only the document (a background client in a
 /// neutral folder), the person's Cowork chat, or their Claude Code session or a project folder.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ContextKind {
     /// Only this document; runs in the background.
@@ -372,7 +532,7 @@ pub enum ContextKind {
 }
 
 /// Claude Code: the person's own session, or a background client in a folder they chose.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum CodeVia {
     #[default]
@@ -468,7 +628,7 @@ pub struct FileContext {
 }
 
 /// Where a topic's proposed edits stand.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ProposalState {
     #[default]
@@ -556,57 +716,60 @@ pub const MAX_LOG: usize = 5_000;
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Layer {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "lenient")]
     pub version: u32,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "lenient")]
     pub next_id: u64,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "lenient_vec")]
     pub anchors: Vec<Anchor>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "lenient_vec")]
     pub questions: Vec<Question>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "lenient_vec")]
     pub notes: Vec<Note>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "lenient_vec")]
     pub inputs: Vec<Input>,
     /// Anchors of ranges holding client data: the agent sees stand-in values there.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "lenient_vec")]
     pub private: Vec<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "lenient_vec")]
     pub confidence: Vec<Confidence>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "lenient_vec")]
     pub log: Vec<LogEntry>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(default, deserialize_with = "lenient_vec", skip_serializing_if = "Vec::is_empty")]
     pub variants: Vec<VariantSet>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default, deserialize_with = "lenient", skip_serializing_if = "Option::is_none")]
     pub safe: Option<SafeFile>,
     /// The workbook's own id, made the first time it is a linked source (survives Save As and moves).
-    #[serde(default, skip_serializing_if = "String::is_empty", rename = "workbookId")]
+    #[serde(default, deserialize_with = "lenient", skip_serializing_if = "String::is_empty", rename = "workbookId")]
     pub workbook_id: String,
     /// Ranges copied as linked sources: `_GcLink_` names (never cleaned up: other files use them).
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(default, deserialize_with = "lenient_vec", skip_serializing_if = "Vec::is_empty")]
     pub links: Vec<Anchor>,
     /// The background agent's session (Claude Code session id), resumed when the workbook reopens.
-    #[serde(default, skip_serializing_if = "String::is_empty", rename = "agentSession")]
+    #[serde(default, deserialize_with = "lenient", skip_serializing_if = "String::is_empty", rename = "agentSession")]
     pub agent_session: String,
     /// Where those ranges are used (decks and slides).
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(default, deserialize_with = "lenient_vec", skip_serializing_if = "Vec::is_empty")]
     pub uses: Vec<LinkUse>,
     /// Topics (format v2): places, status, notes and discussion of each question or theme.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(default, deserialize_with = "lenient_vec", skip_serializing_if = "Vec::is_empty")]
     pub topics: Vec<Topic>,
     /// Where deleted places and links were.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(default, deserialize_with = "lenient_vec", skip_serializing_if = "Vec::is_empty")]
     pub whereabouts: Vec<Whereabouts>,
     /// The file's own context: what the document is, for whom, house rules, background, facts.
     /// Kept when the document is sent.
-    #[serde(default, rename = "fileContext", skip_serializing_if = "Vec::is_empty")]
+    #[serde(default, deserialize_with = "lenient_vec", rename = "fileContext", skip_serializing_if = "Vec::is_empty")]
     pub file_context: Vec<FileContext>,
     /// What the agent knows about this document (the Agent tab's Context): chosen per document.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default, deserialize_with = "lenient", skip_serializing_if = "Option::is_none")]
     pub context: Option<AgentContext>,
     /// Bumped on every change (not saved meaningfully; lets views cache).
     #[serde(skip)]
     pub revision: u64,
+    /// What the file held: kept so a save writes back what this build doesn't know.
+    #[serde(skip)]
+    pub origin: Origin,
 }
 
 impl Layer {
@@ -820,22 +983,51 @@ pub fn known_docs() -> Vec<u64> {
 pub fn read_from(wb: &Workbook) -> Layer {
     let Some(p) = wb.preserved.as_deref() else { return fresh() };
     for part in &p.parts {
-        if part.data.len() > MAX_PART {
-            continue;
-        }
         let Ok(text) = std::str::from_utf8(&part.data) else { continue };
         if !text.contains(NS) {
             continue;
         }
-        if let Some(json) = between(text, "<![CDATA[", "]]>")
-            && let Ok(mut layer) = serde_json::from_str::<Layer>(json)
-        {
-            // A v1 workbook: questions and notes become topics.
-            layer.migrate();
-            return layer;
-        }
+        return parse(text, part.data.len()).unwrap_or_else(|why| {
+            log::warn!("agent layer: {why}");
+            let mut l = fresh();
+            l.origin.unreadable = Some(why);
+            l
+        });
     }
     fresh()
+}
+
+/// A layer from its part's text; why not, when it can't be read at all.
+fn parse(text: &str, len: usize) -> std::result::Result<Layer, String> {
+    if len > MAX_PART {
+        return Err(format!("the agent layer is too large to read ({} MB)", len / (1024 * 1024)));
+    }
+    let json = between(text, "<![CDATA[", "]]>").ok_or("the agent layer's part has no data")?;
+    let file: serde_json::Value = serde_json::from_str(json).map_err(|e| format!("the agent layer isn't valid JSON ({e})"))?;
+    if !file.is_object() {
+        return Err("the agent layer isn't an object".into());
+    }
+    WARNINGS.with(|w| w.borrow_mut().clear());
+    let layer = serde_json::from_value::<Layer>(file.clone());
+    let warnings = WARNINGS.with(|w| std::mem::take(&mut *w.borrow_mut()));
+    let mut layer = layer.map_err(|e| format!("the agent layer couldn't be read ({e})"))?;
+    // A context this build doesn't know isn't "No context" (that would run a background agent):
+    // the document follows the app's choice, and the file keeps its own.
+    let kinds = [ContextKind::None, ContextKind::Cowork, ContextKind::Code, ContextKind::Off].map(|k| serde_json::to_value(k).ok());
+    if let Some(kind) = file.pointer("/context/kind")
+        && !kinds.iter().any(|k| k.as_ref() == Some(kind))
+    {
+        layer.context = None;
+    }
+    // A v1 workbook: questions and notes become topics.
+    layer.migrate();
+    let read = serde_json::to_value(&layer).unwrap_or(serde_json::Value::Null);
+    layer.origin = Origin { file: Some(Arc::new(file)), read: Some(Arc::new(read)), unreadable: None };
+    // What had to be worked around goes into the history.
+    for w in warnings {
+        layer.log(Actor::Human, "warning", w, "file.open", None, String::new());
+    }
+    Ok(layer)
 }
 
 fn between<'a>(s: &'a str, open: &str, close: &str) -> Option<&'a str> {
@@ -847,11 +1039,16 @@ fn between<'a>(s: &'a str, open: &str, close: &str) -> Option<&'a str> {
 /// Writes the layer into the workbook's kept parts (replacing an earlier copy). An empty layer
 /// removes the part.
 pub fn write_into(wb: &mut Workbook, layer: &Layer) {
+    // A layer this build couldn't read stays in the file exactly as it is.
+    if layer.origin.unreadable.is_some() {
+        return;
+    }
     let mut p: Preserved = wb.preserved.as_deref().cloned().unwrap_or_default();
     let ours: Vec<String> = p.parts.iter().filter(|q| std::str::from_utf8(&q.data).is_ok_and(|t| t.contains(NS))).map(|q| q.name.clone()).collect();
     p.parts.retain(|q| !ours.contains(&q.name));
     p.rels.retain(|r| !(r.rel_type == REL_CUSTOM_XML && ours.iter().any(|n| n == &r.target || r.target.ends_with(n.as_str()))) && r.id != REL_ID);
-    if !layer.is_empty() {
+    // A layer from a file is always written back: it may hold only what this build doesn't know.
+    if !layer.is_empty() || layer.origin.file.is_some() {
         // Connection checks belong to this session, not to the file; spoken questions still
         // being transcribed live in memory only.
         let mut layer = layer.clone();
@@ -867,7 +1064,12 @@ pub fn write_into(wb: &mut Workbook, layer: &Layer) {
         layer.topics.retain(|t| !drafts.contains(&t.id) || saved.contains(&t.id));
         layer.questions.retain(|q| !q.is_ping() && !q.status.is_draft());
         layer.version = VERSION;
-        let json = serde_json::to_string(&layer).unwrap_or_default();
+        let mut value = serde_json::to_value(&layer).unwrap_or(serde_json::Value::Null);
+        // What this build didn't change goes back as the file had it.
+        if let (Some(file), Some(read)) = (&layer.origin.file, &layer.origin.read) {
+            value = merge3(file, read, &value);
+        }
+        let json = serde_json::to_string(&value).unwrap_or_default();
         // CDATA can't hold `]]>`; JSON only has it inside strings, where `]` means the same.
         let json = json.replace("]]>", "\\u005d\\u005d>");
         let xml = format!("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<agentLayer xmlns=\"{NS}\"><![CDATA[{json}]]></agentLayer>");
@@ -881,3 +1083,17 @@ pub fn write_into(wb: &mut Workbook, layer: &Layer) {
     }
     wb.preserved = if p.is_empty() { None } else { Some(Arc::new(p)) };
 }
+
+lenient_enum!(Actor, [Human, Agent]);
+
+lenient_enum!(QuestionStatus, [Pending, Working, Answered, Transcribing, Failed, Withdrawn]);
+
+lenient_enum!(VariantKind, [Alternatives, Method]);
+
+lenient_enum!(Status, [Open, Revise, Agreed, Info]);
+
+lenient_enum!(ContextKind, [None, Cowork, Code, Off]);
+
+lenient_enum!(CodeVia, [Session, Folder]);
+
+lenient_enum!(ProposalState, [Pending, Applied, Rejected, Outdated]);

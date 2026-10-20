@@ -1977,3 +1977,108 @@ fn set_ranges_in_a_topic_is_one_proposal_step() {
     s.execute("edit.undo", json!({})).unwrap();
     assert!(text_at(&s, "C7").is_empty());
 }
+
+// ---------------------------------------------------------------- a layer from a newer build
+
+/// A workbook whose agent layer is this JSON (as another build wrote it).
+fn workbook_with_layer(json: &str) -> gridcraft_engine::model::Workbook {
+    let mut wb = gridcraft_engine::model::Workbook::default();
+    let xml = format!("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<agentLayer xmlns=\"{}\"><![CDATA[{json}]]></agentLayer>", layer::NS);
+    let mut p: gridcraft_engine::model::Preserved = Default::default();
+    p.parts.push(gridcraft_engine::model::PreservedPart {
+        name: "customXml/gridcraftAgent.xml".into(),
+        content_type: "application/xml".into(),
+        data: std::sync::Arc::from(xml.into_bytes()),
+        rels: vec![],
+    });
+    wb.preserved = Some(std::sync::Arc::new(p));
+    wb
+}
+
+/// The layer's JSON as a workbook holds it.
+fn layer_json(wb: &gridcraft_engine::model::Workbook) -> Value {
+    let part = wb.preserved.as_ref().unwrap().parts.iter().find(|p| std::str::from_utf8(&p.data).unwrap().contains(layer::NS)).unwrap();
+    let text = std::str::from_utf8(&part.data).unwrap();
+    let start = text.find("<![CDATA[").unwrap() + 9;
+    let end = text.rfind("]]>").unwrap();
+    serde_json::from_str(&text[start..end]).unwrap()
+}
+
+const NEWER: &str = r#"{
+    "version": 3, "next_id": 20, "futureSetting": {"x": 1},
+    "anchors": [{"id": "a1", "name": "_GcAgent_a1", "sheet": "Sheet1", "range": "B2"}],
+    "topics": [
+        {"id": "t1", "places": [{"anchor": "a1", "reason": "", "by": "human"}], "status": {"status": "open", "text": "", "by": "human", "at": 1}, "priority": "high", "created_at": 1},
+        {"id": "t9", "places": "this is not a list", "status": {"status": "open"}},
+        {"id": "t5", "places": [], "status": {"status": "blocked", "text": "waiting for legal", "by": "human", "at": 2}, "created_at": 2}
+    ],
+    "questions": [
+        {"id": "q2", "anchor": "a1", "text": "Why?", "status": "answered", "seen": true, "topic": "t1", "answer": {"text": "Because.", "at": 5}},
+        {"id": "q3", "anchor": "a1", "text": "Later?", "status": "snoozed", "topic": "t1"}
+    ],
+    "context": {"kind": "codex", "via": "session"},
+    "log": [{"seq": 1, "at": 1, "actor": "human", "kind": "decision", "text": "started"}]
+}"#;
+
+#[test]
+fn a_layer_from_a_newer_build_loses_nothing() {
+    let wb = workbook_with_layer(NEWER);
+    let l = layer::read_from(&wb);
+    assert!(l.origin.unreadable.is_none());
+    // Everything readable is there; the corrupt topic is left out with a warning in the history.
+    let ids: Vec<&str> = l.topics.iter().map(|t| t.id.as_str()).collect();
+    assert_eq!(ids, vec!["t1", "t5"]);
+    assert_eq!(l.questions.len(), 2);
+    assert!(l.log.iter().any(|e| e.kind == "warning" && e.text.contains("t9")), "{:?}", l.log);
+    // Unknown values read as defaults: a status, a question status; an unknown context is no context.
+    assert_eq!(l.topic("t5").unwrap().status.status, layer::Status::Open);
+    assert_eq!(l.questions[1].status, layer::QuestionStatus::Pending);
+    assert!(l.context.is_none());
+    // Saved without a change: what the file had goes back, unknown parts included.
+    let mut out = wb.clone();
+    layer::write_into(&mut out, &l);
+    let j = layer_json(&out);
+    assert_eq!(j["futureSetting"], json!({"x": 1}));
+    assert_eq!(j["context"]["kind"], json!("codex"));
+    assert_eq!(j["topics"][0]["priority"], json!("high"));
+    assert_eq!(j["topics"].as_array().unwrap().iter().find(|t| t["id"] == json!("t9")).unwrap()["places"], json!("this is not a list"));
+    assert_eq!(j["topics"].as_array().unwrap().iter().find(|t| t["id"] == json!("t5")).unwrap()["status"]["status"], json!("blocked"));
+    assert_eq!(j["questions"][1]["status"], json!("snoozed"));
+    // Changed here: the change is saved, and the rest of the unknown still goes back.
+    let mut l2 = l.clone();
+    l2.topics.iter_mut().find(|t| t.id == "t1").unwrap().status.text = "agreed with legal".into();
+    l2.questions.retain(|q| q.id != "q3");
+    let mut out = wb.clone();
+    layer::write_into(&mut out, &l2);
+    let j = layer_json(&out);
+    let t1 = &j["topics"].as_array().unwrap().iter().find(|t| t["id"] == json!("t1")).unwrap().clone();
+    assert_eq!((t1["status"]["text"].clone(), t1["priority"].clone()), (json!("agreed with legal"), json!("high")));
+    assert!(j["topics"].as_array().unwrap().iter().any(|t| t["id"] == json!("t9")), "the entry this build couldn't read stays");
+    assert_eq!(j["questions"].as_array().unwrap().len(), 1, "a question this build removed is gone");
+    assert_eq!(j["futureSetting"], json!({"x": 1}));
+    // Read again: the same.
+    let again = layer::read_from(&out);
+    assert_eq!(again.topic("t1").unwrap().status.text, "agreed with legal");
+}
+
+#[test]
+fn a_layer_that_cant_be_read_is_never_overwritten() {
+    let bad = r#"{"version": 3, "topics": [ {"id": "t1",  oops this isn't JSON"#;
+    let wb = workbook_with_layer(bad);
+    let l = layer::read_from(&wb);
+    assert!(l.origin.unreadable.as_deref().is_some_and(|w| w.contains("isn't valid JSON")), "{:?}", l.origin.unreadable);
+    // Even after changes in this session, the part stays byte for byte.
+    let mut l2 = l.clone();
+    l2.log(crate::Actor::Human, "decision", "something".into(), "x", None, String::new());
+    let mut out = wb.clone();
+    layer::write_into(&mut out, &l2);
+    let before = &wb.preserved.as_ref().unwrap().parts[0].data;
+    let after = &out.preserved.as_ref().unwrap().parts.iter().find(|p| p.name == "customXml/gridcraftAgent.xml").unwrap().data;
+    assert_eq!(before, after);
+    // A layer made only of what this build doesn't know isn't dropped as empty either.
+    let wb = workbook_with_layer(r#"{"version": 9, "somethingNew": [1, 2, 3]}"#);
+    let l = layer::read_from(&wb);
+    let mut out = wb.clone();
+    layer::write_into(&mut out, &l);
+    assert_eq!(layer_json(&out)["somethingNew"], json!([1, 2, 3]));
+}
