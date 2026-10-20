@@ -881,7 +881,11 @@ mod tests {
     }
 
     fn say_as(voice: &str, text: &str) -> Option<Audio> {
-        let dir = std::env::temp_dir().join(format!("gridcraft-voice-say-{}", std::process::id()));
+        // A folder of its own per call: tests run in parallel, and a shared one removed by one of
+        // them made the other skip (and hid a failing test).
+        static CALL: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+        let n = CALL.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!("gridcraft-voice-say-{}-{n}", std::process::id()));
         std::fs::create_dir_all(&dir).ok()?;
         let wav = dir.join(format!("q-{}.wav", text.len()));
         let ok =
@@ -948,17 +952,28 @@ mod tests {
         assert!(v.jobs.is_empty());
         let list = gridcraft_agent::mcp::call(&mut Local(&mut app.session), "list_questions", &json!({"status": "pending"})).unwrap();
         let q = &list[0];
-        let spoken = q["spokenText"].as_str().unwrap();
+        // Since topics, the cells pointed at are links inside the text, where they were pointed at
+        // (⟦n⟧ became place links), and `refs` describe them (masked for client data).
         let text = q["text"].as_str().unwrap();
-        eprintln!("spoken: {spoken}\nagent reads: {text}");
-        assert!(spoken.to_lowercase().contains("revenue"), "{spoken}");
-        assert_eq!(craft_voice::markers_in(spoken), vec![1, 2], "{spoken}");
-        assert!(text.contains("⟦1: Sheet1!B2 · Revenue = 1250000⟧"), "{text}");
-        assert!(text.contains("⟦2: Sheet1!B3 · Costs = "), "{text}");
-        // Client data: the agent never sees the real costs.
-        assert!(!text.contains("870000") && !text.contains("870,000"), "{text}");
-        assert_eq!(q["range"], json!("Sheet1!B4"));
+        eprintln!("agent reads: {text}\nrefs: {}", q["refs"]);
+        assert!(text.to_lowercase().contains("revenue"), "{text}");
+        let b2 = text.find("[B2](cell:Sheet1!B2)").unwrap_or_else(|| panic!("no link to B2 in {text}"));
+        let b3 = text.find("[B3](cell:Sheet1!B3)").unwrap_or_else(|| panic!("no link to B3 in {text}"));
+        assert!(b2 < b3, "in the order pointed at: {text}");
+        assert!(!text.contains('⟦'), "{text}");
+        assert_eq!(q["refs"][0]["range"], json!("Sheet1!B2"));
+        assert_eq!(q["refs"][0]["label"], json!("Revenue"));
+        assert_eq!(q["refs"][0]["cellText"], json!("1250000"));
         assert_eq!(q["refs"][1]["range"], json!("Sheet1!B3"));
+        assert_eq!(q["refs"][1]["label"], json!("Costs"));
+        // Client data: the agent never sees the real costs.
+        let all = q.to_string();
+        assert!(!all.contains("870000") && !all.contains("870,000"), "{all}");
+        assert_eq!(q["range"], json!("Sheet1!B4"));
+        // The pointed cells are places of the question's topic.
+        assert_eq!(q["topic"]["number"], json!(1));
+        let l = layer::get(app.session.active().unwrap());
+        assert_eq!(l.topics[0].places.len(), 3, "the asked cell and the two pointed at");
     }
 
     /// The rhythm of the first live question: three phrases, a quick click in the middle of each
@@ -1017,16 +1032,18 @@ mod tests {
             std::thread::sleep(Duration::from_millis(30));
         }
         let list = gridcraft_agent::mcp::call(&mut Local(&mut app.session), "list_questions", &json!({"status": "pending"})).unwrap();
-        let spoken = list[0]["spokenText"].as_str().unwrap().to_string();
-        eprintln!("spoken: {spoken}\nagent reads: {}", list[0]["text"]);
-        // Each reference once, in order.
-        assert_eq!(craft_voice::markers_in(&spoken), vec![1, 2, 3], "{spoken}");
+        let text = list[0]["text"].as_str().unwrap().to_string();
+        eprintln!("agent reads: {text}");
+        // Each reference once, as a link where its cell was clicked, in order.
         assert_eq!(list[0]["refs"].as_array().unwrap().len(), 3);
+        assert!(!text.contains('⟦'), "{text}");
+        let lower = text.to_lowercase();
+        let at = |w: &str| lower.find(&w.to_lowercase()).unwrap_or_else(|| panic!("no `{w}` in {text}"));
+        let (r1, r2, r3) = (at("(cell:Sheet1!B11)"), at("(cell:Sheet1!B9)"), at("(cell:Sheet1!B16)"));
+        assert!(r1 < r2 && r2 < r3, "{text}");
         // Each in the phrase spoken when its cell was clicked.
-        let lower = spoken.to_lowercase();
-        let at = |w: &str| lower.find(w).unwrap_or_else(|| panic!("no `{w}` in {spoken}"));
-        assert!(at("⟦1⟧") > at("почему") && at("⟦1⟧") < at("так"), "{spoken}");
-        assert!(at("⟦2⟧") > at("так") && at("⟦2⟧") < at("валов"), "{spoken}");
-        assert!(at("⟦3⟧") > at("валов"), "{spoken}");
+        assert!(r1 > at("почему") && r1 < at("так"), "{text}");
+        assert!(r2 > at("так") && r2 < at("валов"), "{text}");
+        assert!(r3 > at("валов"), "{text}");
     }
 }
