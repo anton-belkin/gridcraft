@@ -124,6 +124,11 @@ pub struct DocState {
     /// When each query was last refreshed (query name, Unix milliseconds), for Refresh Status and
     /// "refresh every N minutes". Not saved.
     pub refreshed_at: Vec<(String, f64)>,
+    /// Whether the scripts stored in this workbook may run (`automate.runScript`). A workbook
+    /// that arrives already carrying scripts (opened from a file) starts untrusted until the
+    /// user trusts it in this session (`automate.trustScripts`); one with no scripts starts
+    /// trusted, since any script it gains later was written here.
+    pub scripts_trusted: bool,
 }
 
 static NEXT_UID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
@@ -177,6 +182,7 @@ impl DocState {
     pub fn new(mut wb: Workbook, path: Option<String>, title: String) -> DocState {
         let mut calc = Calc::new();
         calc.recalc_all(&mut wb);
+        let scripts_trusted = !cmd::extra::has_scripts(&wb);
         let wb = Arc::new(wb);
         let sel = Selection::at(wb.active().map(|s| s.view_active).unwrap_or_default());
         DocState {
@@ -196,6 +202,7 @@ impl DocState {
             external_blocked: false,
             fetch_cache: query::FetchCache::default(),
             refreshed_at: vec![],
+            scripts_trusted,
         }
     }
     /// Whether this document may reach external data: `Ok`, or why not (the Trust Center setting,
