@@ -118,6 +118,15 @@ pub trait Ctx {
     fn web_service(&mut self, _url: &str) -> Result<String, gridcraft_core::CellError> {
         Err(gridcraft_core::CellError::Value)
     }
+    /// For GROUPBY/PIVOTBY: whether their function argument is a LAMBDA (its value is then not used).
+    fn has_lambda(&self) -> bool {
+        false
+    }
+    /// Calls that LAMBDA with `arg` (one group's values) and returns its single result; `None` when
+    /// there is no lambda.
+    fn call_lambda(&mut self, _arg: Value) -> Option<Value> {
+        None
+    }
 }
 
 pub type FnImpl = fn(&[Arg], &mut dyn Ctx) -> Value;
