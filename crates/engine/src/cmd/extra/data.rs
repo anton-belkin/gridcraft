@@ -1,4 +1,4 @@
-use super::*;
+use super::{CellRef, EngineError, Json, RangeRef, Result, Session, TableColumn, TotalsFn, bad, edit, str_param};
 
 pub(super) fn table_resize(s: &mut Session, p: &Json) -> Result<Json> {
     let r = str_param(p, "range").and_then(RangeRef::parse).ok_or_else(|| bad("table.resize", "missing `range`"))?;

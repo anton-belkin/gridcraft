@@ -11,11 +11,14 @@ use serde_json::{Value as Json, json};
 use super::access::{DataAccess, DbTable, FileEntry, HttpRequest, HttpResponse};
 use crate::Session;
 
+/// A web response: status, content type, body.
+type Response = (u16, String, Vec<u8>);
+
 /// Files and web responses held in memory.
 #[derive(Default)]
 struct Fake {
     files: Mutex<HashMap<String, Vec<u8>>>,
-    web: Mutex<HashMap<String, (u16, String, Vec<u8>)>>,
+    web: Mutex<HashMap<String, Response>>,
     gets: AtomicUsize,
 }
 
@@ -233,6 +236,19 @@ fn every_transform_step() {
     assert_eq!(rows(&p)[0], vec![json!("a-b"), json!("c")]);
     let p = preview(&mut s, parts, json!([{"op": "promoteHeaders"}, {"op": "splitColumn", "column": "Full", "delimiter": "-", "mode": "leftMost"}]));
     assert_eq!(rows(&p)[0], vec![json!("a"), json!("b-c")]);
+}
+
+#[test]
+fn every_transform_step_on_values() {
+    let fake = Arc::new(Fake::default());
+    let mut s = session(&fake);
+    let data = "Name,City,Sales\nAnn,Berlin,10\nBob,Paris,\nAnn,Berlin,10\nCy,,5\n,,\n";
+    let base = json!([{"op": "promoteHeaders"}, {"op": "changeType", "columns": [{"column": "Sales", "type": "number"}]}]);
+    let with = |extra: Json| {
+        let mut steps = base.as_array().unwrap().clone();
+        steps.extend(extra.as_array().unwrap().clone());
+        Json::Array(steps)
+    };
     // Text transforms.
     let words = "T\n  hello WORLD  \n";
     for (f, want) in [("upper", "  HELLO WORLD  "), ("lower", "  hello world  "), ("proper", "  Hello World  "), ("trim", "hello WORLD")] {
@@ -266,6 +282,19 @@ fn every_transform_step() {
     );
     assert_eq!(cols(&p), vec!["Name", "Rows", "Total", "Avg", "Max", "Cities"]);
     assert_eq!(rows(&p)[0], vec![json!("Ann"), json!(2.0), json!(20.0), json!(10.0), json!(10.0), json!(1.0)]);
+}
+
+#[test]
+fn every_transform_step_reshaping() {
+    let fake = Arc::new(Fake::default());
+    let mut s = session(&fake);
+    let data = "Name,City,Sales\nAnn,Berlin,10\nBob,Paris,\nAnn,Berlin,10\nCy,,5\n,,\n";
+    let base = json!([{"op": "promoteHeaders"}, {"op": "changeType", "columns": [{"column": "Sales", "type": "number"}]}]);
+    let with = |extra: Json| {
+        let mut steps = base.as_array().unwrap().clone();
+        steps.extend(extra.as_array().unwrap().clone());
+        Json::Array(steps)
+    };
     // Unpivot drops nulls; transpose; demote headers.
     let wide = "Id,Q1,Q2\n1,5,\n2,6,7\n";
     let p = preview(

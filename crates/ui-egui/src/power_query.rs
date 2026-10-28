@@ -2203,49 +2203,8 @@ fn sub_dialog(app: &mut SheetApp, ctx: &egui::Context, ed: &mut Editor) -> bool 
     egui::Window::new(lang.tr(title)).id(egui::Id::unique("pq_sub")).collapsible(false).resizable(false).anchor(egui::Align2::CENTER_CENTER, vec2(0.0, 0.0)).show(ctx, |ui| {
         ui.set_min_width(360.0);
         match &mut sub {
-            Sub::Rows { op, count, first } => {
-                if *op == "keepRange" {
-                    ui.label(lang.tr("First row"));
-                    ui.text_edit_singleline(first);
-                }
-                ui.label(lang.tr("Number of rows"));
-                ui.text_edit_singleline(count);
-                let (ok, cancel) = buttons(ui, lang, "OK");
-                keep = !cancel;
-                if ok {
-                    let n = count.trim().parse::<u64>().unwrap_or(0);
-                    step = Some(if *op == "keepRange" {
-                        json!({"op": "keepRange", "first": first.trim().parse::<u64>().unwrap_or(1).max(1), "count": n})
-                    } else {
-                        json!({"op": *op, "count": n})
-                    });
-                }
-            }
-            Sub::Split { delimiter, custom, mode } => {
-                ui.label(lang.tr("Select or enter delimiter"));
-                craft_ui::ComboBox::from_id_salt("pq_split_d").selected_text(lang.tr(split_label(delimiter))).show_ui(ui, |ui| {
-                    for (v, l) in [(",", "Comma"), (";", "Semicolon"), ("\t", "Tab"), (" ", "Space"), ("=", "Equal Sign"), ("custom", "--Custom--")] {
-                        if ui.selectable_label(*delimiter == v, lang.tr(l)).clicked() {
-                            *delimiter = v.to_string();
-                        }
-                    }
-                });
-                if delimiter == "custom" {
-                    ui.text_edit_singleline(custom);
-                }
-                ui.label(lang.tr("Split at"));
-                for (v, l) in [("leftMost", "Left-most delimiter"), ("rightMost", "Right-most delimiter"), ("each", "Each occurrence of the delimiter")] {
-                    if ui.radio(*mode == v, lang.tr(l)).clicked() {
-                        *mode = v.to_string();
-                    }
-                }
-                let (ok, cancel) = buttons(ui, lang, "OK");
-                keep = !cancel;
-                if ok && let Some(col) = ed.selected.first() {
-                    let d = if delimiter == "custom" { custom.clone() } else { delimiter.clone() };
-                    step = Some(json!({"op": "splitColumn", "column": col, "delimiter": d, "mode": mode}));
-                }
-            }
+            Sub::Rows { op, count, first } => (keep, step) = rows_form(ui, lang, op, count, first),
+            Sub::Split { delimiter, custom, mode } => (keep, step) = split_form(ui, lang, ed.selected.first(), delimiter, custom, mode),
             Sub::GroupBy { key, name, op, column } => {
                 ui.label(lang.tr("Specify the column to group by and the desired output."));
                 col_combo(ui, "pq_gb_key", &columns, key);
@@ -2515,4 +2474,63 @@ fn split_label(d: &str) -> &'static str {
         "=" => "Equal Sign",
         _ => "--Custom--",
     }
+}
+
+/// Keep / Remove Rows: the step, if OK was clicked; `false` when the form was canceled.
+fn rows_form(ui: &mut Ui, lang: Language, op: &str, count: &mut String, first: &mut String) -> (bool, Option<Json>) {
+    let mut step = None;
+    if op == "keepRange" {
+        ui.label(lang.tr("First row"));
+        ui.text_edit_singleline(first);
+    }
+    ui.label(lang.tr("Number of rows"));
+    ui.text_edit_singleline(count);
+    let (ok, cancel) = buttons(ui, lang, "OK");
+
+    if ok {
+        let n = count.trim().parse::<u64>().unwrap_or(0);
+        step = Some(if op == "keepRange" {
+            json!({"op": "keepRange", "first": first.trim().parse::<u64>().unwrap_or(1).max(1), "count": n})
+        } else {
+            json!({"op": op, "count": n})
+        });
+    }
+    (!cancel, step)
+}
+
+/// Split Column by Delimiter: the step for the first selected column, if OK was clicked; `false`
+/// when the form was canceled.
+fn split_form(
+    ui: &mut Ui,
+    lang: Language,
+    selected: Option<&String>,
+    delimiter: &mut String,
+    custom: &mut String,
+    mode: &mut String,
+) -> (bool, Option<Json>) {
+    let mut step = None;
+    ui.label(lang.tr("Select or enter delimiter"));
+    craft_ui::ComboBox::from_id_salt("pq_split_d").selected_text(lang.tr(split_label(delimiter))).show_ui(ui, |ui| {
+        for (v, l) in [(",", "Comma"), (";", "Semicolon"), ("\t", "Tab"), (" ", "Space"), ("=", "Equal Sign"), ("custom", "--Custom--")] {
+            if ui.selectable_label(*delimiter == v, lang.tr(l)).clicked() {
+                *delimiter = v.to_string();
+            }
+        }
+    });
+    if delimiter == "custom" {
+        ui.text_edit_singleline(custom);
+    }
+    ui.label(lang.tr("Split at"));
+    for (v, l) in [("leftMost", "Left-most delimiter"), ("rightMost", "Right-most delimiter"), ("each", "Each occurrence of the delimiter")] {
+        if ui.radio(*mode == v, lang.tr(l)).clicked() {
+            *mode = v.to_string();
+        }
+    }
+    let (ok, cancel) = buttons(ui, lang, "OK");
+
+    if ok && let Some(col) = selected {
+        let d = if delimiter == "custom" { custom.clone() } else { delimiter.clone() };
+        step = Some(json!({"op": "splitColumn", "column": col, "delimiter": d, "mode": mode}));
+    }
+    (!cancel, step)
 }

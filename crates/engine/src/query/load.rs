@@ -125,70 +125,13 @@ pub fn write_load(cx: &mut Ctx<'_>, query: &str, load: &QueryLoad, t: &QTable) -
         return Err("The query only creates a connection.".into());
     }
     let headers = if t.columns.is_empty() { vec!["Column1".to_string()] } else { table_headers(&t.columns) };
-    // Calculated columns added to the old table stay, right of the result's columns, their formula
-    // in every row (as Excel keeps them on refresh): the column and its first data cell.
-    let calc: Vec<(TableColumn, Option<(CellRef, Cell)>)> = match load.table.as_deref().and_then(|n| cx.wb.table(n)) {
-        Some((si, ti)) => match cx.wb.sheet(si).and_then(|sh| sh.tables.get(ti).map(|t| (sh, t))) {
-            Some((sh, old)) => old
-                .columns
-                .iter()
-                .enumerate()
-                .filter(|(_, c)| c.formula.is_some() && !headers.contains(&c.name))
-                .map(|(j, c)| {
-                    let first = old.data_range().map(|d| CellRef::new(d.start.row, old.range.start.col + j as u32));
-                    (c.clone(), first.and_then(|f| sh.cell(f).cloned().map(|cell| (f, cell))))
-                })
-                .collect(),
-            None => vec![],
-        },
-        None => vec![],
-    };
-    // The old table's filter, by column name (a refresh keeps it and filters the new rows).
-    let old_filter: Vec<(String, gridcraft_model::FilterCriterion)> = match load.table.as_deref().and_then(|n| cx.wb.table(n)) {
-        Some((si, ti)) => cx
-            .wb
-            .sheet(si)
-            .and_then(|sh| sh.tables.get(ti))
-            .map(|t| t.filter.iter().filter_map(|(off, c)| t.columns.get(*off as usize).map(|col| (col.name.clone(), c.clone()))).collect())
-            .unwrap_or_default(),
-        None => vec![],
-    };
+    let calc = kept_calc_columns(cx, load, &headers);
+    let old_filter = table_filter(cx, load);
     let previous = match load.table.as_deref() {
         Some(name) => remove_table(cx, name)?,
         None => None,
     };
-    let mut new_sheet = None;
-    let (si, anchor) = match &previous {
-        Some((si, range, _)) => (*si, range.start),
-        None => match load.sheet.as_deref().and_then(|n| cx.wb.sheet_index(n)) {
-            Some(si) => {
-                let at = match load.cell.as_deref() {
-                    Some(c) => CellRef::parse(&c.replace('$', "")).ok_or_else(|| format!("'{c}' isn't a cell reference."))?,
-                    None => CellRef::new(0, 0),
-                };
-                (si, at)
-            }
-            None => {
-                if cx.wb.protected_structure {
-                    return Err("The workbook is protected and cannot be changed.".into());
-                }
-                let name = sheet_name_for(&cx.wb, query);
-                let at = (cx.wb.active_sheet() + 1).min(cx.wb.sheets.len());
-                cx.wb.sheets.insert(at, Arc::new(Sheet::new(name)));
-                for n in cx.wb.names.iter_mut() {
-                    if let Some(sc) = n.scope.as_mut()
-                        && *sc >= at
-                    {
-                        *sc += 1;
-                    }
-                }
-                cx.wb.set_active_sheet(at);
-                *cx.sel = crate::Selection::default();
-                new_sheet = Some(at);
-                (at, CellRef::new(0, 0))
-            }
-        },
-    };
+    let (si, anchor, new_sheet) = load_anchor(cx, query, load, &previous)?;
     let width = (headers.len() + calc.len()) as u32;
     let data_rows = t.rows.len().max(1) as u32;
     let end_row = anchor.row.checked_add(data_rows).filter(|r| *r < SHEET_ROWS);
@@ -347,6 +290,83 @@ pub fn write_load(cx: &mut Ctx<'_>, query: &str, load: &QueryLoad, t: &QTable) -
     }
     cx.structural = true;
     Ok(Loaded { sheet: si, table: name, range, new_sheet })
+}
+
+/// Calculated columns added to the old table stay, right of the result's columns, their formula
+/// in every row (as Excel keeps them on refresh): the column and its first data cell.
+fn kept_calc_columns(cx: &Ctx<'_>, load: &QueryLoad, headers: &[String]) -> Vec<(TableColumn, Option<(CellRef, Cell)>)> {
+    match load.table.as_deref().and_then(|n| cx.wb.table(n)) {
+        Some((si, ti)) => match cx.wb.sheet(si).and_then(|sh| sh.tables.get(ti).map(|t| (sh, t))) {
+            Some((sh, old)) => old
+                .columns
+                .iter()
+                .enumerate()
+                .filter(|(_, c)| c.formula.is_some() && !headers.contains(&c.name))
+                .map(|(j, c)| {
+                    let first = old.data_range().map(|d| CellRef::new(d.start.row, old.range.start.col + j as u32));
+                    (c.clone(), first.and_then(|f| sh.cell(f).cloned().map(|cell| (f, cell))))
+                })
+                .collect(),
+            None => vec![],
+        },
+        None => vec![],
+    }
+}
+
+/// The old table's filter, by column name (a refresh keeps it and filters the new rows).
+fn table_filter(cx: &Ctx<'_>, load: &QueryLoad) -> Vec<(String, gridcraft_model::FilterCriterion)> {
+    match load.table.as_deref().and_then(|n| cx.wb.table(n)) {
+        Some((si, ti)) => cx
+            .wb
+            .sheet(si)
+            .and_then(|sh| sh.tables.get(ti))
+            .map(|t| t.filter.iter().filter_map(|(off, c)| t.columns.get(*off as usize).map(|col| (col.name.clone(), c.clone()))).collect())
+            .unwrap_or_default(),
+        None => vec![],
+    }
+}
+
+/// Where the loaded table goes: the old table's place, `load`'s cell on its sheet, or a new
+/// worksheet (its index is the third value).
+fn load_anchor(
+    cx: &mut Ctx<'_>,
+    query: &str,
+    load: &QueryLoad,
+    previous: &Option<(usize, RangeRef, Table)>,
+) -> QResult<(usize, CellRef, Option<usize>)> {
+    let mut new_sheet = None;
+    let (si, anchor) = match previous {
+        Some((si, range, _)) => (*si, range.start),
+        None => match load.sheet.as_deref().and_then(|n| cx.wb.sheet_index(n)) {
+            Some(si) => {
+                let at = match load.cell.as_deref() {
+                    Some(c) => CellRef::parse(&c.replace('$', "")).ok_or_else(|| format!("'{c}' isn't a cell reference."))?,
+                    None => CellRef::new(0, 0),
+                };
+                (si, at)
+            }
+            None => {
+                if cx.wb.protected_structure {
+                    return Err("The workbook is protected and cannot be changed.".into());
+                }
+                let name = sheet_name_for(&cx.wb, query);
+                let at = (cx.wb.active_sheet() + 1).min(cx.wb.sheets.len());
+                cx.wb.sheets.insert(at, Arc::new(Sheet::new(name)));
+                for n in cx.wb.names.iter_mut() {
+                    if let Some(sc) = n.scope.as_mut()
+                        && *sc >= at
+                    {
+                        *sc += 1;
+                    }
+                }
+                cx.wb.set_active_sheet(at);
+                *cx.sel = crate::Selection::default();
+                new_sheet = Some(at);
+                (at, CellRef::new(0, 0))
+            }
+        },
+    };
+    Ok((si, anchor, new_sheet))
 }
 
 #[cfg(test)]

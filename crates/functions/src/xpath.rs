@@ -183,7 +183,10 @@ impl Doc {
     }
 }
 
-fn push_text(nodes: &mut Vec<Node>, stack: &[usize], text: String, add: &dyn Fn(&mut Vec<Node>, &[usize], Node) -> Option<usize>) -> Option<()> {
+/// Adds a node under the open element on `stack`, returning its index.
+type AddNode<'a> = &'a dyn Fn(&mut Vec<Node>, &[usize], Node) -> Option<usize>;
+
+fn push_text(nodes: &mut Vec<Node>, stack: &[usize], text: String, add: AddNode) -> Option<()> {
     if stack.len() == 1 {
         // Text outside the document element must be blank.
         return text.trim().is_empty().then_some(());

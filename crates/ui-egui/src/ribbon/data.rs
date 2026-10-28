@@ -1,5 +1,5 @@
 use super::controls::{act, control_keytip, keytip, menu_items, sep};
-use super::*;
+use super::{Icon, SheetApp, Ui, big_button, big_split_button, json, keytip_table, pos2, small_button, vec2};
 
 /// What a Get Data menu item does when it is enabled.
 #[derive(Clone, Copy)]

@@ -349,6 +349,10 @@ fn the_language() {
     assert_eq!(show("let f = (n) => if n = 0 then 1 else n * @f(n - 1) in f(5)"), "120");
     assert_eq!(show("1 is number and \"a\" is text and null is nullable text and not (null is text)"), "true");
     assert!(show("\"a\" as number").starts_with("ERROR"));
+}
+
+#[test]
+fn the_language_with_library_values() {
     assert_eq!(show("#date(2026, 1, 31) + #duration(1, 0, 0, 0)"), "#date(2026, 2, 1)");
     assert_eq!(show("Table.Profile"), "ERROR Expression.Error: The M function 'Table.Profile' isn't supported by GridCraft yet.");
     assert_eq!(show("#date(2026, 3, 1) - #date(2026, 2, 1)"), "28.00:00:00");
