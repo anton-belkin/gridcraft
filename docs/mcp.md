@@ -9,7 +9,7 @@ Two backends:
 | Mode | Command | What it drives |
 |---|---|---|
 | Headless (default) | `gridcraft-cli mcp [--in book.xlsx \| --sample budget]` | An in-process engine session — no window. |
-| Remote | `gridcraft-cli mcp --connect 7979` | A running app started with `gridcraft --control 7979` (TCP JSON lines on `127.0.0.1`). |
+| Remote | `gridcraft-cli mcp --connect 7979` | A running app started with `gridcraft --control 7979` (TCP JSON lines on `127.0.0.1`, authenticated with the app's token: it is read from the app's token file or `GRIDCRAFT_CONTROL_TOKEN`, see [`control-protocol.md`](control-protocol.md)). |
 
 ## Claude Code
 
@@ -41,6 +41,7 @@ with a file open.
 |---|---|---|
 | `execute_command` | `command`, `params?` | Runs **any** engine command (`cell.set`, `home.bold`, `data.removeDuplicates`, …). |
 | `list_commands` | `search?` | Command ids, labels, ribbon paths, shortcuts and parameter docs. |
+| `list_windows` | — | Open windows: window id, workbook (`doc`) id, title ("Book1", or "Book1:2" for a workbook's second window), unsaved changes, active, hidden. |
 | `inspect_workbook` | — | Sheets, used ranges, tables, charts, names, selection, history. |
 | `read_range` | `range?`, `sheet?`, `formulas?`, `formatted?` | Rows of values (default: the used range). |
 | `write_range` | `range`, `values` (2-D) | `range.setValues`; strings starting with `=` are formulas. |
@@ -65,6 +66,10 @@ create and load queries, `query.navigator` lists what a source offers, `query.se
 HTTP(S) requests and, on Windows, reaches ODBC sources itself; with `--connect` the app does. A
 workbook opened with queries or WEBSERVICE calls keeps external content disabled until
 `data.enableContent`. Query JSON and the step reference are in [cli.md](cli.md#get--transform-power-query).
+
+Every tool that acts on a workbook (all but `list_commands`, `list_functions`, `list_windows`, `open_workbook`,
+`new_workbook` and `screenshot`) also takes `window` or `doc`, an id from `list_windows`, and acts in that window
+(for `doc`, the workbook's most recent window) without bringing it forward. Without them it acts in the active window.
 
 Results are one text block holding pretty JSON; failures set `isError: true` with a readable message. Unknown tools,
 missing required arguments and wrong argument types are JSON-RPC `-32602` errors; malformed JSON is `-32700`; unknown

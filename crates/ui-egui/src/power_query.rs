@@ -385,7 +385,7 @@ fn navigator(app: &mut SheetApp, ui: &mut Ui, d: &mut Dialog, open: &mut bool) {
         ui.horizontal(|ui| {
             ui.label(lang.tr("File Origin"));
             let enc = d.values.get("encoding").and_then(Json::as_str).unwrap_or("").to_string();
-            egui::ComboBox::from_id_salt("pq_origin").selected_text(lang.tr(origin_label(&enc))).show_ui(ui, |ui| {
+            craft_ui::ComboBox::from_id_salt("pq_origin").selected_text(lang.tr(origin_label(&enc))).show_ui(ui, |ui| {
                 for (v, label) in [
                     ("", "Detect automatically"),
                     ("utf-8", "65001: Unicode (UTF-8)"),
@@ -399,7 +399,7 @@ fn navigator(app: &mut SheetApp, ui: &mut Ui, d: &mut Dialog, open: &mut bool) {
             });
             ui.label(lang.tr("Delimiter"));
             let delim = d.values.get("delimiter").and_then(Json::as_str).unwrap_or("").to_string();
-            egui::ComboBox::from_id_salt("pq_delim").selected_text(lang.tr(delimiter_label(&delim))).show_ui(ui, |ui| {
+            craft_ui::ComboBox::from_id_salt("pq_delim").selected_text(lang.tr(delimiter_label(&delim))).show_ui(ui, |ui| {
                 for (v, label) in [("", "Detect automatically"), (",", "Comma"), (";", "Semicolon"), ("tab", "Tab"), (" ", "Space"), ("|", "Pipe")] {
                     if ui.selectable_label(delim == v, lang.tr(label)).clicked() {
                         d.values.insert("delimiter".into(), json!(v));
@@ -979,7 +979,7 @@ fn query_names(app: &SheetApp) -> Vec<String> {
 /// Columns worked out once per key and kept in egui's memory, so an open dialog doesn't evaluate
 /// a query every frame.
 fn remembered_columns(ui: &Ui, key: &str, compute: impl FnOnce() -> Vec<String>) -> Vec<String> {
-    let id = egui::Id::new(("pq_columns", key));
+    let id = egui::Id::unique(("pq_columns", key));
     if let Some(v) = ui.ctx().data(|d| d.get_temp::<Vec<String>>(id)) {
         return v;
     }
@@ -998,7 +998,7 @@ fn query_columns(app: &mut SheetApp, ui: &Ui, name: &str) -> Vec<String> {
 
 fn combo(ui: &mut Ui, id: &str, current: &str, options: &[String]) -> Option<String> {
     let mut picked = None;
-    egui::ComboBox::from_id_salt(id).width(220.0).selected_text(current).show_ui(ui, |ui| {
+    craft_ui::ComboBox::from_id_salt(id).width(220.0).selected_text(current).show_ui(ui, |ui| {
         for o in options {
             if ui.selectable_label(o == current, o.as_str()).clicked() {
                 picked = Some(o.clone());
@@ -1039,7 +1039,7 @@ const JOIN_KINDS: [(&str, &str); 6] = [
 
 fn join_combo(ui: &mut Ui, lang: Language, join: &mut String) {
     let current = JOIN_KINDS.iter().find(|(k, _)| *k == join.as_str()).map(|(_, l)| *l).unwrap_or(JOIN_KINDS[0].1);
-    egui::ComboBox::from_id_salt("pq_join").width(360.0).selected_text(lang.tr(current)).show_ui(ui, |ui| {
+    craft_ui::ComboBox::from_id_salt("pq_join").width(360.0).selected_text(lang.tr(current)).show_ui(ui, |ui| {
         for (k, l) in JOIN_KINDS {
             if ui.selectable_label(*join == k, lang.tr(l)).clicked() {
                 *join = k.to_string();
@@ -1132,15 +1132,15 @@ pub fn pane(app: &mut SheetApp, ui: &mut Ui) {
     let queries = app.session.run("query.list", json!({})).unwrap_or(json!([]));
     let blocked = app.session.active().is_some_and(|d| d.external_blocked);
     ui.horizontal(|ui| {
-        let tab = ui.ctx().data(|m| m.get_temp::<bool>(egui::Id::new("pq_pane_connections"))).unwrap_or(false);
+        let tab = ui.ctx().data(|m| m.get_temp::<bool>(egui::Id::unique("pq_pane_connections"))).unwrap_or(false);
         if ui.selectable_label(!tab, lang.tr("Queries")).clicked() {
-            ui.ctx().data_mut(|m| m.insert_temp(egui::Id::new("pq_pane_connections"), false));
+            ui.ctx().data_mut(|m| m.insert_temp(egui::Id::unique("pq_pane_connections"), false));
         }
         if ui.selectable_label(tab, lang.tr("Connections")).clicked() {
-            ui.ctx().data_mut(|m| m.insert_temp(egui::Id::new("pq_pane_connections"), true));
+            ui.ctx().data_mut(|m| m.insert_temp(egui::Id::unique("pq_pane_connections"), true));
         }
     });
-    let connections = ui.ctx().data(|m| m.get_temp::<bool>(egui::Id::new("pq_pane_connections"))).unwrap_or(false);
+    let connections = ui.ctx().data(|m| m.get_temp::<bool>(egui::Id::unique("pq_pane_connections"))).unwrap_or(false);
     let list = queries.as_array().cloned().unwrap_or_default();
     let excel = app.session.run("query.listExcel", json!({})).ok().and_then(|v| v.as_array().cloned()).unwrap_or_default();
     let count = list.len() + excel.len();
@@ -1248,7 +1248,7 @@ fn excel_query_row(app: &mut SheetApp, ui: &mut Ui, t: &Tokens, lang: Language, 
         (Some("dataModel"), _) => lang.tr("Loads to the Data Model.").to_string(),
         _ => lang.tr("Connection only.").to_string(),
     };
-    let open_id = egui::Id::new(("pq_excel_m", &name));
+    let open_id = egui::Id::unique(("pq_excel_m", &name));
     let mut open = ui.ctx().data(|m| m.get_temp::<bool>(open_id)).unwrap_or(false);
     let mut toggle = false;
     let r = egui::Frame::NONE
@@ -1550,7 +1550,7 @@ pub fn show_editor(app: &mut SheetApp, ctx: &egui::Context) {
     let mut close = false;
     let title = format!("{} - {}", ed.name(), lang.tr("Power Query Editor"));
     egui::Window::new(title)
-        .id(egui::Id::new("power_query_editor"))
+        .id(egui::Id::unique("power_query_editor"))
         .default_size(vec2(1060.0, 660.0))
         .min_size(vec2(720.0, 420.0))
         .resizable(true)
@@ -1591,7 +1591,7 @@ pub fn show_editor(app: &mut SheetApp, ctx: &egui::Context) {
             .unwrap_or_default();
         let mut shown = true;
         egui::Window::new(format!("{} - {}", ed.name(), lang.tr("Advanced Editor")))
-            .id(egui::Id::new("pq_advanced"))
+            .id(egui::Id::unique("pq_advanced"))
             .default_size(vec2(640.0, 380.0))
             .open(&mut shown)
             .show(ctx, |ui| {
@@ -1614,7 +1614,7 @@ pub fn show_editor(app: &mut SheetApp, ctx: &egui::Context) {
     }
     if ed.confirm_close {
         let mut keep = None;
-        egui::Window::new(lang.tr("Power Query Editor")).id(egui::Id::new("pq_confirm")).collapsible(false).resizable(false).show(ctx, |ui| {
+        egui::Window::new(lang.tr("Power Query Editor")).id(egui::Id::unique("pq_confirm")).collapsible(false).resizable(false).show(ctx, |ui| {
             ui.label(lang.tr("Do you want to keep your changes?"));
             ui.horizontal(|ui| {
                 if ui.button(lang.tr("Keep")).clicked() {
@@ -2150,7 +2150,7 @@ const FILTER_OPS: [(&str, &str); 14] = [
 
 fn op_combo(ui: &mut Ui, id: &str, lang: Language, op: &mut String, allow_none: bool) {
     let current = FILTER_OPS.iter().find(|(k, _)| *k == op.as_str()).map(|(_, l)| lang.tr(l)).unwrap_or("");
-    egui::ComboBox::from_id_salt(id).width(190.0).selected_text(current).show_ui(ui, |ui| {
+    craft_ui::ComboBox::from_id_salt(id).width(190.0).selected_text(current).show_ui(ui, |ui| {
         if allow_none && ui.selectable_label(op.is_empty(), "").clicked() {
             op.clear();
         }
@@ -2200,7 +2200,7 @@ fn sub_dialog(app: &mut SheetApp, ctx: &egui::Context, ed: &mut Editor) -> bool 
     let mut keep = true;
     let mut step: Option<Json> = None;
     let mut done = false;
-    egui::Window::new(lang.tr(title)).id(egui::Id::new("pq_sub")).collapsible(false).resizable(false).anchor(egui::Align2::CENTER_CENTER, vec2(0.0, 0.0)).show(ctx, |ui| {
+    egui::Window::new(lang.tr(title)).id(egui::Id::unique("pq_sub")).collapsible(false).resizable(false).anchor(egui::Align2::CENTER_CENTER, vec2(0.0, 0.0)).show(ctx, |ui| {
         ui.set_min_width(360.0);
         match &mut sub {
             Sub::Rows { op, count, first } => {
@@ -2223,7 +2223,7 @@ fn sub_dialog(app: &mut SheetApp, ctx: &egui::Context, ed: &mut Editor) -> bool 
             }
             Sub::Split { delimiter, custom, mode } => {
                 ui.label(lang.tr("Select or enter delimiter"));
-                egui::ComboBox::from_id_salt("pq_split_d").selected_text(lang.tr(split_label(delimiter))).show_ui(ui, |ui| {
+                craft_ui::ComboBox::from_id_salt("pq_split_d").selected_text(lang.tr(split_label(delimiter))).show_ui(ui, |ui| {
                     for (v, l) in [(",", "Comma"), (";", "Semicolon"), ("\t", "Tab"), (" ", "Space"), ("=", "Equal Sign"), ("custom", "--Custom--")] {
                         if ui.selectable_label(*delimiter == v, lang.tr(l)).clicked() {
                             *delimiter = v.to_string();
@@ -2257,7 +2257,7 @@ fn sub_dialog(app: &mut SheetApp, ctx: &egui::Context, ed: &mut Editor) -> bool 
                     ui.text_edit_singleline(name);
                     let ops = [("count", "Count Rows"), ("countDistinct", "Count Distinct Rows"), ("sum", "Sum"), ("average", "Average"), ("median", "Median"), ("min", "Min"), ("max", "Max")];
                     let cur = ops.iter().find(|(k, _)| *k == op.as_str()).map(|(_, l)| lang.tr(l)).unwrap_or("");
-                    egui::ComboBox::from_id_salt("pq_gb_op").selected_text(cur).show_ui(ui, |ui| {
+                    craft_ui::ComboBox::from_id_salt("pq_gb_op").selected_text(cur).show_ui(ui, |ui| {
                         for (k, l) in ops {
                             if ui.selectable_label(*op == k, lang.tr(l)).clicked() {
                                 *op = k.to_string();
@@ -2443,7 +2443,7 @@ fn sub_dialog(app: &mut SheetApp, ctx: &egui::Context, ed: &mut Editor) -> bool 
                 }
             }
             Sub::Locale { ty, locale } => {
-                egui::ComboBox::from_id_salt("pq_loc_t").selected_text(lang.tr(type_items().iter().find(|(k, _)| *k == ty.as_str()).map(|(_, l)| *l).unwrap_or(""))).show_ui(ui, |ui| {
+                craft_ui::ComboBox::from_id_salt("pq_loc_t").selected_text(lang.tr(type_items().iter().find(|(k, _)| *k == ty.as_str()).map(|(_, l)| *l).unwrap_or(""))).show_ui(ui, |ui| {
                     for (k, l) in type_items() {
                         if ui.selectable_label(*ty == k, lang.tr(l)).clicked() {
                             *ty = k.to_string();

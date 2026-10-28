@@ -173,7 +173,7 @@ pub fn write_load(cx: &mut Ctx<'_>, query: &str, load: &QueryLoad, t: &QTable) -
                     return Err("The workbook is protected and cannot be changed.".into());
                 }
                 let name = sheet_name_for(&cx.wb, query);
-                let at = (cx.wb.active_sheet + 1).min(cx.wb.sheets.len());
+                let at = (cx.wb.active_sheet() + 1).min(cx.wb.sheets.len());
                 cx.wb.sheets.insert(at, Arc::new(Sheet::new(name)));
                 for n in cx.wb.names.iter_mut() {
                     if let Some(sc) = n.scope.as_mut()
@@ -182,7 +182,7 @@ pub fn write_load(cx: &mut Ctx<'_>, query: &str, load: &QueryLoad, t: &QTable) -
                         *sc += 1;
                     }
                 }
-                cx.wb.active_sheet = at;
+                cx.wb.set_active_sheet(at);
                 *cx.sel = crate::Selection::default();
                 new_sheet = Some(at);
                 (at, CellRef::new(0, 0))

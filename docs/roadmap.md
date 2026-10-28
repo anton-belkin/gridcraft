@@ -1,6 +1,6 @@
 # Roadmap detail
 
-> **Last reviewed:** 2026-10-11 · **Last updated:** 2026-10-20 · **Change:** trivial (the rest of the M library listed beside Get & Transform) · **Target:** Microsoft Excel (Microsoft 365)
+> **Last reviewed:** 2026-10-11 · **Last updated:** 2026-10-23 · **Change:** minor (test command) · **Target:** Microsoft Excel (Microsoft 365)
 
 Forward-looking plan. The one-page summary is [`ROADMAP.md`](../ROADMAP.md); the ranked work
 list is [`gaps.md`](gaps.md); numbers and method are in
@@ -100,7 +100,8 @@ to check our files, and Windows machines with the reported GPU drivers.
 
 - `cargo xtask parity` regenerates [`parity-checklist.md`](parity-checklist.md) (ribbon
   catalog vs registered commands); `cargo xtask ci` checks it is current.
-- `cargo test --workspace`: engine, formula, function, XLSX and UI behaviour.
+- `cargo xtask test`: engine, formula, function, XLSX and UI behaviour (cargo-nextest when
+  installed, else `cargo test`), then the doctests.
 - `cargo run --release -p gridcraft-ui-egui --example snapshot -- --sample sales out.png`: look at
   the UI offscreen.
 - Function coverage: the script method in [function-parity.md](function-parity.md). A
@@ -112,6 +113,7 @@ to check our files, and Windows machines with the reported GPU drivers.
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-23 | minor | Measuring: tests run through `cargo xtask test` |
 | 2026-10-20 | trivial | After-beta list: the rest of the M library (100–170 h) beside the Get & Transform remainder |
 | 2026-10-14 | minor | Get & Transform landed (M16 partly); remaining #12 work 30–60 h |
 | 2026-10-11 | minor | PivotTable calculated fields landed |
