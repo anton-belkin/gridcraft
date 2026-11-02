@@ -11,6 +11,7 @@
 //! choice made in the app. [`sync`] turns the active document's choice into the runner's mode and
 //! configuration. A person's change is undoable like their other layer actions.
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Mutex;
 
@@ -22,12 +23,18 @@ use crate::commands::{bad, spec, str_p};
 use crate::layer::{self, AgentContext, CodeVia, ContextKind, Layer};
 use crate::runner::{self, Mode};
 
-pub static SPECS: &[CommandSpec] = &[spec!(
-    change "agent.agentContext",
-    "Agent Context",
-    "{kind?: none|cowork|code, via?: session|folder, web?: bool, folder?: path} — what the agent knows about this document: only the document (a background client; `web` also allows web search), your Cowork chat, or your Claude Code session or a project folder. A person's choice, saved in the document → the context",
-    context_cmd
-)];
+pub static SPECS: &[CommandSpec] = &[
+    spec!(
+        change "agent.agentContext",
+        "Agent Context",
+        "{kind?: none|cowork|code|codex|off, via?: session|folder, web?: bool, folder?: path} — what the agent knows about this document: only the document (a background client; `web` also allows web search), your Cowork chat, or your Claude Code session or a project folder. A person's choice, saved in the document → the context",
+        context_cmd
+    ),
+    spec!(query "agent.codexConnect", "Connect Codex", "{} — connects this app's Codex question worker (a person's action)", codex_connect),
+    spec!(change "agent.codexOrigin", "Codex Origin Chat", "{threadId?, title?} — records the Desktop chat that created this file; no params reads the saved origin", codex_origin),
+    spec!(query "agent.codexRoute", "Codex Delivery Status", "{status?, threadId?, title?, detail?} — live Desktop delivery status; not saved in the workbook", codex_route),
+    spec!(query "agent.codexOpenChat", "Open Codex Chat", "{} — opens this document's actual Desktop chat (a person's action)", codex_open_chat),
+];
 
 impl ContextKind {
     pub fn parse(s: &str) -> Option<ContextKind> {
@@ -35,6 +42,7 @@ impl ContextKind {
             "none" | "no context" | "document" => Some(ContextKind::None),
             "cowork" | "claude cowork" => Some(ContextKind::Cowork),
             "code" | "claude code" => Some(ContextKind::Code),
+            "codex" => Some(ContextKind::Codex),
             "off" => Some(ContextKind::Off),
             _ => None,
         }
@@ -44,6 +52,7 @@ impl ContextKind {
             ContextKind::None => "none",
             ContextKind::Cowork => "cowork",
             ContextKind::Code => "code",
+            ContextKind::Codex => "codex",
             ContextKind::Off => "off",
         }
     }
@@ -53,6 +62,7 @@ impl ContextKind {
             ContextKind::None => ("No context", "Only this document. Runs in the background.", &["Document"]),
             ContextKind::Cowork => ("Claude Cowork", "Your Cowork chat, its project and memory.", &["Document", "Your chat"]),
             ContextKind::Code => ("Claude Code", "Your Claude Code session or a project folder.", &["Document", "Project folder"]),
+            ContextKind::Codex => ("Codex", "Codex answers through AItoCraft. New and open documents connect automatically.", &["Document", "Codex"]),
             ContextKind::Off => ("Agent off", "No agent: its tools refuse, nothing is sent.", &[]),
         }
     }
@@ -78,7 +88,7 @@ impl CodeVia {
 pub fn mode_of(c: &AgentContext) -> Mode {
     match (c.kind, c.via) {
         (ContextKind::None, _) | (ContextKind::Code, CodeVia::Folder) => Mode::Background,
-        (ContextKind::Cowork, _) => Mode::Manual,
+        (ContextKind::Cowork | ContextKind::Codex, _) => Mode::Manual,
         (ContextKind::Code, CodeVia::Session) => Mode::Channel,
         (ContextKind::Off, _) => Mode::Off,
     }
@@ -87,6 +97,7 @@ pub fn mode_of(c: &AgentContext) -> Mode {
 /// The context a runner mode stands for (an app started with `--agent-mode`, or before Context).
 pub fn from_mode(m: Mode) -> AgentContext {
     let kind = match m {
+        _ if codex_enabled() && m != Mode::Off => ContextKind::Codex,
         Mode::Manual => ContextKind::Cowork,
         Mode::Channel => ContextKind::Code,
         Mode::Background => ContextKind::None,
@@ -121,7 +132,7 @@ pub fn last() -> AgentContext {
 
 fn remember(c: &AgentContext) {
     // The mode carries over to new documents; a project folder is the document's own.
-    let keep = AgentContext { folder: String::new(), ..c.clone() };
+    let keep = AgentContext { folder: String::new(), codex_thread_id: String::new(), codex_thread_title: String::new(), ..c.clone() };
     if let Some(f) = last_file() {
         if let Some(dir) = f.parent() {
             let _ = std::fs::create_dir_all(dir);
@@ -150,9 +161,21 @@ pub fn forget_last() {
     }
 }
 
+/// This app instance is served by Codex, without consulting another client's settings.
+pub fn codex_enabled() -> bool {
+    std::env::var("GRIDCRAFT_AGENT_PROVIDER").is_ok_and(|v| v == "codex")
+}
+
 /// The document's context: its own, else the app's last.
 pub fn effective(l: &Layer) -> AgentContext {
-    l.context.clone().unwrap_or_else(last)
+    let mut c = l.context.clone().unwrap_or_else(last);
+    // The Codex launcher owns the runtime. Legacy saved contexts cannot start another client.
+    if codex_enabled() && c.kind != ContextKind::Off {
+        c.kind = ContextKind::Codex;
+        c.folder.clear();
+        c.web = false;
+    }
+    c
 }
 
 /// Brings the runner in line with the active document's context: its mode, the folder the
@@ -186,7 +209,10 @@ pub fn set(s: &mut Session, p: &Json) -> gridcraft_engine::Result<AgentContext> 
     let before = layer::get(d).context.clone();
     let mut c = before.clone().unwrap_or_else(last);
     if let Some(k) = str_p(p, "kind") {
-        c.kind = ContextKind::parse(k).ok_or_else(|| bad(CMD, "`kind` is none, cowork or code"))?;
+        c.kind = ContextKind::parse(k).ok_or_else(|| bad(CMD, "`kind` is none, cowork, code, codex or off"))?;
+    }
+    if codex_enabled() && !matches!(c.kind, ContextKind::Codex | ContextKind::Off) {
+        return Err(bad(CMD, "this app instance uses Codex; choose codex or off"));
     }
     if let Some(v) = str_p(p, "via") {
         c.via = CodeVia::parse(v).ok_or_else(|| bad(CMD, "`via` is session or folder"))?;
@@ -239,6 +265,8 @@ pub fn context_json(c: &AgentContext) -> Json {
         "via": c.via.id(),
         "web": c.web,
         "folder": c.folder,
+        "codexThreadId": c.codex_thread_id,
+        "codexThreadTitle": c.codex_thread_title,
         "mode": mode_of(c).id(),
     })
 }
@@ -247,6 +275,120 @@ fn context_cmd(s: &mut Session, p: &Json) -> gridcraft_engine::Result<Json> {
     let changes = ["kind", "via", "web", "folder"].iter().any(|k| p.get(*k).is_some());
     let c = if changes { set(s, p)? } else { effective(&layer::get(s.doc()?)) };
     Ok(context_json(&c))
+}
+
+/// Restrict deep links to a technical local chat UUID, including UUID v7.
+pub fn valid_codex_thread(id: &str) -> bool {
+    id.len() == 36 && id.bytes().enumerate().all(|(i, b)| if matches!(i, 8 | 13 | 18 | 23) { b == b'-' } else { b.is_ascii_hexdigit() })
+}
+
+fn codex_origin(s: &mut Session, p: &Json) -> gridcraft_engine::Result<Json> {
+    const CMD: &str = "agent.codexOrigin";
+    let d = s.doc()?;
+    let before = layer::get(d).context.clone();
+    let mut c = before.clone().unwrap_or_else(|| from_mode(runner::mode()));
+    if let Some(id) = str_p(p, "threadId") {
+        if crate::commands::AGENT_DEPTH.with(std::cell::Cell::get) > 0 || str_p(p, "actor") == Some("agent") {
+            return Err(bad(CMD, "origin is recorded by the workbook creator, not an answering agent"));
+        }
+        if !id.is_empty() && !valid_codex_thread(id) {
+            return Err(bad(CMD, "threadId must be a local Codex chat UUID"));
+        }
+        c.codex_thread_id = id.to_ascii_lowercase();
+        c.codex_thread_title = str_p(p, "title").unwrap_or("Codex Desktop").chars().take(160).collect();
+        if id.is_empty() {
+            c.codex_thread_title.clear();
+        }
+        if before.as_ref() != Some(&c) {
+            crate::topics::record(
+                s,
+                "Codex origin chat",
+                vec![crate::topics::Part::Context(before)],
+                vec![crate::topics::Part::Context(Some(c.clone()))],
+            );
+            layer::update(s.doc()?, |l| l.context = Some(c.clone()));
+        }
+    }
+    Ok(json!({"threadId": c.codex_thread_id, "title": c.codex_thread_title}))
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct CodexRoute {
+    pub status: String,
+    pub thread_id: String,
+    pub title: String,
+    pub detail: String,
+    pub updated_at: u64,
+}
+
+static CODEX_ROUTES: Mutex<Option<HashMap<u64, CodexRoute>>> = Mutex::new(None);
+
+pub fn codex_route_for(uid: u64) -> Option<CodexRoute> {
+    CODEX_ROUTES.lock().ok()?.as_ref()?.get(&uid).filter(|r| crate::now_ms().saturating_sub(r.updated_at) < 15_000).cloned()
+}
+
+fn codex_route(s: &mut Session, p: &Json) -> gridcraft_engine::Result<Json> {
+    const CMD: &str = "agent.codexRoute";
+    let uid = s.doc()?.uid;
+    if let Some(status) = str_p(p, "status") {
+        if crate::commands::AGENT_DEPTH.with(std::cell::Cell::get) > 0 || str_p(p, "actor") == Some("agent") {
+            return Err(bad(CMD, "delivery status is maintained by the Desktop bridge"));
+        }
+        if !matches!(
+            status,
+            "matched" | "fresh" | "missing" | "unbound" | "disconnected" | "queued" | "attention" | "linked" | "linkMissing" | "fallback"
+        ) {
+            return Err(bad(CMD, "invalid delivery status"));
+        }
+        let id = str_p(p, "threadId").unwrap_or("");
+        if !id.is_empty() && !valid_codex_thread(id) {
+            return Err(bad(CMD, "invalid chat UUID"));
+        }
+        let r = CodexRoute {
+            status: status.into(),
+            thread_id: id.into(),
+            title: str_p(p, "title").unwrap_or("").chars().take(160).collect(),
+            detail: str_p(p, "detail").unwrap_or("").chars().take(1000).collect(),
+            updated_at: crate::now_ms(),
+        };
+        if let Ok(mut g) = CODEX_ROUTES.lock() {
+            let map = g.get_or_insert_with(HashMap::new);
+            map.retain(|_, old| r.updated_at.saturating_sub(old.updated_at) < 120_000);
+            map.insert(uid, r);
+        }
+    }
+    let r = codex_route_for(uid).unwrap_or_default();
+    Ok(json!({"status": r.status, "threadId": r.thread_id, "title": r.title, "detail": r.detail, "updatedAt": r.updated_at}))
+}
+
+fn codex_open_chat(s: &mut Session, p: &Json) -> gridcraft_engine::Result<Json> {
+    const CMD: &str = "agent.codexOpenChat";
+    if crate::commands::AGENT_DEPTH.with(std::cell::Cell::get) > 0 || str_p(p, "actor") == Some("agent") {
+        return Err(bad(CMD, "only a person opens the Desktop chat"));
+    }
+    let d = s.doc()?;
+    let c = effective(&layer::get(d));
+    let id = codex_route_for(d.uid).map(|r| r.thread_id).filter(|id| !id.is_empty()).unwrap_or(c.codex_thread_id);
+    if !valid_codex_thread(&id) {
+        return Err(bad(CMD, "no Desktop chat is attached yet"));
+    }
+    let url = format!("codex://threads/{id}");
+    if !cfg!(test) {
+        #[cfg(target_os = "macos")]
+        let result = std::process::Command::new("/usr/bin/open").arg(&url).spawn();
+        #[cfg(target_os = "windows")]
+        let result = std::process::Command::new("explorer.exe").arg(&url).spawn();
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+        let result = std::process::Command::new("xdg-open").arg(&url).spawn();
+        let mut child = result.map_err(|e| bad(CMD, e.to_string()))?;
+        std::thread::Builder::new()
+            .name("codex-open-chat".into())
+            .spawn(move || {
+                let _ = child.wait();
+            })
+            .map_err(|e| bad(CMD, e.to_string()))?;
+    }
+    Ok(json!({"url": url}))
 }
 
 // ---------------------------------------------------------------- is it ready?
@@ -274,6 +416,9 @@ const SETUP_FRESH_MS: u64 = 60_000;
 
 /// The last check of the person's setup; starts a new one when it is old (never in tests).
 pub fn setup() -> Setup {
+    if codex_enabled() {
+        return Setup { checked_at: crate::now_ms(), ..Setup::default() };
+    }
     let s = SETUP.lock().ok().and_then(|g| g.clone()).unwrap_or_default();
     if crate::now_ms().saturating_sub(s.checked_at) > SETUP_FRESH_MS {
         recheck();
@@ -283,7 +428,7 @@ pub fn setup() -> Setup {
 
 /// Checks the setup again now, in the background.
 pub fn recheck() {
-    if cfg!(test) || CHECKING.swap(true, std::sync::atomic::Ordering::SeqCst) {
+    if codex_enabled() || cfg!(test) || CHECKING.swap(true, std::sync::atomic::Ordering::SeqCst) {
         return;
     }
     let spawned = std::thread::Builder::new().name("agent-setup-check".into()).spawn(|| {
@@ -402,4 +547,38 @@ pub fn log_in() -> Result<(), String> {
         std::process::Command::new("x-terminal-emulator").args(["-e", &cmd]).spawn()
     };
     r.map(|_| ()).map_err(|e| format!("Couldn't open a terminal: {e}. Run `{cmd}` in one."))
+}
+
+/// Start the app-scoped worker. Its singleton check prevents duplicate model consumers.
+fn codex_connect(_s: &mut Session, p: &Json) -> gridcraft_engine::Result<Json> {
+    const CMD: &str = "agent.codexConnect";
+    if str_p(p, "actor") == Some("agent") || crate::commands::AGENT_DEPTH.with(std::cell::Cell::get) > 0 {
+        return Err(bad(CMD, "only a person connects Codex"));
+    }
+    if !codex_enabled() {
+        return Err(bad(CMD, "start the Codex edition of GridCraft"));
+    }
+    let script = std::env::var("GRIDCRAFT_CODEX_BRIDGE").map_err(|_| bad(CMD, "restart the Codex GridCraft launcher to reconnect Codex"))?;
+    if !std::path::Path::new(&script).is_file() {
+        return Err(bad(CMD, "the Codex worker script is missing"));
+    }
+    let mut cmd = std::process::Command::new("/usr/bin/python3");
+    cmd.args([script, "--instance".into(), std::process::id().to_string()]);
+    if let Some(registry) = std::env::var_os("AITOCRAFT_REGISTRY_DIR") {
+        cmd.arg("--registry").arg(registry);
+    }
+    let mut child = cmd
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .map_err(|e| bad(CMD, e.to_string()))?;
+    let pid = child.id();
+    std::thread::Builder::new()
+        .name("codex-worker".into())
+        .spawn(move || {
+            let _ = child.wait();
+        })
+        .map_err(|e| bad(CMD, e.to_string()))?;
+    Ok(json!({"pid": pid, "connecting": true}))
 }

@@ -471,7 +471,12 @@ fn context_group(st: &AgentUi, app: &SheetApp, ui: &mut Ui, t: &Tokens, p: &crat
     let (name, line, _) = kind.label();
     let r = mode_button(ui, kind, lamp, &format!("What the agent knows about this document: {name}. {line}"));
     egui::Popup::menu(&r).show(|ui| {
-        for k in [ContextKind::None, ContextKind::Cowork, ContextKind::Code] {
+        let choices: &[ContextKind] = if gridcraft_agent::context::codex_enabled() {
+            &[ContextKind::Codex, ContextKind::Off]
+        } else {
+            &[ContextKind::None, ContextKind::Cowork, ContextKind::Code, ContextKind::Codex]
+        };
+        for &k in choices {
             if mode_row(ui, k, k == kind).clicked() {
                 if k != kind {
                     acts.push(Act::Run("agent.agentContext", json!({"kind": k.id()})));
@@ -509,12 +514,35 @@ fn context_group(st: &AgentUi, app: &SheetApp, ui: &mut Ui, t: &Tokens, p: &crat
         {
             acts.push(Act::Topic(t.clone()));
         }
+        if kind == ContextKind::Codex {
+            let route = v.route.as_ref();
+            let id = route.map(|r| r.thread_id.as_str()).filter(|id| !id.is_empty()).unwrap_or(&v.ctx.codex_thread_id);
+            let title = route.map(|r| r.title.as_str()).filter(|s| !s.is_empty()).unwrap_or(&v.ctx.codex_thread_title);
+            let mismatch = route.is_some_and(|r| r.status == "fallback" || r.status == "fresh" && !v.ctx.codex_thread_id.is_empty());
+            let hint = if mismatch {
+                format!("Другой чат: {title}")
+            } else if id.is_empty() {
+                "Исходный чат не задан".into()
+            } else {
+                format!("Чат: {title}")
+            };
+            ui.add(
+                egui::Label::new(egui::RichText::new(&hint).font(theme::ui_font(10.0)).color(if mismatch { p.open } else { t.text_dim })).truncate(),
+            )
+            .on_hover_text(format!("{hint}\n{id}\n{}", v.detail));
+            if !id.is_empty()
+                && row_button(ui, Icon::Right, "Открыть чат", "Открыть фактический чат этого документа в Codex Desktop", false).clicked()
+            {
+                acts.push(Act::Run("agent.codexOpenChat", json!({})));
+            }
+        }
         if !v.steps.is_empty() {
             ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = 0.0;
                 let next = v.next();
                 let tip = next.map_or(String::new(), |s| format!("Next: {}. {}", s.label(), s.tip()));
-                if row_button(ui, Icon::Right, "Get ready", &tip, false).clicked()
+                let action_label = if kind == ContextKind::Codex { "Connect Codex" } else { "Get ready" };
+                if row_button(ui, Icon::Right, action_label, &tip, false).clicked()
                     && let Some(s) = next
                 {
                     acts.push(Act::Step(s));
@@ -563,6 +591,7 @@ fn mode_button(ui: &mut Ui, kind: gridcraft_agent::layer::ContextKind, lamp: Col
         ContextKind::None => "No\ncontext",
         ContextKind::Cowork => "Claude\nCowork",
         ContextKind::Code => "Claude\nCode",
+        ContextKind::Codex => "Codex",
         ContextKind::Off => "Agent\noff",
     };
     let font = theme::ui_font(11.0);
@@ -625,7 +654,7 @@ fn mode_sign(p: &egui::Painter, r: Rect, kind: gridcraft_agent::layer::ContextKi
                 p.circle_filled(pos2(b.center().x + (k as f32 - 1.0) * 4.5, b.center().y), 1.3, color);
             }
         }
-        ContextKind::Code => {
+        ContextKind::Code | ContextKind::Codex => {
             let b = r.shrink2(vec2(0.5, 2.5));
             p.rect_stroke(b, 3.0, s, egui::StrokeKind::Middle);
             let x = b.left() + 4.0;

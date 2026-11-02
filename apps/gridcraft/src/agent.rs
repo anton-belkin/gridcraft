@@ -71,6 +71,9 @@ pub fn control_port(agent: Option<u16>, control: Option<u16>) -> Option<u16> {
 pub fn start(agent: Option<u16>, control: Option<u16>) {
     let (Some(port), Some(control)) = (agent, control) else { return };
     gridcraft_agent_ui::install();
+    if gridcraft_agent::context::codex_enabled() {
+        gridcraft_agent::context::persist(false);
+    }
     if !MODE_FROM_FLAG.load(std::sync::atomic::Ordering::Relaxed) {
         gridcraft_agent::runner::load_saved_mode();
         // What a new document's agent knows: the last choice made in the app.

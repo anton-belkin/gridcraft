@@ -24,6 +24,9 @@ pub fn folder() -> Option<PathBuf> {
     if let Some(p) = OVERRIDE.with(|o| o.borrow().clone()) {
         return Some(p);
     }
+    if let Some(p) = std::env::var_os("AITOCRAFT_REGISTRY_DIR").filter(|p| !p.is_empty()) {
+        return Some(PathBuf::from(p));
+    }
     let home = std::env::var_os("HOME").map(PathBuf::from);
     if cfg!(target_os = "macos") {
         home.map(|h| h.join("Library/Application Support/ArtCraft/agents"))

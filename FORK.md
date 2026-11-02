@@ -11,6 +11,10 @@ before changing anything outside the agent crates.
 
 ## What is where
 
+Experimental Codex Desktop context and its native command contract are documented in
+[docs/codex-desktop.md](docs/codex-desktop.md). The application changes remain in the fork's
+agent crates and native startup; launchers and routing are a companion AItoCraft example.
+
 | Path | What | Upstream? |
 | --- | --- | --- |
 | `crates/agent/` (`gridcraft-agent`) | The layer: data model, anchors, storage in the `.xlsx`, `agent.*` commands, privacy masking, trace, sensitivity, alternatives and calculation methods (`variants.rs`), worst and best combinations and the risk matrix (`stress.rs`), safe file mode (`safe.rs`), Excel → slide links (`links.rs`), the in-app MCP server | fork only |
